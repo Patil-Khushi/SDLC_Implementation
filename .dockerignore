@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+!.env.example
+app/workspace/*
+!app/workspace/.gitkeep
+app/tests/

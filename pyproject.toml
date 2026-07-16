@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["app/tests"]
+markers = [
+    "integration: requires the exec-sandbox MCP server running (see tools/exec-sandbox). Skipped when unreachable; deselect with -m 'not integration'.",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette.testclient",
+]

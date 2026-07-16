@@ -1,0 +1,182 @@
+"""Acceptance tests for the IMP-001 subgraph (Prompt 6).
+
+Drives the compiled graph with a FakeExecutor (scripted gate outcomes) and a stubbed LLM
+gateway (canned codegen + repair replies) — no Docker, no real model. The executor is injected
+via set_executor; the module-singleton nodes use the gateway singleton, which we monkeypatch.
+"""
+
+import json
+
+import pytest
+from langgraph.types import Command
+
+from app.graph.graph import workflow
+from app.graph.router import REPAIR_CAP
+from app.graph.state import new_state
+from app.integrations.executor import FakeExecutor, set_executor
+from app.models import WorkItem
+from app.services import llm_gateway
+
+LOGIN_ITEM = WorkItem(
+    id="WI-001",
+    requirement_ids=["REQ-1"],
+    endpoints=["POST /login"],
+    tables=["users"],
+    target_files=["app/api/login.py"],
+)
+# A two-file item where the first codegen reply is INCOMPLETE (only login.py) — used to trip the
+# completeness gate (session.py missing) and exercise one repair.
+TWO_FILE_ITEM = WorkItem(
+    id="WI-010",
+    requirement_ids=["REQ-1"],
+    endpoints=["POST /login"],
+    target_files=["app/api/login.py", "app/api/session.py"],
+)
+# An item whose second target is NEVER produced by codegen OR repair — trips the gate every time.
+NEVER_ITEM = WorkItem(
+    id="WI-020",
+    requirement_ids=["REQ-1"],
+    target_files=["app/api/login.py", "app/api/never.py"],
+)
+
+# The gate is completeness-only (no compile). Codegen always writes login.py; a partial reply for
+# a multi-file item therefore leaves the gate failing until repair supplies the rest.
+CODEGEN_JSON = json.dumps({"files": [{"path": "app/api/login.py", "content": "# v1\n"}], "notes": ""})
+# Repair is shown files by their real (project-prefixed) paths and echoes them back; it supplies
+# login.py (fixed) + session.py, but never never.py.
+REPAIR_JSON = json.dumps(
+    {
+        "files": [
+            {"path": "p1/app/api/login.py", "content": "# v2 fixed\n"},
+            {"path": "p1/app/api/session.py", "content": "# session\n"},
+        ],
+        "notes": "fixed",
+    }
+)
+
+# The scaffold's 7 rendered boilerplate files (app/services/boilerplate.py) land before any
+# work-item file, on every run.
+SCAFFOLD_FILE_COUNT = 7
+
+
+@pytest.fixture(autouse=True)
+def _stub_llm(monkeypatch):
+    # codegen uses complete(); repair uses complete_with_tools() — stub both on the singleton.
+    monkeypatch.setattr(llm_gateway.llm_gateway, "complete", lambda *a, **k: CODEGEN_JSON)
+    monkeypatch.setattr(llm_gateway.llm_gateway, "complete_with_tools", lambda *a, **k: REPAIR_JSON)
+    yield
+    set_executor(None)
+
+
+def _invoke(executor: FakeExecutor, work_items: list[WorkItem], thread_id: str) -> tuple[dict, dict]:
+    """Fresh invoke; returns (state, config) so a test can resume() a paused batch_review."""
+    set_executor(executor)
+    initial = new_state(run_id="run-1", attempt=7, project_id="p1")
+    initial["work_items"] = work_items
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
+    workflow.invoke(initial, config)
+    return dict(workflow.get_state(config).values), config
+
+
+def _resume(config: dict, decision: dict) -> dict:
+    workflow.invoke(Command(resume=decision), config)
+    return dict(workflow.get_state(config).values)
+
+
+def test_incomplete_then_completed_repairs_once_pauses_for_batch_review_then_commits_once() -> None:
+    # Codegen writes only login.py; the gate fails completeness (session.py missing); repair
+    # supplies session.py; gate then passes. Exactly one repair, one deferred commit.
+    executor = FakeExecutor()
+    paused, config = _invoke(executor, [TWO_FILE_ITEM], "t-happy")
+
+    assert paused["repair_attempt"] == 1                  # exactly one repair
+    assert paused["workflow_status"] == "pending_review"  # gate-passed, but no commit yet
+    assert executor.commits == []                         # NO commit before batch-review approval
+    # the repair supplied the missing file
+    assert executor.files["p1/app/api/session.py"] == "# session\n"
+
+    final = _resume(config, {"approved": True})
+
+    assert len(executor.commits) == 1                     # committed exactly once, run-level
+    assert executor.commits[0][0] == "p1"
+    assert final["workflow_status"] == "completed"        # plan exhausted, approved, committed
+    assert final["attempt"] == 7                          # orchestrator's counter echoed unchanged
+
+
+def test_never_completing_item_stops_at_cap_needs_human_review_no_commit() -> None:
+    # never.py is never produced by codegen or repair → the completeness gate fails every pass.
+    executor = FakeExecutor()
+    final, _config = _invoke(executor, [NEVER_ITEM], "t-cap")
+
+    assert final["workflow_status"] == "needs_human_review"
+    assert final["repair_attempt"] == 3                   # == REPAIR_CAP
+    assert final["gate_result"]["checks"][0]["name"] == "files_complete"
+    assert "never.py" in final["gate_result"]["checks"][0]["stderr"]
+    assert executor.commits == []                         # NO commit on the escalation path
+
+
+def test_bad_codegen_escalates_without_reaching_gate(monkeypatch) -> None:
+    # A generation that never yields valid JSON must NOT reach the gate or produce a commit.
+    monkeypatch.setattr(llm_gateway.llm_gateway, "complete", lambda *a, **k: "not json at all")
+    executor = FakeExecutor()
+    final, _config = _invoke(executor, [LOGIN_ITEM], "t-badcodegen")
+
+    login_files = [f for f in final["generated_code"] if f.endswith("login.py")]
+    assert login_files == []                              # nothing written for the work item
+    assert final["workflow_status"] == "needs_human_review"
+    assert executor.commits == []                          # no commit
+
+
+def test_missing_target_file_fails_the_completeness_gate(monkeypatch) -> None:
+    # The model only ever returns ONE of the two required target files.
+    partial_json = json.dumps({"files": [{"path": "app/api/x.py", "content": "# only one\n"}], "notes": ""})
+    monkeypatch.setattr(llm_gateway.llm_gateway, "complete", lambda *a, **k: partial_json)
+    item = WorkItem(
+        id="WI-002",
+        requirement_ids=["REQ-2"],
+        endpoints=["POST /x"],
+        target_files=["app/api/x.py", "app/api/x_missing.py"],
+    )
+    executor = FakeExecutor()
+    final, _config = _invoke(executor, [item], "t-missing")
+
+    checks = final["gate_result"]["checks"]
+    assert len(checks) == 1                               # the gate runs files_complete and nothing else
+    assert checks[0]["name"] == "files_complete"
+    assert checks[0]["passed"] is False
+    assert "x_missing.py" in checks[0]["stderr"]
+    assert final["repair_attempt"] == REPAIR_CAP           # repair can't conjure the missing file
+    assert final["workflow_status"] == "needs_human_review"
+    assert executor.commits == []
+
+
+def test_rejection_reworks_via_repair_then_second_approval_commits() -> None:
+    executor = FakeExecutor()  # everything passes by default
+    paused, config = _invoke(executor, [LOGIN_ITEM], "t-reject")
+
+    assert paused["workflow_status"] == "pending_review"
+    assert executor.files["p1/app/api/login.py"] == "# v1\n"  # the original codegen content
+
+    reworked = _resume(config, {"approved": False, "rejections": {"WI-001": "add error handling"}})
+    assert reworked["workflow_status"] == "pending_review"    # rework re-passed the gate, back at review
+    assert executor.commits == []                             # still no commit
+    # the rejection routed straight to repair (skipping code_generator) and its fix landed
+    assert executor.files["p1/app/api/login.py"] == "# v2 fixed\n"
+
+    final = _resume(config, {"approved": True})
+    assert final["workflow_status"] == "completed"
+    assert len(executor.commits) == 1
+
+
+def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
+    executor = FakeExecutor()
+    paused, config = _invoke(executor, [LOGIN_ITEM], "t-scaffold")
+    final = _resume(config, {"approved": True}) if paused.get("workflow_status") == "pending_review" else paused
+
+    scaffold_files = [f for f in final["generated_code"] if not f.endswith("login.py")]
+    assert len(scaffold_files) == SCAFFOLD_FILE_COUNT
+    assert final["generated_code"][0] == "p1/Dockerfile"      # scaffold wrote first, in template order
+    assert f"[scaffold] rendered {SCAFFOLD_FILE_COUNT} boilerplate file(s)" in final["generation_summary"]
+    # scaffold logs, then the per-item plan, then the item's own outcome — in that order
+    summary = final["generation_summary"]
+    assert summary.index("[scaffold]") < summary.index("[plan]") < summary.index("[code_generator]")

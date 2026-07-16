@@ -1,0 +1,1 @@
+{"files": [{"path": "login_broken.py", "content": "def login(:\n    return None\n"}], "notes": "intentional syntax error so the REAL python compile check fails"}

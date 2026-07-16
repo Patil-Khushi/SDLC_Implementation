@@ -1,0 +1,1 @@
+{"files": [{"path": "p1/login_broken.py", "content": "def login():\n    return None\n"}], "notes": "repair: valid python so the REAL compile passes. Path is project-prefixed (p1) because repair writes the paths it was shown verbatim, and the test runs with project_id='p1'."}

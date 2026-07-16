@@ -1,0 +1,338 @@
+"""Code Generation Agent (IMP-001).
+
+Turns ONE work item of a Design Package into real, on-disk source file(s) in the sandbox
+workspace, then records what it produced. Single responsibility (CLAUDE.md): it generates and
+writes for ONE work item — no gate/compile logic, no git, no routing, no cross-item retries
+(the graph loops over items and runs the fixed gate after each).
+
+Rules honored here:
+- ``self.llm`` (the gateway) is the ONLY model access — no provider SDK import.
+- All writes go through the injected ``Executor`` — never open files or shell out directly.
+- Writes only the fields this agent owns: ``generated_code``, ``generation_summary``, and its
+  own ``generation_metrics`` keys (files_produced, seconds_per_item). It never touches
+  compile_passes/compile_failures/repairs_used, and echoes run_id/attempt unchanged.
+- Before calling the LLM, it logs a deterministic ``[plan]`` line to ``generation_summary``
+  (target files + requirement/endpoint/table/screen coverage + which design-pack context
+  sections were used) — pure logging, not a gate decision, so it stays "one agent = one job".
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from typing import Any
+
+from app.agents.base import BaseAgent
+from app.graph.state import WorkflowState
+from app.integrations.executor import Executor, get_executor
+from app.models import GenerationSummary, WorkItem
+from app.services.llm_gateway import LLMGateway
+
+
+class CodeGeneratorAgent(BaseAgent):
+    name = "code_generator"
+
+    def __init__(self, executor: Executor | None = None, llm: LLMGateway | None = None) -> None:
+        super().__init__()
+        if llm is not None:  # allow test/DI override of the gateway singleton
+            self.llm = llm
+        self._executor = executor
+
+    def _resolve_executor(self) -> Executor:
+        return self._executor if self._executor is not None else get_executor()
+
+    def execute(self, state: WorkflowState) -> WorkflowState:
+        work_item = state.get("current_work_item")
+        if work_item is None:
+            # Nothing to generate this step. The graph sets current_work_item per iteration
+            # (built in a later prompt); with none, this agent is a clean no-op.
+            return state
+
+        design_package = state.get("design_package") or {}
+        context, sections_used = self._assemble_context(work_item, design_package)
+        self._append_plan(state, work_item, sections_used)
+        system = self._load_prompt("code_generation")
+
+        started = time.perf_counter()
+        files = self._generate_files(work_item, context, system)
+        elapsed = round(time.perf_counter() - started, 3)
+
+        if files is None:
+            self._record_failure(state, work_item, elapsed)
+            state["codegen_ok"] = False  # signals the router to escalate (no gate/commit)
+            return state
+
+        written = self._write_files(self._resolve_executor(), state, work_item, files)
+        self._record_success(state, work_item, written, elapsed)
+        state["codegen_ok"] = True
+        state["workflow_status"] = "code_generated"
+        return state
+
+    # -- generation -----------------------------------------------------------
+
+    def _generate_files(self, work_item: WorkItem, context: str, system: str) -> list[dict[str, str]] | None:
+        """Ask the model for the {"files":[...]} JSON; re-ask once on parse failure."""
+        prompt = self._build_prompt(work_item, context)
+        parsed, error = self._parse(self.llm.complete(prompt=prompt, system=system))
+        if parsed is None:
+            retry = (
+                f"{prompt}\n\nYour previous reply was not valid JSON matching "
+                f'{{"files":[{{"path":...,"content":...}}]}}. Error: {error}. '
+                "Reply with STRICT JSON only — no prose, no code fences."
+            )
+            parsed, error = self._parse(self.llm.complete(prompt=retry, system=system))
+        return parsed
+
+    @staticmethod
+    def _build_prompt(work_item: WorkItem, context: str) -> str:
+        targets = "\n".join(f"- {p}" for p in work_item.target_files) or "- (none specified)"
+        return (
+            f"Work item: {work_item.id}\n"
+            f"Covers requirements: {', '.join(work_item.requirement_ids) or '-'}\n"
+            f"Endpoints: {', '.join(work_item.endpoints) or '-'}\n"
+            f"Tables: {', '.join(work_item.tables) or '-'}\n"
+            f"Screens: {', '.join(work_item.screens) or '-'}\n"
+            f"Target files (produce ONLY these):\n{targets}\n\n"
+            f"Context (only the cited slices):\n{context}\n\n"
+            'Respond with STRICT JSON only: {"files":[{"path":...,"content":...}],"notes":...}'
+        )
+
+    @staticmethod
+    def _parse(raw: str) -> tuple[list[dict[str, str]] | None, str]:
+        """Parse the model reply into a list of {path, content}. Returns (files, error)."""
+        obj = _extract_json(raw)
+        if not isinstance(obj, dict):
+            return None, "no JSON object found in reply"
+        files = obj.get("files")
+        if not isinstance(files, list) or not files:
+            return None, "'files' must be a non-empty array"
+        clean: list[dict[str, str]] = []
+        for entry in files:
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("path"), str)
+                or not isinstance(entry.get("content"), str)
+            ):
+                return None, "each file needs string 'path' and 'content'"
+            clean.append({"path": entry["path"], "content": entry["content"]})
+        return clean, ""
+
+    # -- writing + recording --------------------------------------------------
+
+    def _write_files(
+        self, executor: Executor, state: WorkflowState, work_item: WorkItem, files: list[dict[str, str]]
+    ) -> list[str]:
+        project_dir = state.get("project_id") or state.get("run_id") or "project"
+        generated = list(state.get("generated_code", []))
+        written: list[str] = []
+        for entry in files:
+            path = f"{project_dir}/{entry['path'].lstrip('/')}"
+            executor.write_file(path, entry["content"])
+            written.append(path)
+            generated.append(path)
+        state["generated_code"] = generated
+        return written
+
+    def _record_success(
+        self, state: WorkflowState, work_item: WorkItem, written: list[str], seconds: float
+    ) -> None:
+        # Build the per-item summary (compile_passed stays None — the gate fills it later).
+        summary = GenerationSummary(work_item_id=work_item.id, files_produced=written)
+        line = (
+            f"[code_generator] {summary.work_item_id}: {len(summary.files_produced)} file(s) "
+            f"[{', '.join(summary.files_produced)}] | "
+            f"reqs={','.join(work_item.requirement_ids) or '-'} "
+            f"endpoints={','.join(work_item.endpoints) or '-'} "
+            f"tables={','.join(work_item.tables) or '-'} "
+            f"screens={','.join(work_item.screens) or '-'}"
+        )
+        self._append_summary(state, line)
+        self._bump_metrics(state, work_item.id, files=len(written), seconds=seconds)
+
+    def _record_failure(self, state: WorkflowState, work_item: WorkItem, seconds: float) -> None:
+        # No files written, no partial state; record the failure and its timing only.
+        self._append_summary(
+            state, f"[code_generator] {work_item.id}: FAILED — model did not return valid JSON (0 files)"
+        )
+        self._bump_metrics(state, work_item.id, files=0, seconds=seconds)
+
+    @staticmethod
+    def _append_summary(state: WorkflowState, line: str) -> None:
+        state["generation_summary"] = (state.get("generation_summary") or "") + line + "\n"
+
+    @staticmethod
+    def _bump_metrics(state: WorkflowState, work_item_id: str, *, files: int, seconds: float) -> None:
+        # Own only files_produced + seconds_per_item. compile_passes/failures/repairs_used are
+        # the gate/repair nodes' fields — untouched here.
+        metrics: dict[str, Any] = dict(state.get("generation_metrics") or {})
+        metrics["files_produced"] = int(metrics.get("files_produced", 0)) + files
+        per_item: dict[str, float] = dict(metrics.get("seconds_per_item") or {})
+        per_item[work_item_id] = seconds
+        metrics["seconds_per_item"] = per_item
+        state["generation_metrics"] = metrics
+
+    # -- context assembly (tight slices only, not whole files) ----------------
+
+    def _assemble_context(self, work_item: WorkItem, design_package: dict[str, Any]) -> tuple[str, list[str]]:
+        """Return (joined context text, names of the sections that were actually populated).
+
+        The names feed the ``[plan]`` summary line so a human can see which design-pack slices
+        this item's generation was grounded in, before the LLM is even called.
+        """
+        sections: list[tuple[str, str]] = []
+
+        skill = _artifact_text(design_package, "SKILL.md", "style-guide/SKILL.md")
+        if skill:
+            sections.append(("Conventions", "## Conventions (style-guide)\n" + skill.strip()))
+
+        if work_item.endpoints or work_item.tables:  # backend
+            paths = _openapi_slice(_artifact(design_package, "openapi.yaml", "openapi.json"), work_item.endpoints)
+            if paths:
+                sections.append(("API", "## API — cited OpenAPI paths\n" + paths))
+            tables = _schema_slice(_artifact_text(design_package, "schema.sql"), work_item.tables)
+            if tables:
+                sections.append(("DB", "## DB — cited tables\n" + tables))
+
+        if work_item.screens:  # frontend
+            routes = _routes_slice(_artifact(design_package, "routes.json"), work_item.screens)
+            if routes:
+                sections.append(("Routes", "## Routes — cited\n" + routes))
+            tokens = _artifact(design_package, "tokens.json")
+            if tokens is not None:
+                sections.append(("Design tokens", "## Design tokens\n" + _as_text(tokens)))
+            mockup = _mockup_slice(_artifact_text(design_package, "mockup.html"), work_item.screens)
+            if mockup:
+                sections.append(("Mockup", "## Mockup — cited components\n" + mockup))
+
+        rules = _validation_slice(
+            _artifact(design_package, "validation-rules.json"),
+            [*work_item.endpoints, *work_item.screens],
+        )
+        if rules:
+            sections.append(("Validation rules", "## Validation rules — COPY MESSAGES VERBATIM\n" + rules))
+
+        text = "\n\n".join(body for _, body in sections) if sections else "(no design-pack context found for this item)"
+        return text, [name for name, _ in sections]
+
+    def _append_plan(self, state: WorkflowState, work_item: WorkItem, sections_used: list[str]) -> None:
+        """Log what this item is about to produce and why, BEFORE calling the LLM."""
+        targets = ", ".join(work_item.target_files) or "(none specified)"
+        line = (
+            f"[plan] {work_item.id}: will produce {targets} | "
+            f"reqs={','.join(work_item.requirement_ids) or '-'} "
+            f"endpoints={','.join(work_item.endpoints) or '-'} "
+            f"tables={','.join(work_item.tables) or '-'} "
+            f"screens={','.join(work_item.screens) or '-'} | "
+            f"context={','.join(sections_used) or '-'}"
+        )
+        self._append_summary(state, line)
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def _extract_json(text: str) -> Any:
+    """Best-effort JSON object extraction from a model reply (handles fences / stray prose)."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z0-9]*", "", stripped).strip()
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].strip()
+    try:
+        return json.loads(stripped)
+    except (ValueError, TypeError):
+        pass
+    start, end = stripped.find("{"), stripped.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(stripped[start : end + 1])
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _artifact(design_package: dict[str, Any], *names: str) -> Any:
+    """Return the first present artifact among ``names`` (case-insensitive)."""
+    lowered = {k.lower(): v for k, v in design_package.items()}
+    for name in names:
+        if name in design_package:
+            return design_package[name]
+        if name.lower() in lowered:
+            return lowered[name.lower()]
+    return None
+
+
+def _artifact_text(design_package: dict[str, Any], *names: str) -> str:
+    value = _artifact(design_package, *names)
+    return value if isinstance(value, str) else ("" if value is None else _as_text(value))
+
+
+def _as_text(value: Any) -> str:
+    return value if isinstance(value, str) else json.dumps(value, indent=2, sort_keys=True)
+
+
+def _openapi_slice(openapi: Any, endpoints: list[str]) -> str:
+    if not endpoints:
+        return ""
+    if isinstance(openapi, dict) and isinstance(openapi.get("paths"), dict):
+        picked: dict[str, Any] = {}
+        for endpoint in endpoints:
+            method, _, path = endpoint.partition(" ")
+            path = path or method
+            item = openapi["paths"].get(path)
+            if isinstance(item, dict):
+                sub = item.get(method.lower())
+                picked.setdefault(path, {})[method.lower()] = sub if sub is not None else item
+        if picked:
+            return json.dumps(picked, indent=2, sort_keys=True)
+    if isinstance(openapi, str):
+        wanted = {e.partition(" ")[2] or e for e in endpoints}
+        lines = [ln for ln in openapi.splitlines() if any(w and w in ln for w in wanted)]
+        return "\n".join(lines)
+    return ""
+
+
+def _schema_slice(schema_sql: str, tables: list[str]) -> str:
+    if not schema_sql or not tables:
+        return ""
+    blocks: list[str] = []
+    for table in tables:
+        match = re.search(
+            rf"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?{re.escape(table)}[`\"]?\b.*?;",
+            schema_sql,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            blocks.append(match.group(0).strip())
+    return "\n\n".join(blocks)
+
+
+def _routes_slice(routes: Any, screens: list[str]) -> str:
+    if routes is None or not screens:
+        return ""
+    if isinstance(routes, dict):
+        picked = {k: v for k, v in routes.items() if any(s.lower() in str(k).lower() for s in screens)}
+        return json.dumps(picked, indent=2, sort_keys=True) if picked else ""
+    if isinstance(routes, list):
+        picked_list = [r for r in routes if any(s.lower() in json.dumps(r).lower() for s in screens)]
+        return json.dumps(picked_list, indent=2, sort_keys=True) if picked_list else ""
+    return ""
+
+
+def _mockup_slice(mockup_html: str, screens: list[str]) -> str:
+    if not mockup_html or not screens:
+        return ""
+    lines = [ln for ln in mockup_html.splitlines() if any(s.lower() in ln.lower() for s in screens)]
+    return "\n".join(lines)
+
+
+def _validation_slice(rules: Any, keys: list[str]) -> str:
+    if rules is None or not keys:
+        return ""
+    if isinstance(rules, dict):
+        picked = {k: v for k, v in rules.items() if any(key.lower() in str(k).lower() for key in keys)}
+        return json.dumps(picked, indent=2, sort_keys=True) if picked else ""
+    if isinstance(rules, str):
+        return rules
+    return ""

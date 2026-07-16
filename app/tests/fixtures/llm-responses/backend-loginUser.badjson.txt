@@ -1,0 +1,1 @@
+this is not valid JSON { "files": [  broken , , ] }  <-- deliberately malformed so parsing fails

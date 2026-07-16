@@ -1,0 +1,360 @@
+{
+  "work_items": [
+    {
+      "id": "backend-listProducts",
+      "requirement_ids": [
+        "REQ-003"
+      ],
+      "endpoints": [
+        "GET /products"
+      ],
+      "tables": [
+        "products"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/products/products.controller.ts",
+        "src/products/products.service.ts",
+        "src/products/dto/ListProductsDto.ts",
+        "src/products/product.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-loginUser",
+      "requirement_ids": [
+        "REQ-002"
+      ],
+      "endpoints": [
+        "POST /auth/login"
+      ],
+      "tables": [
+        "users"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/auth/auth.controller.ts",
+        "src/auth/auth.service.ts",
+        "src/auth/dto/LoginUserDto.ts",
+        "src/users/user.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-registerUser",
+      "requirement_ids": [
+        "REQ-001"
+      ],
+      "endpoints": [
+        "POST /auth/register"
+      ],
+      "tables": [
+        "users"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/auth/auth.controller.ts",
+        "src/auth/auth.service.ts",
+        "src/auth/dto/RegisterUserDto.ts",
+        "src/users/user.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-getProduct",
+      "requirement_ids": [
+        "REQ-004"
+      ],
+      "endpoints": [
+        "GET /products/{productId}"
+      ],
+      "tables": [
+        "products"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/products/products.controller.ts",
+        "src/products/products.service.ts",
+        "src/products/dto/GetProductDto.ts",
+        "src/products/product.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-addCartItem",
+      "requirement_ids": [
+        "REQ-005"
+      ],
+      "endpoints": [
+        "POST /cart/items"
+      ],
+      "tables": [
+        "carts",
+        "cart_items"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/cart/cart.controller.ts",
+        "src/cart/cart.service.ts",
+        "src/cart/dto/AddCartItemDto.ts",
+        "src/cart/cart.entity.ts",
+        "src/cart/cart-item.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-getCart",
+      "requirement_ids": [
+        "REQ-006"
+      ],
+      "endpoints": [
+        "GET /cart"
+      ],
+      "tables": [
+        "carts"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/cart/cart.controller.ts",
+        "src/cart/cart.service.ts",
+        "src/cart/dto/GetCartDto.ts",
+        "src/cart/cart.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-updateCartItem",
+      "requirement_ids": [
+        "REQ-007"
+      ],
+      "endpoints": [
+        "PATCH /cart/items/{itemId}"
+      ],
+      "tables": [
+        "carts",
+        "cart_items"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/cart/cart.controller.ts",
+        "src/cart/cart.service.ts",
+        "src/cart/dto/UpdateCartItemDto.ts",
+        "src/cart/cart.entity.ts",
+        "src/cart/cart-item.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-removeCartItem",
+      "requirement_ids": [
+        "REQ-008"
+      ],
+      "endpoints": [
+        "DELETE /cart/items/{itemId}"
+      ],
+      "tables": [
+        "carts",
+        "cart_items"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/cart/cart.controller.ts",
+        "src/cart/cart.service.ts",
+        "src/cart/dto/RemoveCartItemDto.ts",
+        "src/cart/cart.entity.ts",
+        "src/cart/cart-item.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-placeOrder",
+      "requirement_ids": [
+        "REQ-009"
+      ],
+      "endpoints": [
+        "POST /orders"
+      ],
+      "tables": [
+        "orders"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/orders/orders.controller.ts",
+        "src/orders/orders.service.ts",
+        "src/orders/dto/PlaceOrderDto.ts",
+        "src/orders/order.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-getOrder",
+      "requirement_ids": [
+        "REQ-011"
+      ],
+      "endpoints": [
+        "GET /orders/{orderId}"
+      ],
+      "tables": [
+        "orders"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/orders/orders.controller.ts",
+        "src/orders/orders.service.ts",
+        "src/orders/dto/GetOrderDto.ts",
+        "src/orders/order.entity.ts"
+      ]
+    },
+    {
+      "id": "backend-listOrders",
+      "requirement_ids": [
+        "REQ-010"
+      ],
+      "endpoints": [
+        "GET /orders"
+      ],
+      "tables": [
+        "orders"
+      ],
+      "screens": [],
+      "target_files": [
+        "src/orders/orders.controller.ts",
+        "src/orders/orders.service.ts",
+        "src/orders/dto/ListOrdersDto.ts",
+        "src/orders/order.entity.ts"
+      ]
+    },
+    {
+      "id": "frontend-home",
+      "requirement_ids": [
+        "REQ-003"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "Home"
+      ],
+      "target_files": [
+        "src/pages/HomePage.tsx",
+        "src/api/products.ts"
+      ]
+    },
+    {
+      "id": "frontend-login",
+      "requirement_ids": [
+        "REQ-002"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "Login"
+      ],
+      "target_files": [
+        "src/pages/LoginPage.tsx",
+        "src/api/auth.ts"
+      ]
+    },
+    {
+      "id": "frontend-register",
+      "requirement_ids": [
+        "REQ-001"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "Register"
+      ],
+      "target_files": [
+        "src/pages/RegisterPage.tsx",
+        "src/api/auth.ts"
+      ]
+    },
+    {
+      "id": "frontend-products",
+      "requirement_ids": [
+        "REQ-003"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "Products"
+      ],
+      "target_files": [
+        "src/pages/ProductsPage.tsx",
+        "src/api/products.ts"
+      ]
+    },
+    {
+      "id": "frontend-product-details",
+      "requirement_ids": [
+        "REQ-004",
+        "REQ-005"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "Product Details"
+      ],
+      "target_files": [
+        "src/pages/ProductDetailsPage.tsx",
+        "src/api/products.ts",
+        "src/api/cart.ts"
+      ]
+    },
+    {
+      "id": "frontend-cart",
+      "requirement_ids": [
+        "REQ-006",
+        "REQ-007",
+        "REQ-008"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "Cart"
+      ],
+      "target_files": [
+        "src/pages/CartPage.tsx",
+        "src/api/cart.ts"
+      ]
+    },
+    {
+      "id": "frontend-checkout",
+      "requirement_ids": [
+        "REQ-006",
+        "REQ-009"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "Checkout"
+      ],
+      "target_files": [
+        "src/pages/CheckoutPage.tsx",
+        "src/api/cart.ts",
+        "src/api/orders.ts"
+      ]
+    },
+    {
+      "id": "frontend-order-confirmation",
+      "requirement_ids": [
+        "REQ-011"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "Order Confirmation"
+      ],
+      "target_files": [
+        "src/pages/OrderConfirmationPage.tsx",
+        "src/api/orders.ts"
+      ]
+    },
+    {
+      "id": "frontend-my-orders",
+      "requirement_ids": [
+        "REQ-010"
+      ],
+      "endpoints": [],
+      "tables": [],
+      "screens": [
+        "My Orders"
+      ],
+      "target_files": [
+        "src/pages/MyOrdersPage.tsx",
+        "src/api/orders.ts"
+      ]
+    }
+  ]
+}
