@@ -499,58 +499,107 @@ def packs() -> dict[str, list[str]]:
 
 @app.post("/api/run")
 def run(req: RunRequest) -> dict[str, Any]:
-    """Run the REAL code-generator agent graph (scaffold → generate → gate → auto-commit).
+    """FEATURE-WISE build for the UI: scaffold committed to ``main``, then each user story built
+    (Frontend → Backend → Database → Integration → Testing) and committed as ``feat(US-0X): <title>``
+    on ``dev``.
 
-    Writes to generated/<project> (so publish targets the same folder). In real mode this uses
-    the real Claude gateway (ANTHROPIC_FOUNDRY_API_KEY). Runs to completion with no human-in-the-
-    loop: a completed plan auto-commits; a repair-cap failure ends flagged needs_human_review.
+    Commits are LOCAL here (the GitHub repo doesn't exist yet); ``/api/publish`` creates the repo
+    and pushes BOTH ``main`` and ``dev``. In real mode this uses the real Claude gateway; in
+    dry-run a canned stub stands in per layer.
     """
     pack_dir = _resolve_pack_dir(req.pack)
     if pack_dir is None:
         raise HTTPException(404, f"no design package found for {req.pack!r}")
-
-    design_package = _load_pack(pack_dir)
-    work_items = build_plan(pack_dir)
+    if not (pack_dir / "user-features.md").exists():
+        raise HTTPException(400, f"pack {req.pack!r} has no user-features.md (needed for feature-wise commits)")
+    stories = fc._parse_stories(pack_dir)
+    if not stories:
+        raise HTTPException(400, f"no user stories (## US-0X — Title) in {req.pack}/user-features.md")
     if req.only:
         needle = req.only.lower()
-        work_items = [w for w in work_items if needle in w.id.lower()]
+        stories = [s for s in stories if needle in s[0].lower()]
 
-    project = req.project  # files land in generated/<project>; publish uses the same
-    thread = f"{project}-{len(RUNS) + 1}"  # unique checkpointer key per run
-    executor = _make_executor(project)
-    config = {"configurable": {"thread_id": thread}, "recursion_limit": 1000}
-    RUNS[thread] = {"executor": executor, "config": config, "item_files": {}}
+    project = req.project
+    project_dir = OUT_DIR / project
+    base_branch, branch = "main", "dev"
 
-    set_executor(executor)
-    initial = new_state(
-        run_id=thread, attempt=0, project_id=project,
-        design_package=design_package, work_items=work_items,
-    )
+    # fresh working copy on disk
+    if project_dir.exists():
+        fc._force_rmtree(project_dir)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    fc._git(["init"], project_dir)
+    fc._git(["config", "user.email", "codegen@local"], project_dir, check=False)
+    fc._git(["config", "user.name", "IMP-001 codegen"], project_dir, check=False)
+
+    def _commit(message: str) -> str:
+        fc._git(["add", "-A"], project_dir)
+        if fc._run(["git", "diff", "--cached", "--quiet"], project_dir).returncode == 0:
+            return ""
+        fc._git(["commit", "-m", message], project_dir)
+        return fc._run(["git", "rev-parse", "--short", "HEAD"], project_dir).stdout.strip()
+
+    events: list[dict[str, Any]] = []
     try:
-        workflow.invoke(initial, config)
+        # 1) scaffold ONLY on main
+        fc._checkout_branch(project_dir, base_branch)
+        scaffold_files: list[str] = []
+        for e in render_scaffold(project, _load_pack(pack_dir)):
+            dest = project_dir / e["path"].lstrip("/")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(e["content"], encoding="utf-8")
+            scaffold_files.append(e["path"])
+        sha0 = _commit("chore: initial project scaffold")
+        events.append({"kind": "scaffold", "text": f"scaffold committed to {base_branch} ({sha0 or '-'})",
+                       "files": scaffold_files})
+
+        # 2) features on dev — one commit per story, layers in order
+        fc._ensure_feature_branch(project_dir, branch)
+        current: dict[str, str] = {}
+        for sid, title, body in stories:
+            feat_files: list[str] = []
+            for key, label, instruction in fc._LAYERS:
+                if MODE == "real":
+                    ctx = fc._design_context(pack_dir, fc._LAYER_CONTEXT[key])
+                    lf = fc._generate(
+                        llm_gateway.llm_gateway,
+                        fc._layer_prompt(ctx, current, sid, title, body, label, instruction),
+                    )
+                else:  # dry-run: canned stub per layer so the flow is demoable with no API key
+                    lf = [{"path": f"frontend/src/features/{sid}.{key}.tsx",
+                           "content": _stub_content(f"{sid}_{key}.tsx")}]
+                for f in lf:
+                    rel = f["path"].lstrip("/")
+                    dest = project_dir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_text(f["content"], encoding="utf-8")
+                    current[rel] = f["content"]
+                    feat_files.append(rel)
+            sha = _commit(f"feat({sid}): {title}")
+            events.append({"kind": "item", "id": sid, "plan": title, "files": feat_files,
+                           "sha": sha, "failed": False})
     except Exception as exc:  # noqa: BLE001 - surface LLM/exec errors to the chat instead of a 500 page
         raise HTTPException(502, f"run failed ({type(exc).__name__}): {exc}") from exc
-    snap = _snapshot(thread, workflow.get_state(config).values)
-    snap["project"] = project
-    snap["out_dir"] = str(OUT_DIR / project)
-    return snap
+
+    RUNS[project] = {"project_dir": str(project_dir), "base_branch": base_branch, "branch": branch}
+    git_log = fc._run(["git", "log", "--all", "--oneline", "--decorate"], project_dir).stdout
+    return {
+        "run_id": project, "project": project, "status": "completed",
+        "branches": [base_branch, branch], "events": events,
+        "file_count": sum(len(e.get("files", [])) for e in events),
+        "item_count": len(stories), "out_dir": str(project_dir), "git_log": git_log,
+    }
 
 
 @app.post("/api/review")
 def review(req: ReviewRequest) -> dict[str, Any]:
-    """No-op kept for UI compatibility: human review was removed, so /api/run already committed.
-
-    There is no interrupt to resume — this just returns the finished run's snapshot so older UIs
-    that still call it keep working.
+    """No-op kept for UI compatibility: human review was removed and /api/run already committed the
+    scaffold (main) + each feature (dev) locally. There is nothing to resume.
     """
     run = RUNS.get(req.run_id)
     if run is None:
         raise HTTPException(404, f"no active run {req.run_id!r}")
-    snap = _snapshot(req.run_id, workflow.get_state(run["config"]).values)
-    snap["reworked"] = {}
-    if MODE == "real":
-        snap["out_dir"] = str(OUT_DIR / req.run_id)
-    return snap
+    return {"run_id": req.run_id, "status": "completed", "reworked": {},
+            "out_dir": run.get("project_dir", str(OUT_DIR / req.run_id))}
 
 
 @app.post("/api/publish")
@@ -643,19 +692,25 @@ def publish(req: PublishRequest) -> dict[str, Any]:
             "message": f"No generated project at {proj_dir} — run the code generator first.",
         }
 
-    # 5) REAL: commit (idempotent) + create the GitHub repo + push
-    print("[publish] committing locally...", flush=True)
+    # 5) REAL: create the GitHub repo + push BOTH main (scaffold) and dev (features).
+    #    /api/run already made the feature-wise commits locally; here we only create + push.
+    proj_dir = OUT_DIR / req.project
+    env = {**os.environ, "GH_TOKEN": token, "GITHUB_TOKEN": token} if token else None
+    print(f"[publish] creating repo {repo} (private={req.visibility != 'public'}) + pushing main & dev...", flush=True)
     ex = LocalDiskExecutor(OUT_DIR)
-    commit_res = ex.git_commit(req.project, f"IMP-001 publish: {name}")
-    print(f"[publish] commit -> committed={commit_res.committed} sha={commit_res.sha}", flush=True)
-    print(f"[publish] running gh repo create for {repo} (private={req.visibility != 'public'})...", flush=True)
+    # ex.publish creates the repo, sets origin, and pushes the CURRENT branch (dev).
     res = ex.publish(req.project, repo, private=(req.visibility != "public"), token=token or None)
-    print(f"[publish] gh/git result -> exit={res.exit_code}\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}", flush=True)
-    if res.exit_code == 0:
-        print(f"[publish] SUCCESS -> https://github.com/{repo}", flush=True)
-        return {"ok": True, "url": f"https://github.com/{repo}", "repoName": name, "owner": owner}
-    print("[publish] FAILED (push-failed)", flush=True)
-    return {"ok": False, "outcome": "push-failed", "message": (res.stderr or res.stdout or "Push failed")[:400]}
+    print(f"[publish] create+push(dev) -> exit={res.exit_code}\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}", flush=True)
+    if res.exit_code != 0:
+        print("[publish] FAILED (push-failed)", flush=True)
+        return {"ok": False, "outcome": "push-failed", "message": (res.stderr or res.stdout or "Push failed")[:400]}
+    # Ensure BOTH branches are on the remote (ex.publish pushed only the current branch).
+    for br in ("main", "dev"):
+        p = subprocess.run(["git", "push", "-u", "origin", br], cwd=str(proj_dir),
+                           capture_output=True, text=True, env=env)
+        print(f"[publish] push {br} -> exit={p.returncode} {(p.stderr or p.stdout).strip()[:150]}", flush=True)
+    print(f"[publish] SUCCESS -> https://github.com/{repo}", flush=True)
+    return {"ok": True, "url": f"https://github.com/{repo}", "repoName": name, "owner": owner}
 
 
 @app.post("/api/suggest-name")
@@ -797,10 +852,11 @@ def file(run_id: str, path: str) -> str:
     run = RUNS.get(run_id)
     if run is None:
         raise HTTPException(404, "run not found")
-    try:
-        return run["executor"].read_file(path)
-    except FileNotFoundError as exc:
-        raise HTTPException(404, f"file not found: {path}") from exc
+    base = Path(run.get("project_dir") or (OUT_DIR / run_id))
+    for candidate in (base / path, OUT_DIR / path):  # tolerate a project-prefixed path
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    raise HTTPException(404, f"file not found: {path}")
 
 
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
