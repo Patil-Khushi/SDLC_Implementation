@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import re
 import subprocess
 import sys
@@ -42,22 +44,39 @@ from pydantic import BaseModel
 _IMPL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_IMPL_DIR))  # so `app.*` imports resolve
 
-from langgraph.types import Command  # noqa: E402
-
+from app.config.settings import get_settings  # noqa: E402
 from app.graph.graph import workflow  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, set_executor  # noqa: E402
+from app.services import design_pack  # noqa: E402
 from app.services import llm_gateway  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
 from scripts.local_executor import LocalDiskExecutor  # noqa: E402
+from app.services.boilerplate import render_scaffold  # noqa: E402
+from scripts import feature_commit as fc  # noqa: E402  (feature-wise generation helpers)
 
-_REPO_ROOT = _IMPL_DIR.parents[1]
+def _find_repo_root(start: Path) -> Path:
+    """Repo root = nearest ancestor (including ``start``) that contains a ``fixtures/`` dir.
+
+    Robust to layout: works whether the service lives at ``<root>/SDLC_Implementation``
+    (standalone) or ``<root>/services/implementation`` (monorepo). Falls back to ``start``'s
+    parent when no ``fixtures/`` is found, preserving the previous default shape.
+    """
+    for candidate in (start, *start.parents):
+        if (candidate / "fixtures").is_dir():
+            return candidate
+    return start.parent
+
+
+_REPO_ROOT = _find_repo_root(_IMPL_DIR)
 _FIXTURES_DIR = _REPO_ROOT / "fixtures"
 _UI_FILE = Path(__file__).resolve().parent / "demo_ui.html"
 
-# Set by main(): "dry-run" | "real", and where real-mode files are written.
+# Set by main(): "dry-run" | "real", and where real-mode files are written. Generated projects go
+# OUTSIDE the SDLC repo (fc._DEFAULT_OUT_DIR) so their per-project git repos never nest in the main
+# tree; override with --out-dir.
 MODE = "dry-run"
-OUT_DIR = _IMPL_DIR / "generated"
+OUT_DIR = fc._DEFAULT_OUT_DIR
 
 
 # --------------------------------------------------------------------------- canned LLM (dry run)
@@ -204,21 +223,107 @@ class PlanRequest(BaseModel):
 
 
 class PublishRequest(BaseModel):
-    repoName: str
-    visibility: str = "private"  # "private" | "public"
-    owner: str = ""  # blank → authenticated account
+    repoName: str = ""  # blank → the agent suggests a name from the built app
+    visibility: str = "public"  # "private" | "public" (the demo publishes public by default)
+    owner: str = ""  # blank → GITHUB_OWNER from .env, else the token's own account
     project: str = "ecommerce"  # which generated project dir to publish (under OUT_DIR)
+    token: str = ""  # optional PAT override; blank → GITHUB_PAT from .env
 
 
-def _gh(*args: str) -> tuple[int, str, str]:
-    """Run a gh CLI command; return (exit_code, stdout, stderr)."""
+class SuggestNameRequest(BaseModel):
+    project: str = "app"  # generated project dir the agent names a repo for
+
+
+class RunFeatureRequest(BaseModel):
+    """One user story of a feature-wise run. The UI calls this once per story (index 0..N-1)."""
+
+    pack: str
+    project: str = "app"
+    index: int = 0
+    repoName: str = ""
+    owner: str = ""  # blank → authenticated account
+    visibility: str = "private"  # "private" | "public"
+    push: bool = False
+    reset: bool = True  # on index 0, start the project dir fresh (clean feature history)
+
+
+def _gh(*args: str, token: str = "") -> tuple[int, str, str]:
+    """Run a gh CLI command; return (exit_code, stdout, stderr).
+
+    When ``token`` is given, run gh AS that Personal Access Token's owner by setting
+    ``GH_TOKEN``/``GITHUB_TOKEN`` for this call — gh then ignores the keyring login, so
+    auth/owner/name checks all reflect the token's account (not whoever gh is logged into).
+    """
+    env = {**os.environ, "GH_TOKEN": token, "GITHUB_TOKEN": token} if token else None
     try:
-        r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120)
+        r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120, env=env)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except FileNotFoundError:
         return 127, "", "gh CLI not found"
     except subprocess.TimeoutExpired:
         return 124, "", "gh timed out"
+
+
+def _env_token() -> str:
+    """The publish PAT from .env (GITHUB_PAT). Blank → fall back to the gh keyring login."""
+    return (get_settings().github_pat or "").strip()
+
+
+def _env_owner() -> str:
+    """The account/org to own the repo (GITHUB_OWNER). Blank → the token's own login."""
+    return (get_settings().github_owner or "").strip()
+
+
+def _slug(text: str) -> str:
+    """A safe kebab-case GitHub repo name fragment."""
+    s = re.sub(r"[^A-Za-z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return s[:60] or "app"
+
+
+def _suggest_repo_name(project: str) -> str:
+    """Agent-suggested repo name for the app that was built.
+
+    Asks the LLM for a short, descriptive kebab-case name using the generated file list as
+    context; falls back to a slug of the project folder name if the LLM is unavailable.
+    """
+    fallback = _slug(project)
+    proj_dir = OUT_DIR / project
+    files: list[str] = []
+    if proj_dir.exists():
+        for p in sorted(proj_dir.rglob("*")):
+            if p.is_file() and ".git" not in p.parts:
+                files.append(str(p.relative_to(proj_dir)).replace("\\", "/"))
+            if len(files) >= 40:
+                break
+    try:
+        system = (
+            "You name GitHub repositories. Reply with ONLY a repository name in kebab-case "
+            "(lowercase letters, digits and hyphens; 2-4 words; no spaces, quotes or explanation)."
+        )
+        prompt = (
+            f"Project folder: {project}\n"
+            "Files produced:\n" + ("\n".join(f"- {f}" for f in files) or "- (none)")
+            + "\n\nSuggest one concise, descriptive repository name for this application."
+        )
+        raw = llm_gateway.llm_gateway.complete(prompt=prompt, system=system, max_tokens=40)
+        first = (raw or "").strip().splitlines()[0] if raw else ""
+        return _slug(first) or fallback
+    except Exception as exc:  # noqa: BLE001 - naming must never block a publish
+        print(f"[suggest-name] LLM failed ({type(exc).__name__}): {exc}; using {fallback!r}", flush=True)
+        return fallback
+
+
+def _unique_repo_name(owner: str, name: str, token: str) -> str:
+    """Return a name not already taken under ``owner`` (append -2, -3, … if it exists)."""
+    if not owner:
+        return name
+    candidate, n = name, 1
+    while _gh("repo", "view", f"{owner}/{candidate}", token=token)[0] == 0:
+        n += 1
+        candidate = f"{name}-{n}"
+        if n > 50:
+            break
+    return candidate
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -246,7 +351,8 @@ def accounts() -> dict[str, Any]:
 def _resolve_pack_dir(pack: str) -> Path | None:
     """Accept a design pack as a name under fixtures/ OR a full/relative directory path.
 
-    A valid pack is any directory containing ``api-mapping.csv`` (what plan_builder needs).
+    A valid pack is any directory whose artifacts identify a design package by CONTENT
+    (an OpenAPI spec or a UI↔API mapping table) — filenames/extensions don't matter.
     """
     raw = pack.strip()
     if not raw:
@@ -255,7 +361,7 @@ def _resolve_pack_dir(pack: str) -> Path | None:
     candidates = [cand] if cand.is_absolute() else [_FIXTURES_DIR / raw, _REPO_ROOT / raw, cand]
     for c in candidates:
         try:
-            if c.is_dir() and (c / "api-mapping.csv").exists():
+            if c.is_dir() and design_pack.is_design_pack(c):
                 return c
         except OSError:
             continue
@@ -266,16 +372,17 @@ def _resolve_pack_dir(pack: str) -> Path | None:
 def plan(req: PlanRequest) -> dict[str, Any]:
     """Deterministic plan (no LLM): decompose the design pack into work items.
 
-    ``pack`` may be a fixtures name (e.g. "ecommerce_complete") OR a path to your own
-    design-package folder (must contain api-mapping.csv + schema.sql + *-structure.json).
+    ``pack`` may be a fixtures name OR a path to your own design-package folder. Artifacts are
+    identified by CONTENT (see :mod:`app.services.design_pack`), so filenames/extensions vary
+    freely — the folder just needs an API surface (an OpenAPI spec or a UI↔API mapping table).
     """
     pack_dir = _resolve_pack_dir(req.pack)
     if pack_dir is None:
         raise HTTPException(
             404,
             f"no design package found for {req.pack!r} — expected a fixtures/ name or a folder "
-            "path containing api-mapping.csv (+ schema.sql, backend-structure.json, "
-            "frontend-structure.json).",
+            "path whose contents include an API surface (an OpenAPI spec or a UI↔API mapping "
+            "table); a schema (SQL or JSON) and structure files are used when present.",
         )
     items = build_plan(pack_dir)
     if req.only:
@@ -385,18 +492,18 @@ def packs() -> dict[str, list[str]]:
     found = []
     if _FIXTURES_DIR.is_dir():
         for d in sorted(_FIXTURES_DIR.iterdir()):
-            if d.is_dir() and (d / "api-mapping.csv").exists() and (d / "schema.sql").exists():
+            if d.is_dir() and design_pack.is_design_pack(d):
                 found.append(d.name)
     return {"packs": found}
 
 
 @app.post("/api/run")
 def run(req: RunRequest) -> dict[str, Any]:
-    """Run the REAL code-generator agent graph (scaffold → generate → gate → pause at review).
+    """Run the REAL code-generator agent graph (scaffold → generate → gate → auto-commit).
 
     Writes to generated/<project> (so publish targets the same folder). In real mode this uses
-    the real Claude gateway (ANTHROPIC_FOUNDRY_API_KEY). Pauses at batch_review; /api/review
-    resumes it (commit).
+    the real Claude gateway (ANTHROPIC_FOUNDRY_API_KEY). Runs to completion with no human-in-the-
+    loop: a completed plan auto-commits; a repair-cap failure ends flagged needs_human_review.
     """
     pack_dir = _resolve_pack_dir(req.pack)
     if pack_dir is None:
@@ -431,17 +538,16 @@ def run(req: RunRequest) -> dict[str, Any]:
 
 @app.post("/api/review")
 def review(req: ReviewRequest) -> dict[str, Any]:
+    """No-op kept for UI compatibility: human review was removed, so /api/run already committed.
+
+    There is no interrupt to resume — this just returns the finished run's snapshot so older UIs
+    that still call it keep working.
+    """
     run = RUNS.get(req.run_id)
     if run is None:
         raise HTTPException(404, f"no active run {req.run_id!r}")
-
-    set_executor(run["executor"])
-    try:
-        workflow.invoke(Command(resume={"approved": req.approved, "rejections": req.rejections}), run["config"])
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, f"review failed ({type(exc).__name__}): {exc}") from exc
     snap = _snapshot(req.run_id, workflow.get_state(run["config"]).values)
-    snap["reworked"] = {iid: run["item_files"].get(iid, []) for iid in req.rejections}
+    snap["reworked"] = {}
     if MODE == "real":
         snap["out_dir"] = str(OUT_DIR / req.run_id)
     return snap
@@ -455,17 +561,18 @@ def publish(req: PublishRequest) -> dict[str, Any]:
     auth-failed / invalid-owner / repo-exists / (generate-missing) / success. Creating the repo
     is a genuine outward-facing action on the authenticated account.
     """
+    token = req.token.strip() or _env_token()  # request override → GITHUB_PAT from .env
     print(f"[publish] REQUEST RECEIVED: repoName={req.repoName!r} visibility={req.visibility!r} "
-          f"owner={req.owner!r} project={req.project!r}", flush=True)
+          f"owner={req.owner!r} project={req.project!r} token={'<provided>' if token else '<none>'}", flush=True)
 
-    name = req.repoName.strip()
-    if not name:
-        print("[publish] REJECTED: empty repo name", flush=True)
-        return {"ok": False, "outcome": "invalid-owner", "message": "Repository name is required"}
-
-    # 1) auth
-    auth_code, auth_out, auth_err = _gh("auth", "status")
-    print(f"[publish] gh auth status -> exit={auth_code}", flush=True)
+    # 1) auth — with a PAT, validate the TOKEN itself via an authenticated API call (don't trust
+    #    `gh auth status`, which can pass on gh's keyring account while the supplied token is bad);
+    #    without a PAT, fall back to checking gh's keyring login.
+    if token:
+        auth_code, auth_out, auth_err = _gh("api", "user", token=token)
+    else:
+        auth_code, auth_out, auth_err = _gh("auth", "status")
+    print(f"[publish] auth check ({'token' if token else 'gh keyring'}) -> exit={auth_code}", flush=True)
     if auth_code != 0:
         print(f"[publish] REJECTED: auth check failed: {auth_err}", flush=True)
         return {
@@ -474,11 +581,11 @@ def publish(req: PublishRequest) -> dict[str, Any]:
             "message": 'Authentication failed — GitHub token expired or missing "repo" scope',
         }
 
-    # 2) owner (validate if given; else resolve the authenticated login)
-    owner = req.owner.strip()
+    # 2) owner: request → GITHUB_OWNER (.env) → the token's own login. Validate an explicit owner.
+    owner = req.owner.strip() or _env_owner()
     if owner:
-        user_ok = _gh("api", f"users/{owner}")[0] == 0
-        org_ok = _gh("api", f"orgs/{owner}")[0] == 0
+        user_ok = _gh("api", f"users/{owner}", token=token)[0] == 0
+        org_ok = _gh("api", f"orgs/{owner}", token=token)[0] == 0
         if not (user_ok or org_ok):
             print(f"[publish] REJECTED: invalid owner {owner!r}", flush=True)
             return {
@@ -487,23 +594,34 @@ def publish(req: PublishRequest) -> dict[str, Any]:
                 "message": f'Invalid owner "{owner}" — no matching user or organization',
             }
     else:
-        code, login, _ = _gh("api", "user", "--jq", ".login")
+        code, login, _ = _gh("api", "user", "--jq", ".login", token=token)
         owner = login if code == 0 else ""
         if not owner:
             print("[publish] REJECTED: could not resolve authenticated login", flush=True)
             return {"ok": False, "outcome": "auth-failed", "message": "Could not resolve your GitHub account"}
 
-    # 2b) honor the chosen account: if it's a DIFFERENT logged-in account, make it gh's active one
-    active_login = _gh("api", "user", "--jq", ".login")[1]
-    if owner and owner != active_login:
-        sw = _gh("auth", "switch", "--hostname", "github.com", "--user", owner)
-        print(f"[publish] switch active account {active_login!r} -> {owner!r} exit={sw[0]}", flush=True)
+    # 2b) with a PAT, the token IS the identity — no keyring switch needed (and switching to an
+    #     account gh isn't logged into would fail). Only switch active accounts in the no-token path.
+    if not token:
+        active_login = _gh("api", "user", "--jq", ".login")[1]
+        if owner and owner != active_login:
+            sw = _gh("auth", "switch", "--hostname", "github.com", "--user", owner)
+            print(f"[publish] switch active account {active_login!r} -> {owner!r} exit={sw[0]}", flush=True)
+
+    # 2c) name: an explicit request name is honored as-is; otherwise the agent suggests one from
+    #     the built app and we ensure it's free under the owner (so auto-publish never collides).
+    explicit = req.repoName.strip()
+    if explicit:
+        name = explicit
+    else:
+        name = _unique_repo_name(owner, _suggest_repo_name(req.project), token)
+        print(f"[publish] agent-suggested repo name -> {name}", flush=True)
 
     repo = f"{owner}/{name}"
     print(f"[publish] resolved target repo = {repo}", flush=True)
 
-    # 3) name availability (repo view succeeds → it already exists)
-    if _gh("repo", "view", repo)[0] == 0:
+    # 3) name availability (only an EXPLICIT name can collide — an auto name is already unique)
+    if explicit and _gh("repo", "view", repo, token=token)[0] == 0:
         print(f"[publish] REJECTED: {repo} already exists", flush=True)
         return {
             "ok": False,
@@ -531,13 +649,147 @@ def publish(req: PublishRequest) -> dict[str, Any]:
     commit_res = ex.git_commit(req.project, f"IMP-001 publish: {name}")
     print(f"[publish] commit -> committed={commit_res.committed} sha={commit_res.sha}", flush=True)
     print(f"[publish] running gh repo create for {repo} (private={req.visibility != 'public'})...", flush=True)
-    res = ex.publish(req.project, repo, private=(req.visibility != "public"))
+    res = ex.publish(req.project, repo, private=(req.visibility != "public"), token=token or None)
     print(f"[publish] gh/git result -> exit={res.exit_code}\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}", flush=True)
     if res.exit_code == 0:
         print(f"[publish] SUCCESS -> https://github.com/{repo}", flush=True)
-        return {"ok": True, "url": f"https://github.com/{repo}"}
+        return {"ok": True, "url": f"https://github.com/{repo}", "repoName": name, "owner": owner}
     print("[publish] FAILED (push-failed)", flush=True)
     return {"ok": False, "outcome": "push-failed", "message": (res.stderr or res.stdout or "Push failed")[:400]}
+
+
+@app.post("/api/suggest-name")
+def suggest_name(req: SuggestNameRequest) -> dict[str, str]:
+    """Agent-suggested repository name for the built app, plus the resolved owner (no user input).
+
+    Lets the UI show what the agent picked before it auto-publishes. Uniqueness is resolved
+    against the owner so the name shown is the name that will actually be created.
+    """
+    token = _env_token()
+    owner = _env_owner()
+    if not owner and token:
+        owner = _gh("api", "user", "--jq", ".login", token=token)[1]
+    name = _unique_repo_name(owner, _suggest_repo_name(req.project), token)
+    print(f"[suggest-name] project={req.project!r} -> {owner or '?'}/{name}", flush=True)
+    return {"name": name, "owner": owner}
+
+
+def _ff_commit_push(project_dir: Path, message: str, push: bool, branch: str) -> tuple[str, str]:
+    """git add+commit (skip if no change); optional push. Returns (short_sha, status)."""
+    fc._git(["add", "-A"], project_dir)
+    if fc._run(["git", "diff", "--cached", "--quiet"], project_dir).returncode == 0:
+        return "", "nothing to commit"
+    fc._git(["commit", "-m", message], project_dir)
+    sha = fc._run(["git", "rev-parse", "--short", "HEAD"], project_dir).stdout.strip()
+    if not push:
+        return sha, "committed (not pushed)"
+    res = fc._run(["git", "push", "-u", "origin", branch], project_dir)
+    return sha, ("pushed" if res.returncode == 0 else f"push failed: {(res.stderr or res.stdout).strip()[:200]}")
+
+
+@app.post("/api/run-feature")
+def run_feature(req: RunFeatureRequest) -> dict[str, Any]:
+    """Generate ONE user story, commit it as ``feat(US-0X): <title>``, and optionally push.
+
+    The UI calls this once per story (index 0..N-1) to build a per-feature commit history. It is
+    CUMULATIVE: prior source files are read back from disk so each story extends the previous ones.
+    On ``index == 0`` it (optionally resets and) inits git, ensures the GitHub repo, commits/pushes
+    the scaffold to ``main``, then branches ``dev`` from it. Every feature is committed on ``dev``.
+    """
+    pack = fc._resolve_pack(req.pack)
+    stories = fc._parse_stories(pack)
+    if not stories:
+        raise HTTPException(404, "no user stories (## US-0X — Title) found in user-features.md")
+    if req.index < 0 or req.index >= len(stories):
+        raise HTTPException(400, f"index {req.index} out of range 0..{len(stories) - 1}")
+
+    project_dir = OUT_DIR / req.project
+    base_branch = "main"  # holds ONLY the scaffold
+    branch = "dev"        # all feature commits land here; never on main/master
+    setup: list[str] = []
+
+    if req.index == 0:
+        if req.reset and project_dir.exists():
+            fc._force_rmtree(project_dir)
+        project_dir.mkdir(parents=True, exist_ok=True)
+        fc._git(["init"], project_dir)
+        fc._git(["config", "user.email", "codegen@local"], project_dir, check=False)
+        fc._git(["config", "user.name", "IMP-001 codegen"], project_dir, check=False)
+        if req.push and req.repoName:
+            login = req.owner.strip() or _gh("api", "user", "--jq", ".login")[1]
+            if not login:
+                raise HTTPException(502, "could not resolve a GitHub login (is `gh auth` set up?)")
+            slug = f"{login}/{req.repoName}"
+            if _gh("repo", "view", slug)[0] != 0:
+                vis = "--private" if req.visibility != "public" else "--public"
+                code, out, err = _gh("repo", "create", slug, vis)
+                if code != 0:
+                    raise HTTPException(502, f"repo create failed for {slug}: {err or out}")
+            fc._run(["git", "remote", "remove", "origin"], project_dir)
+            fc._git(["remote", "add", "origin", f"https://github.com/{slug}.git"], project_dir)
+        # scaffold ONLY on main, then branch dev from it
+        fc._checkout_branch(project_dir, base_branch)
+        for e in render_scaffold(req.project, _load_pack(pack)):
+            dest = project_dir / e["path"].lstrip("/")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(e["content"], encoding="utf-8")
+        sha0, st0 = _ff_commit_push(project_dir, "chore: initial project scaffold", req.push, base_branch)
+        setup.append(f"scaffold(main): {sha0 or '-'} ({st0})")
+        fc._ensure_feature_branch(project_dir, branch)  # dev from main
+
+    if not (project_dir / ".git").is_dir():
+        raise HTTPException(400, "project not initialized — call with index=0 first")
+    fc._ensure_feature_branch(project_dir, branch)  # every feature commits on dev, never main/master
+
+    # Cumulative context: read back the source files produced by earlier stories (frontend +
+    # backend) so each feature extends the previous ones.
+    current: dict[str, str] = {}
+    for p in project_dir.rglob("*"):
+        if p.is_file() and ".git" not in p.parts:
+            rel = p.relative_to(project_dir).as_posix()
+            if (
+                rel.startswith(("frontend/", "backend/", "src/"))
+                or rel in ("index.html", "vite.config.ts", "vite.config.js")
+            ):
+                current[rel] = p.read_text(encoding="utf-8")
+
+    sid, title, body = stories[req.index]
+    if MODE == "real":
+        # Build the feature one layer at a time (Frontend → Backend → Database → Integration →
+        # Testing), accumulating files so later layers see earlier ones. Committed as ONE feature.
+        files: list[dict[str, str]] = []
+        for key, label, instruction in fc._LAYERS:
+            ctx = fc._design_context(pack, fc._LAYER_CONTEXT[key])
+            layer_files = fc._generate(
+                llm_gateway.llm_gateway,
+                fc._layer_prompt(ctx, current, sid, title, body, label, instruction),
+            )
+            for f in layer_files:
+                current[f["path"].lstrip("/")] = f["content"]
+            files.extend(layer_files)
+    else:  # dry-run: canned stub so the flow is demoable with no API key
+        files = [{"path": "frontend/src/pages/GamePage.tsx", "content": _stub_content("GamePage.tsx")}]
+    for f in files:
+        dest = project_dir / f["path"].lstrip("/")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(f["content"], encoding="utf-8")
+    sha, status = _ff_commit_push(project_dir, f"feat({sid}): {title}", req.push, branch)
+
+    url = ""
+    if req.push and req.repoName:
+        login = req.owner.strip() or _gh("api", "user", "--jq", ".login")[1]
+        url = f"https://github.com/{login}/{req.repoName}"
+
+    done = req.index == len(stories) - 1
+    # Keep only at the remote: once the LAST feature is pushed, delete the local working copy.
+    if done and req.push and status == "pushed":
+        fc._force_rmtree(project_dir)
+
+    return {
+        "index": req.index, "total": len(stories), "id": sid, "title": title,
+        "files": [f["path"] for f in files], "sha": sha, "status": status,
+        "done": done, "url": url, "setup": setup,
+    }
 
 
 @app.get("/api/file", response_class=PlainTextResponse)
@@ -576,7 +828,7 @@ def main() -> None:
                         help="canned LLM, in-memory, NO API key (opt-in; default is real Claude)")
     parser.add_argument("--real", action="store_true", help="(default) real Claude via Foundry")
     parser.add_argument("--out-dir", type=Path, default=OUT_DIR,
-                        help="where real mode writes generated projects (default: services/implementation/generated)")
+                        help=f"where real mode writes generated projects, OUTSIDE the repo (default: {OUT_DIR})")
     parser.add_argument("--port", type=int, default=8100)
     args = parser.parse_args()
 
@@ -592,7 +844,9 @@ def main() -> None:
         print(f"  generated projects will be written under: {OUT_DIR}")
         print("  (requires ANTHROPIC_FOUNDRY_API_KEY + endpoint in services/implementation/.env)")
 
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    # Show the agents' live progress ([PLANNING]/[GENERATING]/[DONE]) in this terminal.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="info")
 
 
 if __name__ == "__main__":

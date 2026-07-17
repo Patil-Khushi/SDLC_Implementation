@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import logging
 
-from langgraph.types import interrupt
-
 from app.agents.code_generator import CodeGeneratorAgent
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
@@ -26,11 +24,13 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic: render the repo-root boilerplate once, before any work item.
 
     No LLM — Jinja2 templates only (app/services/boilerplate.py). Runs exactly once per run,
-    so requirements.txt/package.json exist before the first work item's build check runs.
+    so requirements.txt/package.json exist before the first work item's build check runs. The
+    scaffold is INPUT-AWARE: the Design Package's capabilities config decides which files are
+    emitted and their contents (absent that config, the legacy FastAPI+React defaults apply).
     """
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
-    files = render_scaffold(project_dir)
+    files = render_scaffold(project_dir, state.get("design_package"))
     generated = list(state.get("generated_code", []))
     written: list[str] = []
     for entry in files:
@@ -54,36 +54,20 @@ def code_generator_node(state: WorkflowState) -> WorkflowState:
 def select_work_item_node(state: WorkflowState) -> WorkflowState:
     """Advance to the next unit of work; reset the LOCAL repair counter.
 
-    Drains ``review_feedback`` (items a human rejected at batch_review) ONE AT A TIME before
-    falling back to the normal work_items cursor — a drained item skips code_generator and goes
-    straight to repair (route_after_select reads ``current_item_feedback`` for this). When both
-    sources are exhausted, clears current_work_item so the run proceeds to batch_review.
+    Walks the ``work_items`` cursor one item at a time. When the plan is exhausted it clears
+    ``current_work_item`` so the run proceeds straight to the auto-commit (no batch-review /
+    rework queue — HITL was removed).
     """
-    feedback = dict(state.get("review_feedback") or {})
-    while feedback:
-        item_id, note = next(iter(feedback.items()))
-        del feedback[item_id]
-        work_item = next((wi for wi in state.get("work_items", []) if wi.id == item_id), None)
-        if work_item is None:  # defensive: id no longer in the plan, skip it
-            continue
-        state["review_feedback"] = feedback
-        state["current_work_item"] = work_item
-        state["current_item_feedback"] = note
-        state["repair_attempt"] = 0
-        return state
-    state["review_feedback"] = feedback  # now empty
-
     items = state.get("work_items", [])
     if not isinstance(items, list):  # fail fast on malformed input, don't crash mid-loop
         raise ValueError(f"work_items must be a list, got {type(items).__name__}")
     index = int(state.get("work_item_index", 0))
-    state["current_item_feedback"] = ""
     if index < len(items):
         state["current_work_item"] = items[index]
         state["work_item_index"] = index + 1
         state["repair_attempt"] = 0  # LOCAL, reset per work item (never touches `attempt`)
     else:
-        state["current_work_item"] = None  # plan (+ rework queue) exhausted -> batch_review
+        state["current_work_item"] = None  # plan exhausted -> auto-commit
     return state
 
 
@@ -120,7 +104,8 @@ def gate_node(state: WorkflowState) -> WorkflowState:
 
 
 def commit_node(state: WorkflowState) -> WorkflowState:
-    """FIXED: commit the WHOLE run's files in one commit. Reached ONLY after batch_review approval."""
+    """FIXED: commit the WHOLE run's files in one commit. Reached automatically once every work
+    item has gate-passed — no human approval (HITL removed)."""
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     work_items = state.get("work_items", [])
@@ -137,61 +122,11 @@ def commit_node(state: WorkflowState) -> WorkflowState:
 
 
 def escalate_node(state: WorkflowState) -> WorkflowState:
-    """Local repair cap reached: flag for human review (status persisted before the interrupt)."""
+    """Terminal failure: a work item hit the repair cap (or codegen never produced valid files).
+
+    Flags ``needs_human_review`` so the orchestrator knows the run needs attention, then ends the
+    run. It no longer pauses on an interrupt — that HITL pause had no resume contract and always
+    ended the run anyway.
+    """
     state["workflow_status"] = "needs_human_review"
-    return state
-
-
-def human_review_node(state: WorkflowState) -> WorkflowState:
-    """HITL pause on a REPAIR-CAP FAILURE. interrupt() suspends the run (needs a checkpointer).
-
-    Distinct from ``batch_review_node``: this is the escalation-on-failure path and always ends
-    the run (no resume-and-continue contract — see CLAUDE.md gap #7 for what's still undefined
-    here).
-    """
-    interrupt({"reason": "needs_human_review", "run_id": state.get("run_id")})
-    return state  # reached only after a human resumes the run
-
-
-def batch_review_node(state: WorkflowState) -> WorkflowState:
-    """All work items have gate-passed: persist ``workflow_status`` BEFORE the interrupt.
-
-    A node that mutates state and then calls ``interrupt()`` in the same function loses that
-    mutation for the pass that actually pauses (the function never reaches ``return`` on that
-    pass, so nothing merges) — the same reason ``escalate_node`` is a separate, non-interrupting
-    step before ``human_review_node``. This node is that step for the batch-review path; the
-    interrupt itself lives in ``batch_review_wait_node``.
-    """
-    state["workflow_status"] = "pending_review"
-    return state
-
-
-def batch_review_wait_node(state: WorkflowState) -> WorkflowState:
-    """HITL pause after ALL work items have gate-passed: one human decision for the whole run.
-
-    interrupt() suspends the run; the resume value is
-    ``{"approved": bool, "rejections": {item_id: feedback}}``.
-
-    - Approved → ``workflow_status = "approved_for_commit"``; the router sends the run to the
-      single, run-level ``commit`` node.
-    - Rejected → ``review_feedback`` is populated with the named items; the router sends the run
-      back to ``select``, which drains them one at a time through the existing repair path
-      (skipping code_generator — the files already exist, only the fix content changes). Once
-      drained and re-gate-passed, the run lands back here for another decision.
-    """
-    decision = interrupt(
-        {
-            "reason": "batch_review",
-            "run_id": state.get("run_id"),
-            "generation_summary": state.get("generation_summary", ""),
-            "generated_code": state.get("generated_code", []),
-            "work_items": [wi.id for wi in state.get("work_items", [])],
-        }
-    )
-    if decision.get("approved"):
-        state["workflow_status"] = "approved_for_commit"
-        state["review_feedback"] = {}
-    else:
-        state["workflow_status"] = "in_rework"
-        state["review_feedback"] = dict(decision.get("rejections") or {})
     return state

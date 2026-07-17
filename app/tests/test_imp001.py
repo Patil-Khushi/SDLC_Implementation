@@ -16,7 +16,6 @@ import re
 from typing import Any
 
 import pytest
-from langgraph.types import Command
 
 from app.graph.graph import workflow
 from app.graph.router import REPAIR_CAP
@@ -51,10 +50,9 @@ def _run_item(
 ) -> WorkflowState:
     """Drive the compiled graph for a single work item against the real executor + replay gateway.
 
-    A single-item plan that gate-passes lands at ``batch_review`` (paused, ``workflow_status ==
-    "pending_review"``, no commit yet) — auto-approve so callers see the same all-pass/commit
-    outcome as before batch review existed. Escalating runs never reach that status, so this is
-    a no-op for them.
+    A single-item plan that gate-passes runs straight through to the auto-commit (no HITL); an
+    escalating run ends flagged ``needs_human_review``. Either way the run completes without a
+    pause, so the final state is read directly.
     """
     monkeypatch.setattr(llm_gateway.llm_gateway, "complete", gateway.complete)
     monkeypatch.setattr(llm_gateway.llm_gateway, "complete_with_tools", gateway.complete_with_tools)
@@ -66,11 +64,7 @@ def _run_item(
     config = {"configurable": {"thread_id": f"t-{item.id}"}, "recursion_limit": 100}
     try:
         workflow.invoke(initial, config)
-        state = dict(workflow.get_state(config).values)
-        if state.get("workflow_status") == "pending_review":
-            workflow.invoke(Command(resume={"approved": True}), config)
-            state = dict(workflow.get_state(config).values)
-        return state  # type: ignore[return-value]
+        return dict(workflow.get_state(config).values)  # type: ignore[return-value]
     finally:
         set_executor(None)
 

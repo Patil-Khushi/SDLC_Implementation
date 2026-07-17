@@ -11,16 +11,15 @@ Usage (from services/implementation/, with .venv active):
 
     # REAL build to a standalone product repo: real Claude (needs Foundry creds in .env) writes
     # real files to <out-dir>/<project> and makes a real local git commit there. No Docker
-    # (completeness-only gate). --yes auto-approves the HITL so the initial commit is made.
-    python scripts/run_fixture.py ../../fixtures/ecommerce_complete --real --yes \
+    # (completeness-only gate). The run auto-commits — no human review step.
+    python scripts/run_fixture.py ../../fixtures/ecommerce_complete --real \
         --project ecommerce --out-dir generated
 
     # real run inside the exec-sandbox (needs SANDBOX_MCP_URL reachable)
     python scripts/run_fixture.py ../../fixtures/ecommerce_complete --sandbox-url http://localhost:8080/mcp
 
-If a run pauses at batch_review (workflow_status == "pending_review") and you did NOT pass --yes,
-resume it via the API `POST /implementation/{run_id}/review {"approved": true}` or by re-running
-with --yes.
+Human-in-the-loop was removed: a completed plan auto-commits (workflow_status == "completed"); a
+repair-cap failure ends flagged "needs_human_review" (no pause, no resume).
 """
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -35,12 +35,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # so `app.*` imports work
 
-from langgraph.types import Command  # noqa: E402
-
 from app.graph.graph import workflow  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_executor  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
+from scripts.feature_commit import _DEFAULT_OUT_DIR  # noqa: E402  (generated output goes outside the repo)
 from scripts.local_executor import LocalDiskExecutor  # noqa: E402
 
 
@@ -109,7 +108,7 @@ def main() -> None:
     parser.add_argument("--real", action="store_true",
                         help="REAL Claude + LocalDiskExecutor: build a standalone product repo on disk")
     parser.add_argument("--yes", action="store_true",
-                        help="auto-approve the HITL batch review (make the commit without prompting)")
+                        help="(deprecated no-op) human review was removed; runs auto-commit now")
     parser.add_argument("--publish", action="store_true",
                         help="--real: after a completed run, interactively create a GitHub repo "
                              "(prompts for name / visibility / owner via gh) and push")
@@ -123,9 +122,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--out-dir", type=Path, default=None,
-        help="--real: base dir for the product repo (<out-dir>/<project>); --dry-run: dump in-memory files here",
+        help=f"--real: base dir for the product repo (<out-dir>/<project>), OUTSIDE the repo "
+             f"(default: {_DEFAULT_OUT_DIR}); --dry-run: dump in-memory files here",
     )
     args = parser.parse_args()
+
+    # Show the agents' live progress ([PLANNING]/[GENERATING]/[DONE]) in this terminal.
+    # This script drives the graph directly (it never imports app.main), so nothing has
+    # configured the root logger yet — without this, Python suppresses INFO lines.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     pack_dir = args.pack_dir.resolve()
     design_package = _load_pack(pack_dir)
@@ -152,7 +157,7 @@ def main() -> None:
         llm_gateway.llm_gateway.complete_with_tools = lambda prompt, **kw: _canned_llm_reply(prompt)  # type: ignore[method-assign]
         executor = FakeExecutor()
     elif args.real:
-        out_base = (args.out_dir or Path("generated")).resolve()
+        out_base = (args.out_dir or _DEFAULT_OUT_DIR).resolve()
         executor = LocalDiskExecutor(out_base)
         print(f"REAL build with Claude -> product repo at {out_base / args.project}")
     else:
@@ -166,13 +171,7 @@ def main() -> None:
     )
     config = {"configurable": {"thread_id": run_id}, "recursion_limit": 1000}
     workflow.invoke(initial, config)
-    state = workflow.get_state(config).values
-
-    # HITL: auto-approve when --yes, so the batch commit is made in one shot.
-    if state.get("workflow_status") == "pending_review" and args.yes:
-        print("\n[HITL] auto-approving (--yes) -> committing the whole run")
-        workflow.invoke(Command(resume={"approved": True, "rejections": {}}), config)
-        state = workflow.get_state(config).values
+    state = workflow.get_state(config).values  # runs to completion (auto-commit, no HITL)
 
     print("\n--- generation_summary ---")
     print(state.get("generation_summary", "(empty)"))
@@ -199,11 +198,7 @@ def main() -> None:
             _interactive_publish(executor, args.project)
         else:
             print(f"\n[publish skipped] run status is {state.get('workflow_status')!r}, not 'completed' "
-                  "(need generation done + approved before creating the repo).")
-
-    if state.get("workflow_status") == "pending_review":
-        print(f"\nPaused for batch review (no --yes). Resume with thread_id/run_id = {run_id!r}:")
-        print(f'  POST /implementation/{run_id}/review   {{"approved": true}}')
+                  "(generation must finish + auto-commit before creating the repo).")
 
 
 if __name__ == "__main__":

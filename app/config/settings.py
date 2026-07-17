@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     # Set false if you point llm_model at a deployment that lacks extended thinking.
     llm_thinking: bool = True
 
+    # GitHub publish (demo publish flow: create repo + push under this PAT's owner).
+    # Lets the agent publish under an account the local `gh` CLI isn't logged into.
+    # github_owner is optional — defaults to the token's own login.
+    github_pat: str = ""
+    github_owner: str = ""
+
     # Database (used later for workflow state)
     database_url: str | None = None
 

@@ -1,17 +1,9 @@
 {
-  "name": "{{ project_id }}-frontend",
-  "version": "0.1.0",
+  "name": {{ (project.name ~ "-frontend") | to_json }},
+  "version": {{ project.version | to_json }},
   "private": true,
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build"
-  },
-  "dependencies": {
-    "react": "^18.3.0",
-    "react-dom": "^18.3.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.6.0",
-    "vite": "^5.4.0"
-  }
+  "description": {{ project.description | to_json }},
+  "scripts": {{ frontend.scripts | to_json(2) | indent(2) }},
+  "dependencies": {{ frontend.dependencies | to_json(2) | indent(2) }},
+  "devDependencies": {{ frontend.devDependencies | to_json(2) | indent(2) }}
 }

@@ -25,6 +25,7 @@ Gate note: the code-generation gate is completeness-only (``files_complete``), s
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -71,12 +72,18 @@ class LocalDiskExecutor(Executor):
 
     # -- shared primitives ---------------------------------------------------
 
-    def run_command(self, cmd: Sequence[str], cwd: StrPath = ".", timeout: float | None = None) -> RunResult:
+    def run_command(
+        self,
+        cmd: Sequence[str],
+        cwd: StrPath = ".",
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunResult:
         workdir = self._resolve(cwd)
         workdir.mkdir(parents=True, exist_ok=True)
         try:
             proc = subprocess.run(
-                list(cmd), cwd=str(workdir), capture_output=True, text=True, timeout=timeout or 120
+                list(cmd), cwd=str(workdir), capture_output=True, text=True, timeout=timeout or 120, env=env
             )
             return RunResult(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
         except subprocess.TimeoutExpired:
@@ -152,13 +159,23 @@ class LocalDiskExecutor(Executor):
             stdout=commit.stdout + push_note, stderr=commit.stderr, exit_code=commit.exit_code,
         )
 
-    def publish(self, project_dir: StrPath, repo: str, *, private: bool = True) -> RunResult:
+    def publish(
+        self, project_dir: StrPath, repo: str, *, private: bool = True, token: str | None = None
+    ) -> RunResult:
         """Create ``repo`` (owner/name) on GitHub via the ``gh`` CLI and push. Idempotent-ish.
 
         Reattributes the HEAD commit to the developer identity if it was made by the fallback
-        identity, so the pushed history is owned by the developer's account. Requires an
-        authenticated ``gh`` CLI (``gh auth status``).
+        identity, so the pushed history is owned by the developer's account.
+
+        Auth: normally uses the authenticated ``gh`` CLI (``gh auth status``). When ``token`` (a
+        Personal Access Token) is given, gh AND the git push run as that token's owner — the token
+        is passed only via ``GH_TOKEN``/``GITHUB_TOKEN`` in the child env (never written to argv or
+        ``.git/config``), so you can publish under an account the local ``gh`` isn't logged into.
         """
+        # Carry the PAT to child gh/git processes via env only; git's credential helper
+        # (configured by `gh auth setup-git`) resolves GH_TOKEN, so nothing lands on disk.
+        env = {**os.environ, "GH_TOKEN": token, "GITHUB_TOKEN": token} if token else None
+
         # 1) ensure the developer identity on this repo + reattribute HEAD if needed
         if self._dev_name and self._dev_email:
             self.run_command(["git", "config", "user.name", self._dev_name], cwd=project_dir)
@@ -167,8 +184,8 @@ class LocalDiskExecutor(Executor):
             if head_email and head_email != self._dev_email:
                 self.run_command(["git", "commit", "--amend", "--reset-author", "--no-edit"], cwd=project_dir)
 
-        # 2) let gh act as the git credential helper for github.com
-        self.run_command(["gh", "auth", "setup-git"], cwd=project_dir)
+        # 2) let gh act as the git credential helper for github.com (token flows via env)
+        self.run_command(["gh", "auth", "setup-git"], cwd=project_dir, env=env)
 
         # 3) point origin at the INTENDED repo ONLY — never reuse an inherited/foreign origin
         #    (removing first is a no-op when absent). Then create the repo on GitHub and push.
@@ -177,10 +194,11 @@ class LocalDiskExecutor(Executor):
         created = self.run_command(
             ["gh", "repo", "create", repo, vis, "--source", ".", "--remote", "origin", "--push"],
             cwd=project_dir,
+            env=env,
         )
         if created.exit_code == 0:
             return created
         # fallback: repo already exists on GitHub → set the remote explicitly and push
         self.run_command(["git", "remote", "remove", "origin"], cwd=project_dir)
         self.run_command(["git", "remote", "add", "origin", f"https://github.com/{repo}.git"], cwd=project_dir)
-        return self.run_command(["git", "push", "-u", "origin", "HEAD"], cwd=project_dir)
+        return self.run_command(["git", "push", "-u", "origin", "HEAD"], cwd=project_dir, env=env)

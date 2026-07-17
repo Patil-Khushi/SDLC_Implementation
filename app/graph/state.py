@@ -53,10 +53,6 @@ class WorkflowState(TypedDict, total=False):
     generation_summary: str               # human-readable free-text summary of the run
     generation_metrics: dict[str, Any]    # run-level metrics (generation-metrics.json shape)
 
-    # --- Batch human review (end of run, before the single run-level commit) ---
-    review_feedback: dict[str, str]       # item_id -> human feedback for items sent back for rework
-    current_item_feedback: str            # feedback for current_work_item during a rework pass (else "")
-
     # --- Downstream pipeline agent outputs (each agent writes only its own) ---
     review_report: str
     refactored_code: str
@@ -99,7 +95,5 @@ def new_state(
         "repair_attempt": 0,
         "generation_summary": "",
         "generation_metrics": {},
-        "review_feedback": {},
-        "current_item_feedback": "",
         "workflow_status": "pending",
     }

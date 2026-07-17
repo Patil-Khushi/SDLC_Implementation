@@ -19,6 +19,7 @@ Rules honored here:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any
@@ -28,6 +29,8 @@ from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.models import GenerationSummary, WorkItem
 from app.services.llm_gateway import LLMGateway
+
+logger = logging.getLogger(__name__)
 
 
 class CodeGeneratorAgent(BaseAgent):
@@ -52,6 +55,18 @@ class CodeGeneratorAgent(BaseAgent):
         design_package = state.get("design_package") or {}
         context, sections_used = self._assemble_context(work_item, design_package)
         self._append_plan(state, work_item, sections_used)
+
+        phase, subject = _phase_of(work_item)
+        run_id = state.get("run_id") or "-"
+        targets = ", ".join(work_item.target_files) or "(none specified)"
+        logger.info("[code_generator] run=%s | [PLANNING] %s -> %s", run_id, work_item.id, targets)
+        logger.info(
+            "[code_generator] run=%s |   [BOILERPLATE] context: %s",
+            run_id,
+            ", ".join(sections_used) or "(none)",
+        )
+        logger.info("[code_generator] run=%s | [GENERATING %s] %s", run_id, phase, subject)
+
         system = self._load_prompt("code_generation")
 
         started = time.perf_counter()
@@ -149,6 +164,14 @@ class CodeGeneratorAgent(BaseAgent):
         )
         self._append_summary(state, line)
         self._bump_metrics(state, work_item.id, files=len(written), seconds=seconds)
+        logger.info(
+            "[code_generator] run=%s | [DONE] %s - %d file(s) in %.3fs: %s",
+            state.get("run_id") or "-",
+            work_item.id,
+            len(written),
+            seconds,
+            ", ".join(written) or "(none)",
+        )
 
     def _record_failure(self, state: WorkflowState, work_item: WorkItem, seconds: float) -> None:
         # No files written, no partial state; record the failure and its timing only.
@@ -156,6 +179,12 @@ class CodeGeneratorAgent(BaseAgent):
             state, f"[code_generator] {work_item.id}: FAILED — model did not return valid JSON (0 files)"
         )
         self._bump_metrics(state, work_item.id, files=0, seconds=seconds)
+        logger.warning(
+            "[code_generator] run=%s | [FAILED] %s - model did not return valid JSON (0 files) after %.3fs",
+            state.get("run_id") or "-",
+            work_item.id,
+            seconds,
+        )
 
     @staticmethod
     def _append_summary(state: WorkflowState, line: str) -> None:
@@ -195,18 +224,26 @@ class CodeGeneratorAgent(BaseAgent):
                 sections.append(("DB", "## DB — cited tables\n" + tables))
 
         if work_item.screens:  # frontend
-            routes = _routes_slice(_artifact(design_package, "routes.json"), work_item.screens)
+            # Accept both the canonical names and the design-narrative variants some packs ship
+            # (e.g. tic-tac-toe's design-tokens.json / functional-html-mockup.html / route-list.md).
+            routes = _routes_slice(
+                _artifact(design_package, "routes.json", "route-list.md", "routes.md"),
+                work_item.screens,
+            )
             if routes:
                 sections.append(("Routes", "## Routes — cited\n" + routes))
-            tokens = _artifact(design_package, "tokens.json")
+            tokens = _artifact(design_package, "tokens.json", "design-tokens.json")
             if tokens is not None:
                 sections.append(("Design tokens", "## Design tokens\n" + _as_text(tokens)))
-            mockup = _mockup_slice(_artifact_text(design_package, "mockup.html"), work_item.screens)
+            mockup = _mockup_slice(
+                _artifact_text(design_package, "mockup.html", "functional-html-mockup.html"),
+                work_item.screens,
+            )
             if mockup:
                 sections.append(("Mockup", "## Mockup — cited components\n" + mockup))
 
         rules = _validation_slice(
-            _artifact(design_package, "validation-rules.json"),
+            _artifact(design_package, "validation-rules.json", "validation-rules.md"),
             [*work_item.endpoints, *work_item.screens],
         )
         if rules:
@@ -230,6 +267,22 @@ class CodeGeneratorAgent(BaseAgent):
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _phase_of(work_item: WorkItem) -> tuple[str, str]:
+    """Classify a work item into a human-readable (phase, subject) for terminal logs.
+
+    Pure logging aid — derived only from the item's own fields, no gate/routing decision.
+    e.g. a screen "login" → ("FRONTEND", "Login page"); tables → ("BACKEND · DATABASE", ...).
+    """
+    if work_item.screens:
+        pretty = ", ".join(f"{s.replace('-', ' ').replace('_', ' ').title()} page" for s in work_item.screens)
+        return "FRONTEND", pretty or "screen"
+    if work_item.tables:
+        return "BACKEND/DATABASE", "tables " + ", ".join(work_item.tables)
+    if work_item.endpoints:
+        return "BACKEND/API", "endpoints " + ", ".join(work_item.endpoints)
+    return "CODE", ", ".join(work_item.target_files) or work_item.id
 
 
 def _extract_json(text: str) -> Any:
@@ -317,14 +370,21 @@ def _routes_slice(routes: Any, screens: list[str]) -> str:
     if isinstance(routes, list):
         picked_list = [r for r in routes if any(s.lower() in json.dumps(r).lower() for s in screens)]
         return json.dumps(picked_list, indent=2, sort_keys=True) if picked_list else ""
+    if isinstance(routes, str):  # markdown/plain routes (e.g. route-list.md) — include as-is
+        return routes
     return ""
 
 
 def _mockup_slice(mockup_html: str, screens: list[str]) -> str:
     if not mockup_html or not screens:
         return ""
-    lines = [ln for ln in mockup_html.splitlines() if any(s.lower() in ln.lower() for s in screens)]
-    return "\n".join(lines)
+    lines = mockup_html.splitlines()
+    # A small mockup is typically a single-screen app (e.g. tic-tac-toe): slicing it by the literal
+    # screen name would drop the very layout the generator needs, so include it whole. Large,
+    # multi-screen mockups (e.g. ecommerce) stay sliced to just the cited screens.
+    if len(lines) <= 200:
+        return mockup_html.strip()
+    return "\n".join(ln for ln in lines if any(s.lower() in ln.lower() for s in screens))
 
 
 def _validation_slice(rules: Any, keys: list[str]) -> str:

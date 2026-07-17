@@ -16,7 +16,7 @@ would contradict the guide, **the guide wins**.
 
 Everything below lives *inside* the Code Generation path and its supporting layers, and stays
 consistent with the guide's "one agent = one job" — the job being: turn a Design Package into
-working, compiling source code, file by file, then pause for human review.
+working source code, file by file, then auto-commit (no human-in-the-loop).
 
 ---
 
@@ -86,38 +86,34 @@ sandbox container has **no network egress except the package registries (PyPI + 
 
 ## Control flow
 
+**No human-in-the-loop.** The batch-review approval interrupt (and its rework loop) was removed:
+a completed plan **auto-commits**. The escalation path still flags `needs_human_review`, but no
+longer pauses on an `interrupt()` — it ends the run (that pause had no resume contract and always
+ended the run anyway). The graph contains **no `interrupt()`**; the checkpointer is kept only so
+`get_state(config)` can read a finished run.
+
 ```
 scaffold (Jinja2, once, no LLM) → select ─┬─ fresh item ──→ code_generator ─┐
-                                            ├─ rework item ──→ repair ───────gate(files_complete ONLY)
-                                            └─ nothing left ─→ batch_review
-                                                                    │
-    gate pass ───────────────────────────→ select (next item / rework item / done — NO commit yet)
+                                            └─ nothing left ─→ commit → done  gate(files_complete ONLY)
+                                                                                    │
+    gate pass ───────────────────────────→ select (next item / done — auto-commit when exhausted)
     gate fail & repair_attempt < 3 ──────→ repair (LLM + tools) → back to gate
-    gate fail & repair_attempt >= 3 ─────→ workflow_status = "needs_human_review",
-                                            interrupt() (HITL), stop [ends the run]
+    gate fail & repair_attempt >= 3 ─────→ escalate: workflow_status = "needs_human_review" → done
 
-batch_review → batch_review_wait (interrupt, once, after ALL items gate-pass):
-    approved              → commit (ONE commit for the whole run) → done
-    rejected(item→fb)     → review_feedback populated → select drains it via repair (skips
-                             code_generator) → gate → back to batch_review
-
-(reset repair_attempt to 0 on each new work item — including a rework item pulled from
- review_feedback; commit only once, after batch_review approval; never touch the
- orchestrator's attempt)
+(reset repair_attempt to 0 on each new work item; ONE run-level commit after the plan is
+ exhausted; never touch the orchestrator's attempt)
 ```
 
-`batch_review` persists `workflow_status = "pending_review"` and returns BEFORE the interrupt in
-`batch_review_wait` — a node that mutates state and then calls `interrupt()` in the same function
-loses that mutation on the pausing pass (the function never reaches `return` that pass, so
-nothing merges). Same reason `escalate_node` is separate from `human_review_node`.
+`escalate_node` sets `needs_human_review` and ends the run — there is no separate
+`human_review_node` / interrupt anymore, and no `batch_review` nodes.
 
 **The gate is completeness-only — it does NOT compile or build.** `files_complete` (an
 `Executor` check) verifies every one of the current work item's `target_files` exists on disk —
 authoritative from disk, not self-reported by code_generator, so it's correct whether the files
-came from code_generator or a repair rework pass. A missing-files failure flows through the
+came from code_generator or a repair pass. A missing-files failure flows through the
 repair/escalate machinery. `compile`/`build`/`test`/`lint` remain on the `Executor` (for later
 pipeline agents that own them) but are deliberately NOT part of this gate: generated source is
-committed on completeness + human approval, not on a green compiler.
+committed on completeness alone (auto), not on a green compiler and not on human approval.
 
 ---
 
@@ -150,11 +146,10 @@ gaps:
    and how the local `repair_attempt` vs. orchestrator `attempt` distinction is reported.
 
 **Cross-cutting / not yet defined anywhere:**
-7. Human-review (HITL) mechanism: **partially resolved for the success path** — `POST
-   /implementation/{run_id}/review` (`ReviewRequest{approved, rejections}`) resumes a run paused
-   at `batch_review` via `Command(resume=...)`. Still undefined: an equivalent resume/terminate
-   contract for the `needs_human_review` escalation path (repair cap exceeded), which today only
-   ever ends the run.
+7. Human-review (HITL) mechanism: **removed** — there is no batch-review approval and no
+   `/implementation/{run_id}/review` endpoint; a completed plan auto-commits. The
+   `needs_human_review` status is still emitted on a repair-cap failure (the run ends), but how
+   the orchestrator consumes/acts on it remains undefined.
 8. Orchestrator relationship: how it retries this service (a new `attempt`), how it learns a
    work item escalated, and what triggers a fresh attempt.
 9. The repair cap "~3" is approximate; exact value and per-item (as modeled) vs. per-run scope
