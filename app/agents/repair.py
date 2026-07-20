@@ -7,9 +7,8 @@ gate and never commits. The repair tools are bound to the model THROUGH ``self.l
 written back through the injected executor (fixed code disposes).
 
 This node increments the LOCAL ``repair_attempt`` counter and never touches the orchestrator's
-``attempt``. Entered either on a gate failure OR on a human rejection at batch_review (routed
-here directly by ``route_after_select``, skipping code_generator) — either way the job is the
-same: propose corrected file content for the failure/feedback signal in state.
+``attempt``. Entered on a gate failure; its job is to propose corrected file content for the
+failure signal in state.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import logging
 from typing import Any
 
 from app.agents.base import BaseAgent
-from app.agents.code_generator import _extract_json
+from app.agents.code_generator import _extract_json, _project_dir, _project_path
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.services.llm_gateway import LLMGateway
@@ -43,12 +42,9 @@ class RepairAgent(BaseAgent):
         state["repair_attempt"] = int(state.get("repair_attempt", 0)) + 1
 
         executor = self._resolve_executor()
-        # A human rejection at batch_review (current_item_feedback) takes priority over a gate
-        # failure — there may not even BE a fresh gate failure for this item (it already passed
-        # once); either way this node's job is the same: propose corrected file content.
-        feedback = state.get("current_item_feedback") or ""
-        stderr = feedback or _first_failure_stderr(state.get("gate_result") or {})
-        state["current_item_feedback"] = ""  # single-use
+        # The repair path is entered only on a gate failure: propose corrected file content for
+        # the failing check's stderr.
+        stderr = _first_failure_stderr(state.get("gate_result") or {})
         current = self._read_current_files(executor, state)
 
         system = self._load_prompt("repair")
@@ -58,8 +54,17 @@ class RepairAgent(BaseAgent):
 
         fixes = _parse_files(raw)
         if fixes:
+            # Write under the SAME <project_dir>/ prefix the code_generator used (and that the
+            # completeness gate checks). Without this the repair writes a bare path the gate never
+            # looks for, so the missing file stays "missing" and the loop burns to the cap.
+            project_dir = _project_dir(state)
+            generated = list(state.get("generated_code", []))
             for entry in fixes:
-                executor.write_file(entry["path"], entry["content"])  # fixed code writes the proposal
+                path = _project_path(project_dir, entry["path"])
+                executor.write_file(path, entry["content"])  # fixed code writes the proposal
+                if path not in generated:
+                    generated.append(path)
+            state["generated_code"] = generated
         else:
             # Proposal didn't parse: write nothing (no partial garbage). The gate re-runs and
             # will re-fail/escalate; log it so the no-op repair is debuggable.

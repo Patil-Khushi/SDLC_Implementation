@@ -2,29 +2,23 @@
 
 Renders the boilerplate scaffold once, then loops over the plan's work items: generate → fixed
 gate (files_complete ONLY — did it write every target file? no compile/build) → back to select
-(no per-item commit) | repair→gate | escalate→HITL. Once the plan (and any rework queue) is
-exhausted, one batch_review interrupt decides the whole run: approved → a single run-level
-commit; rejected → the named items are drained back through repair. The fixed gate is the
+(no per-item commit) | repair→gate | escalate (failure). Once the plan is exhausted, the run
+auto-commits (one run-level commit) and finishes — NO human approval step. The fixed gate is the
 router; the local repair cap lives in router.py.
 
     scaffold → select → code_generator → gate ─┬─ pass ──────────────→ select (loop)
-                  ▲    ╲                        ├─ fail, repair<CAP ─→ repair → gate
-                  │      ╲(rework item)          └─ fail, repair>=CAP → escalate → human_review
-                  │        ╲                                                       (interrupt, ends the run)
-                  │          ▼
-                  │        repair → gate (same as above)
-                  │
-                  └── select: nothing left → batch_review → batch_review_wait (interrupt)
-                                                                 ├─ approved → commit → done
-                                                                 └─ rejected → review_feedback → select (loop)
+                  ▲                             ├─ fail, repair<CAP ─→ repair → gate
+                  │                             └─ fail, repair>=CAP → escalate → END
+                  │                                                    (needs_human_review)
+                  └── select: nothing left → commit → END (auto, no approval)
 
-``batch_review`` persists ``workflow_status`` and returns BEFORE the interrupt in
-``batch_review_wait`` — a node that mutates state and then calls interrupt() in the same
-function loses that mutation on the pausing pass (mirrors the existing escalate/human_review
-split).
+Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
+rework loop) is gone — a completed plan commits automatically. The escalation path still flags
+``needs_human_review`` for the orchestrator, but no longer pauses on an interrupt (it had no
+resume contract and always ended the run anyway).
 
-Compiled with a checkpointer so the batch_review_wait / human_review interrupt()s can pause the
-run for HITL.
+Compiled with a checkpointer so ``get_state`` (used by the API/demo to read a finished run) works;
+the graph itself no longer contains any interrupt().
 """
 
 from __future__ import annotations
@@ -35,7 +29,6 @@ from langgraph.graph import END, START, StateGraph
 from app.agents.repair import repair_node
 from app.graph import nodes
 from app.graph.router import (
-    route_after_batch_review,
     route_after_codegen,
     route_after_gate,
     route_after_select,
@@ -54,16 +47,13 @@ def build_graph():
     graph.add_node("commit", nodes.commit_node)
     graph.add_node("repair", repair_node)
     graph.add_node("escalate", nodes.escalate_node)
-    graph.add_node("human_review", nodes.human_review_node)
-    graph.add_node("batch_review", nodes.batch_review_node)
-    graph.add_node("batch_review_wait", nodes.batch_review_wait_node)
 
     graph.add_edge(START, "scaffold")
     graph.add_edge("scaffold", "select")
     graph.add_conditional_edges(
         "select",
         route_after_select,
-        {"code_generator": "code_generator", "repair": "repair", "batch_review": "batch_review"},
+        {"code_generator": "code_generator", "commit": "commit"},
     )
     graph.add_conditional_edges(
         "code_generator", route_after_codegen, {"gate": "gate", "escalate": "escalate"}
@@ -71,16 +61,11 @@ def build_graph():
     graph.add_conditional_edges(
         "gate", route_after_gate, {"select": "select", "repair": "repair", "escalate": "escalate"}
     )
-    graph.add_edge("batch_review", "batch_review_wait")  # persist status, THEN interrupt
-    graph.add_conditional_edges(
-        "batch_review_wait", route_after_batch_review, {"commit": "commit", "select": "select"}
-    )
-    graph.add_edge("commit", END)            # single run-level commit → done
+    graph.add_edge("commit", END)            # single run-level commit → done (auto, no approval)
     graph.add_edge("repair", "gate")          # repair → back to the fixed gate
-    graph.add_edge("escalate", "human_review")
-    graph.add_edge("human_review", END)
+    graph.add_edge("escalate", END)           # failure flagged (needs_human_review) → done, no pause
 
-    # Checkpointer enables the batch_review_wait / human_review interrupt()s to pause/resume (HITL).
+    # Checkpointer kept only so get_state(config) can read a finished run; there are no interrupts.
     return graph.compile(checkpointer=MemorySaver())
 
 

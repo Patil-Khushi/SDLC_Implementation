@@ -1,11 +1,10 @@
 """Smoke test of the /implementation/start route + compiled graph.
 
-Every run scaffolds the repo-root boilerplate first (no LLM), then — even with zero work
-items — proceeds straight to the batch_review interrupt rather than "completed", since a commit
-now always waits for a human decision. Real code generation is covered by test_code_generator.py;
-the repair/rework/commit loop is covered by test_graph.py. This test just proves the route +
-graph wire up cleanly, with a FakeExecutor standing in for the sandbox (no LLM or real sandbox
-needed).
+Every run scaffolds the repo-root boilerplate first (no LLM), then — even with zero work items —
+runs to completion and auto-commits (no human-in-the-loop). Real code generation is covered by
+test_code_generator.py; the repair/commit loop is covered by test_graph.py. This test just proves
+the route + graph wire up cleanly, with a FakeExecutor standing in for the sandbox (no LLM or real
+sandbox needed).
 """
 
 from fastapi.testclient import TestClient
@@ -29,6 +28,6 @@ def test_start_route_runs_cleanly() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["project_id"] == "p1"
-    assert body["run_id"]                              # a run id was assigned
-    assert len(body["generated_code"]) == 7             # scaffold's boilerplate files, no work items
-    assert body["workflow_status"] == "pending_review"  # scaffold done -> straight to batch_review
+    assert body["run_id"]                            # a run id was assigned
+    assert len(body["generated_code"]) == 7           # scaffold's boilerplate files, no work items
+    assert body["workflow_status"] == "completed"     # scaffold done -> auto-commit (no HITL)

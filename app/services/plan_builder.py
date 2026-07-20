@@ -1,14 +1,27 @@
 """Deterministic implementation-plan builder (no LLM).
 
-Reads a design pack's ``api-mapping.csv`` + ``backend-structure.json`` +
-``frontend-structure.json`` (+ ``schema.sql`` for table inference) and emits a list of
-:class:`~app.models.work_item.WorkItem`, grouped by (screen, layer):
+Artifacts are identified by ROLE from their content — never by fixed filename — via
+:mod:`app.services.design_pack`, so the API surface may arrive as OpenAPI or a flat CSV, the
+schema as SQL DDL or JSON/Mongo, etc. From that normalized view it emits a list of
+:class:`~app.models.work_item.WorkItem`.
 
-* one BACKEND item per operationId — controller + service + DTO + entity(≈repository)
-  target files (from backend-structure.json), covering its endpoint + req_ids + the tables it
-  touches (inferred from schema.sql);
-* one FRONTEND item per screen — page + api-module target files (from frontend-structure.json),
-  covering its route + req_ids + screen name.
+Two builders, chosen by input shape:
+
+* ADAPTIVE (the default when structure trees are present): the ``backend-structure.json`` /
+  ``frontend-structure.json`` trees are authoritative — one item is emitted PER DIRECTORY so every
+  file leaf is produced exactly once, and endpoints/tables/screens/req_ids are ATTACHED to those
+  items as traceability + prompt-grounding context (they no longer decide which items exist).
+* LEGACY (self-contained flat-CSV packs, no structure tree): keeps its original byte-for-byte
+  output — one BACKEND item per operationId and one FRONTEND item per screen, grouped by
+  (screen, layer).
+
+Backend file-role detection is STACK-AGNOSTIC: files are classified by role (handler,
+service, schema/DTO, model) via extension-agnostic name/path hints, so the same logic works for
+NestJS/Express (``*.controller.ts``, ``*.service.ts``, ``dto/``, ``*.entity.ts``), FastAPI/Flask
+(``router.py``/``routes.py``, ``service.py``, ``schemas.py``, ``models/``), Django, Rails, etc.
+Synthesized filenames (per-op DTOs) and the fallback both use the module's dominant file
+extension, so a Python backend yields ``.py`` targets and a TypeScript backend yields ``.ts`` —
+NestJS packs render byte-for-byte identically to before.
 
 Run ``python -m app.services.plan_builder`` to (re)generate
 ``app/tests/fixtures/implementation-plan.ecommerce.json``.
@@ -16,14 +29,15 @@ Run ``python -m app.services.plan_builder`` to (re)generate
 
 from __future__ import annotations
 
-import csv
 import json
 import os
 import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
 from app.models import WorkItem
+from app.services import design_pack
 
 # app/services/plan_builder.py -> services -> app -> implementation -> services -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -68,38 +82,204 @@ def _walk(tree: dict, prefix: str = "") -> list[tuple[str, Any]]:
     return out
 
 
-def _read_csv(pack: Path) -> list[dict[str, str]]:
-    with (pack / "api-mapping.csv").open(encoding="utf-8", newline="") as handle:
-        return list(csv.DictReader(handle))
-
-
-def _load_json(pack: Path, name: str) -> dict:
-    return json.loads((pack / name).read_text(encoding="utf-8"))
-
-
 def _canonical_endpoint(method: str, path: str) -> str:
     return f"{method.strip().upper()} {path.split('?', 1)[0].strip()}"
+
+
+# --------------------------------------------------------------------------- feature grouping
+
+#: A user-features.md table row: ``| F-0X <name> | REQ-0YY | <user story> |``.
+_FEATURE_MD_ROW = re.compile(r"^\|\s*(F-\d+)\b\s*([^|]*?)\s*\|\s*([A-Z]+-\d+)\s*\|", re.MULTILINE)
+
+
+def _feature_map(pack: Path, roles: dict) -> dict[str, tuple[str, str]]:
+    """Map ``requirement_id -> (feature_id, feature_title)`` from the pack's feature definition.
+
+    Prefers the structured ``user_features`` artifact (``user_features.json`` — ``features[]``
+    with ``id``/``name``/``requirements``); falls back to a ``user-features.md`` table
+    (``| F-0X name | REQ | … |``). Returns ``{}`` when neither is present (items stay ungrouped).
+    """
+    mapping: dict[str, tuple[str, str]] = {}
+    detected = design_pack._first(roles, "user_features")
+    if detected is not None and isinstance(detected.obj, dict):
+        for feat in detected.obj.get("features", []):
+            if not isinstance(feat, dict):
+                continue
+            feature_id = str(feat.get("id") or feat.get("name") or "").strip()
+            title = str(feat.get("name") or "").strip()
+            if not feature_id:
+                continue
+            for req in feat.get("requirements", []):
+                req = str(req).strip()
+                if req:
+                    mapping.setdefault(req, (feature_id, title))
+    if mapping:
+        return mapping
+
+    md = pack / "user-features.md"
+    if md.exists():
+        for match in _FEATURE_MD_ROW.finditer(md.read_text(encoding="utf-8")):
+            mapping.setdefault(match.group(3), (match.group(1), match.group(2).strip()))
+    return mapping
+
+
+def _assign_features(items: list[WorkItem], feature_map: dict[str, tuple[str, str]]) -> list[WorkItem]:
+    """Return items tagged with the feature of their primary (first-listed) mapped requirement.
+
+    Items whose requirements don't map to any feature are returned unchanged (feature_id stays "").
+    """
+    if not feature_map:
+        return items
+    tagged: list[WorkItem] = []
+    for item in items:
+        feature = next((feature_map[r] for r in item.requirement_ids if r in feature_map), None)
+        if feature:
+            tagged.append(item.model_copy(update={"feature_id": feature[0], "feature_title": feature[1]}))
+        else:
+            tagged.append(item)
+    return tagged
 
 
 # --------------------------------------------------------------------------- builders
 
 def build_plan(pack_dir: str | Path) -> list[WorkItem]:
-    """Build the deterministic implementation plan for a design pack."""
-    pack = Path(pack_dir)
-    rows = _read_csv(pack)
-    tables = _table_names((pack / "schema.sql").read_text(encoding="utf-8"))
-    backend = _load_json(pack, "backend-structure.json")
-    frontend = _load_json(pack, "frontend-structure.json")
+    """Build the deterministic implementation plan for a design pack.
 
-    return _backend_items(rows, tables, backend) + _frontend_items(rows, frontend)
+    Artifacts are identified by ROLE from their content (see :mod:`app.services.design_pack`),
+    so filenames and formats can vary between design hand-offs. Two shapes are supported:
+
+    * the legacy flat mapping (a CSV carrying its own operation_id/req_ids/endpoint_path columns)
+      → the original stack-agnostic builders, unchanged;
+    * anything else (OpenAPI + a UI↔API table + a SQL *or* JSON schema + structure trees)
+      → the adaptive builders below.
+    """
+    pack = Path(pack_dir)
+    roles = design_pack.detect_roles(pack)
+
+    # Legacy path: a self-contained flat mapping keeps the original output byte-for-byte.
+    rich = roles.get("rich_api_mapping")
+    if rich:
+        rows = rich[0].obj
+        schema = design_pack._first(roles, "db_schema")
+        tables = design_pack._schema_entities(schema.path, schema.obj) if schema else []
+        backend = _structure_obj(roles, "backend_structure")
+        frontend = _structure_obj(roles, "frontend_structure")
+        items = _backend_items(rows, tables, backend) + _frontend_items(rows, frontend)
+    else:
+        # Adaptive path: normalize whatever formats arrived, then build from the neutral view.
+        resolved = design_pack.resolve(pack, roles)
+        if resolved is None or (not resolved.endpoints and not resolved.screens):
+            raise FileNotFoundError(
+                f"{pack_dir}: no recognizable design-package artifacts (need an OpenAPI spec or a "
+                "UI↔API mapping table)."
+            )
+        items = _backend_items_adaptive(resolved) + _frontend_items_adaptive(resolved)
+        # Authoritative-manifest guarantee: every non-test file leaf in the structure trees must be
+        # produced by SOME work item. The builders are exhaustive by construction (one item per
+        # directory), so this normally adds nothing — it's a guard that turns any future coverage
+        # gap into an explicit catch-all item instead of a silent omission.
+        items += _reconcile_uncovered(resolved, items)
+
+    # Tag each item with the user-feature it belongs to (feature → REQ traceability), so the commit
+    # step can group items into ONE commit per feature. Items whose requirements don't map to any
+    # feature (bootstrap/cross-cutting files) stay untagged and commit on their own.
+    return _assign_features(items, _feature_map(pack, roles))
+
+
+def _structure_obj(roles: dict, role: str) -> dict:
+    """Full structure JSON (with its ``tree`` wrapper) for the legacy builders, or ``{}``."""
+    df = design_pack._first(roles, role)
+    return df.obj if df and isinstance(df.obj, dict) else {}
+
+
+# -- stack-agnostic file-role detection ------------------------------------
+#
+# A backend file's ROLE is inferred from extension-agnostic name/path hints, so the same
+# classifier works across NestJS/Express (``*.controller.ts``, ``*.service.ts``, ``dto/``,
+# ``*.entity.ts``), FastAPI/Flask (``router.py``, ``service.py``, ``schemas.py``, ``models/``),
+# Django (``views.py``, ``serializers.py``, ``models.py``), Rails, etc. The hint sets are DATA —
+# supporting a new stack means adding a hint here, not rewriting the builder.
+_HANDLER_HINTS = ("controller", "router", "routes", "views", "handler")
+_SERVICE_HINTS = ("service", "usecase", "interactor")
+_SCHEMA_HINTS = ("dto", "schema", "serializer")
+_MODEL_HINTS = ("entity", "model")            # note: "module" does NOT contain "model"
+_MODEL_DIR_SEGMENTS = ("models", "entities", "entity", "model", "domain")
+_MODEL_FILE_SUFFIXES = (".entity.ts", ".entity.js", ".model.ts", ".model.js", ".entity.py", ".model.py")
+
+
+def _basename(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[-1].lower()
+
+
+def _ext(path: str) -> str:
+    """Final file extension incl. dot (e.g. '.ts', '.py'); '' for dir leaves / extensionless."""
+    if path.endswith("/"):
+        return ""
+    base = path.rsplit("/", 1)[-1]
+    return "." + base.rsplit(".", 1)[-1] if "." in base else ""
+
+
+def _dominant_ext(paths: list[str]) -> str:
+    """Most common file extension among ``paths`` (ties broken by first occurrence)."""
+    exts = [_ext(p) for p in paths]
+    exts = [e for e in exts if e]
+    return Counter(exts).most_common(1)[0][0] if exts else ""
+
+
+def _is_dir_leaf(path: str) -> bool:
+    return path.endswith("/")
+
+
+def _has_hint(name: str, hints: tuple[str, ...]) -> bool:
+    return any(h in name for h in hints)
+
+
+def _is_handler(path: str) -> bool:
+    return not _is_dir_leaf(path) and _has_hint(_basename(path), _HANDLER_HINTS)
+
+
+def _is_service(path: str) -> bool:
+    return not _is_dir_leaf(path) and _has_hint(_basename(path), _SERVICE_HINTS)
+
+
+def _is_schema_dir(path: str) -> bool:
+    return _is_dir_leaf(path) and _has_hint(_basename(path), _SCHEMA_HINTS)
+
+
+def _is_schema_file(path: str) -> bool:
+    return not _is_dir_leaf(path) and _has_hint(_basename(path), _SCHEMA_HINTS)
+
+
+def _is_model(path: str) -> bool:
+    if _is_dir_leaf(path):
+        return False
+    if _has_hint(_basename(path), _MODEL_HINTS):        # user.entity.ts, product.model.ts
+        return True
+    segments = path.lower().split("/")[:-1]              # a file inside a models/ or entities/ dir
+    return any(seg in _MODEL_DIR_SEGMENTS for seg in segments)
+
+
+def _model_stem(path: str) -> str:
+    """Bare entity/model name, normalized and de-pluralized, for matching against a table stem."""
+    base = _basename(path)
+    for suffix in _MODEL_FILE_SUFFIXES:
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    else:
+        base = base.rsplit(".", 1)[0] if "." in base else base   # drop a plain .py/.ts/... extension
+    norm = _norm(base)
+    return norm[:-1] if norm.endswith("s") else norm
 
 
 def _backend_items(rows: list[dict[str, str]], tables: list[str], backend: dict) -> list[WorkItem]:
     leaves = _walk(backend.get("tree", {}))
-    controllers = {p: str(v) for p, v in leaves if p.endswith(".controller.ts")}
-    services = [p for p, _ in leaves if p.endswith(".service.ts")]
-    dto_dirs = [p for p, _ in leaves if p.endswith("dto/")]
-    entities = [p for p, _ in leaves if p.endswith(".entity.ts")]
+    handlers = {p: str(v) for p, v in leaves if _is_handler(p)}
+    services = [p for p, _ in leaves if _is_service(p)]
+    schema_dirs = [p for p, _ in leaves if _is_schema_dir(p)]
+    schema_files = [p for p, _ in leaves if _is_schema_file(p)]
+    models = [p for p, _ in leaves if _is_model(p)]
+    default_ext = _dominant_ext([p for p, _ in leaves]) or ".ts"
 
     items: list[WorkItem] = []
     seen: set[str] = set()
@@ -114,8 +294,10 @@ def _backend_items(rows: list[dict[str, str]], tables: list[str], backend: dict)
         endpoint = _canonical_endpoint(row["http_method"], row["endpoint_path"])
         touched = _tables_touched(row["endpoint_path"], op, tables)
 
-        module_dir = _module_for_op(op, controllers)
-        target_files = _backend_targets(op, module_dir, controllers, services, dto_dirs, entities, touched)
+        module_dir = _module_for_op(op, handlers)
+        target_files = _backend_targets(
+            op, module_dir, handlers, services, schema_dirs, schema_files, models, touched, default_ext
+        )
 
         items.append(
             WorkItem(
@@ -130,9 +312,9 @@ def _backend_items(rows: list[dict[str, str]], tables: list[str], backend: dict)
     return items
 
 
-def _module_for_op(op: str, controllers: dict[str, str]) -> str:
-    """The module dir (e.g. 'src/auth/') whose controller description names this operationId."""
-    for path, desc in controllers.items():
+def _module_for_op(op: str, handlers: dict[str, str]) -> str:
+    """The module dir (e.g. 'src/auth/' or 'app/auth/') whose handler description names this op."""
+    for path, desc in handlers.items():
         if op in desc:
             return path.rsplit("/", 1)[0] + "/"
     return ""
@@ -141,30 +323,35 @@ def _module_for_op(op: str, controllers: dict[str, str]) -> str:
 def _backend_targets(
     op: str,
     module_dir: str,
-    controllers: dict[str, str],
+    handlers: dict[str, str],
     services: list[str],
-    dto_dirs: list[str],
-    entities: list[str],
+    schema_dirs: list[str],
+    schema_files: list[str],
+    models: list[str],
     touched: list[str],
+    default_ext: str,
 ) -> list[str]:
     files: list[str] = []
+    module_ext = default_ext
     if module_dir:
-        files += [p for p in controllers if p.startswith(module_dir)]
-        files += [p for p in services if p.startswith(module_dir)]
-        dto = next((d for d in dto_dirs if d.startswith(module_dir)), None)
-        if dto:
-            files.append(f"{dto}{op[:1].upper()}{op[1:]}Dto.ts")
-    # repository ≈ entity: pick entity files whose stem matches an inferred table
+        module_handlers = [p for p in handlers if p.startswith(module_dir)]
+        module_services = [p for p in services if p.startswith(module_dir)]
+        module_ext = _dominant_ext(module_handlers + module_services) or default_ext
+        files += module_handlers
+        files += module_services
+        # Schema/DTO: a per-op DTO synthesized from a dto/ DIRECTORY (NestJS-style), else the
+        # module's existing shared schema FILE (schemas.py / serializers.py, Python/Django-style).
+        schema_dir = next((d for d in schema_dirs if d.startswith(module_dir)), None)
+        if schema_dir:
+            files.append(f"{schema_dir}{op[:1].upper()}{op[1:]}Dto{module_ext}")
+        else:
+            files += [p for p in schema_files if p.startswith(module_dir)]
+    # Data layer: model/entity files whose stem matches an inferred table (searched pack-wide,
+    # since a module often reuses a model that lives under another module/dir).
     wanted = {_table_stem(t) for t in touched}
-    files += [e for e in entities if _entity_stem(e) in wanted]
-    # de-dup, preserve order
-    return list(dict.fromkeys(files)) or [f"{module_dir}{op}.ts"]
-
-
-def _entity_stem(entity_path: str) -> str:
-    base = entity_path.rsplit("/", 1)[-1].replace(".entity.ts", "")
-    norm = _norm(base)
-    return norm[:-1] if norm.endswith("s") else norm
+    files += [m for m in models if _model_stem(m) in wanted]
+    # de-dup, preserve order; fall back to a single module-appropriate file if nothing matched
+    return list(dict.fromkeys(files)) or [f"{module_dir}{op}{module_ext}"]
 
 
 def _frontend_items(rows: list[dict[str, str]], frontend: dict) -> list[WorkItem]:
@@ -202,6 +389,262 @@ def _frontend_items(rows: list[dict[str, str]], frontend: dict) -> list[WorkItem
             )
         )
     return items
+
+
+# ------------------------------------------------------------------ adaptive builders
+#
+# Used when the design pack is NOT the legacy flat CSV: endpoints come from OpenAPI, entities
+# from a SQL or JSON schema, screens from a UI↔API table. Target files are located in the
+# real structure trees with the same stack-agnostic role classifier used above.
+
+def _is_test_path(path: str) -> bool:
+    base = _basename(path)
+    if ".test." in base or ".spec." in base or base.startswith("test_") or base.endswith((".test", "_test")):
+        return True
+    segs = path.lower().split("/")
+    return "tests" in segs or "__tests__" in segs
+
+
+def _is_validator(path: str) -> bool:
+    return not _is_dir_leaf(path) and "validator" in _basename(path)
+
+
+def _is_page(path: str) -> bool:
+    if _is_dir_leaf(path):
+        return False
+    base = _basename(path)
+    if not base.endswith((".jsx", ".tsx", ".vue")) or ".test." in base or ".module." in base:
+        return False
+    return "pages" in path.lower().split("/")
+
+
+def _is_api_service(path: str) -> bool:
+    if _is_dir_leaf(path) or _is_test_path(path):
+        return False
+    base = _basename(path)
+    if not base.endswith((".js", ".ts")) or ".module." in base:
+        return False
+    segs = path.lower().split("/")
+    return "services" in segs or "api" in segs
+
+
+def _synth_op(method: str, path: str) -> str:
+    parts = [p for p in re.split(r"[/{}]", path) if p]
+    return method.lower() + "".join(p[:1].upper() + p[1:] for p in parts)
+
+
+def _module_dir_for_tag(tag: str, paths: list[str]) -> str:
+    """Deepest directory whose name matches an OpenAPI tag (e.g. tag 'auth' → '.../modules/auth/')."""
+    stem = _singular(_norm(tag))
+    if not stem:
+        return ""
+    best = ""
+    for p in paths:
+        segs = p.split("/")[:-1]
+        for i, seg in enumerate(segs):
+            sn = _singular(_norm(seg))
+            # Exact (singularized) match only. A substring test here over-matches — `auth`
+            # would attach to `authors/`, `art` to `cart/` — misrouting an endpoint/table/req to
+            # the wrong module. Unmatched tags are dropped (documented), which is safe: this only
+            # attaches traceability metadata; directory grouping (not this fn) owns file coverage.
+            if sn and sn == stem:
+                candidate = "/".join(segs[: i + 1]) + "/"
+                if len(candidate) > len(best):
+                    best = candidate
+    return best
+
+
+def _singular(norm: str) -> str:
+    return norm[:-1] if norm.endswith("s") and len(norm) > 1 else norm
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", text.lower())).strip("-") or "screen"
+
+
+# -- tree-driven grouping --------------------------------------------------
+#
+# The structure trees (backend-structure.json / frontend-structure.json) are the AUTHORITATIVE
+# manifest of what to build. We walk the tree and emit ONE work item per directory, so every
+# file leaf is produced by some item — including cross-cutting/bootstrap files (app entrypoints,
+# config, middleware, utils, routers, stores, styles) and endpoint-less/screen-less modules that
+# a per-endpoint or per-screen planner would never reach. Endpoints/tables/screens/req_ids are
+# ATTACHED to items as traceability + prompt-grounding context; they no longer decide which
+# items exist. One item per module also means each shared file (e.g. orders.controller.js) is
+# generated exactly once with all its endpoints in context — never clobbered by sibling items.
+
+
+def _dir_of(path: str) -> str:
+    """Immediate parent directory of a file leaf, trailing slash included ('' if top-level)."""
+    return path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+
+
+def _group_by_dir(leaves: list[tuple[str, Any]]) -> list[tuple[str, list[tuple[str, Any]]]]:
+    """Group file leaves by their immediate parent directory, preserving first-seen order."""
+    groups: dict[str, list[tuple[str, Any]]] = {}
+    order: list[str] = []
+    for path, desc in leaves:
+        d = _dir_of(path)
+        if d not in groups:
+            groups[d] = []
+            order.append(d)
+        groups[d].append((path, desc))
+    return [(d, groups[d]) for d in order]
+
+
+def _dir_item_slug(directory: str) -> str:
+    """Stable, readable work-item slug for a directory (drops the top project dir + src/app noise)."""
+    segs = [s for s in directory.strip("/").split("/") if s]
+    if len(segs) > 1:
+        segs = segs[1:]                      # drop the top project dir (quickbite-backend/…)
+    while segs and segs[0] in ("src", "app"):
+        segs = segs[1:]                      # drop conventional source-root noise
+    return _slug("-".join(segs)) if segs else "root"
+
+
+def _source_leaves(tree: dict) -> list[tuple[str, Any]]:
+    """File leaves of a structure tree, excluding directory entries and test files."""
+    return [(p, d) for p, d in _walk(tree) if not _is_dir_leaf(p) and not _is_test_path(p)]
+
+
+def _items_from_groups(
+    prefix: str,
+    leaves: list[tuple[str, Any]],
+    *,
+    endpoints_by_dir: dict[str, list[str]] | None = None,
+    tables_by_dir: dict[str, set[str]] | None = None,
+    screens_by_dir: dict[str, list[str]] | None = None,
+    reqs_by_dir: dict[str, set[str]] | None = None,
+    used_ids: set[str] | None = None,
+) -> list[WorkItem]:
+    """Build one WorkItem per directory group, attaching whatever metadata maps to that dir."""
+    endpoints_by_dir = endpoints_by_dir or {}
+    tables_by_dir = tables_by_dir or {}
+    screens_by_dir = screens_by_dir or {}
+    reqs_by_dir = reqs_by_dir or {}
+    used_ids = used_ids if used_ids is not None else set()
+
+    items: list[WorkItem] = []
+    for directory, group in _group_by_dir(leaves):
+        base = f"{prefix}-{_dir_item_slug(directory)}"
+        item_id, n = base, 1
+        while item_id in used_ids:           # keep ids unique if two dirs slug the same
+            n += 1
+            item_id = f"{base}-{n}"
+        used_ids.add(item_id)
+        items.append(
+            WorkItem(
+                id=item_id,
+                requirement_ids=sorted(reqs_by_dir.get(directory, set())),
+                endpoints=sorted(dict.fromkeys(endpoints_by_dir.get(directory, []))),
+                tables=sorted(tables_by_dir.get(directory, set())),
+                screens=list(screens_by_dir.get(directory, [])),
+                target_files=[p for p, _ in group],
+                file_specs={p: str(desc) for p, desc in group},
+            )
+        )
+    return items
+
+
+def _backend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
+    leaves = _source_leaves(resolved.backend_tree)
+    if not leaves:
+        return []
+    handlers = [p for p, _ in leaves if _is_handler(p)]
+    services = [p for p, _ in leaves if _is_service(p)]
+    module_search = handlers + services
+    entities = resolved.entities
+
+    # Aggregate each endpoint's traceability onto its module directory (metadata, not the driver).
+    endpoints_by_dir: dict[str, list[str]] = defaultdict(list)
+    tables_by_dir: dict[str, set[str]] = defaultdict(set)
+    reqs_by_dir: dict[str, set[str]] = defaultdict(set)
+    for ep in resolved.endpoints:
+        op = ep.get("operation_id") or _synth_op(ep["method"], ep["path"])
+        module_dir = _module_dir_for_tag(ep.get("tag", ""), module_search)
+        if not module_dir:
+            first_seg = re.sub(r"\{[^}]+\}", "", ep["path"]).strip("/").split("/")
+            module_dir = _module_dir_for_tag(first_seg[0] if first_seg and first_seg[0] else "", module_search)
+        if not module_dir:
+            continue  # unresolved endpoint: its module files are still generated from the tree
+        endpoints_by_dir[module_dir].append(_canonical_endpoint(ep["method"], ep["path"]))
+        tables_by_dir[module_dir].update(_tables_touched(ep["path"], op, entities))
+        reqs_by_dir[module_dir].update(resolved.tag_reqs.get(ep.get("tag", ""), []))
+
+    return _items_from_groups(
+        "backend",
+        leaves,
+        endpoints_by_dir=endpoints_by_dir,
+        tables_by_dir=tables_by_dir,
+        reqs_by_dir=reqs_by_dir,
+    )
+
+
+def _frontend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
+    leaves = _source_leaves(resolved.frontend_tree)
+    if not leaves:
+        return []
+    pages = [p for p, _ in leaves if _is_page(p)]
+    ep_index = resolved.endpoint_by_key()
+
+    # Attach each screen (and the req_ids behind its endpoints) to the directory of its page file.
+    screens_by_dir: dict[str, list[str]] = defaultdict(list)
+    reqs_by_dir: dict[str, set[str]] = defaultdict(set)
+    for screen in resolved.screens:
+        page = _match_page(screen["name"], pages)
+        if not page:
+            continue
+        directory = _dir_of(page)
+        if screen["name"] not in screens_by_dir[directory]:
+            screens_by_dir[directory].append(screen["name"])
+        for key in screen.get("endpoints", []):
+            tag = ep_index.get(key, {}).get("tag", "")
+            reqs_by_dir[directory].update(resolved.tag_reqs.get(tag, []))
+
+    return _items_from_groups(
+        "frontend",
+        leaves,
+        screens_by_dir=screens_by_dir,
+        reqs_by_dir=reqs_by_dir,
+    )
+
+
+def _reconcile_uncovered(
+    resolved: "design_pack.ResolvedPack", items: list[WorkItem]
+) -> list[WorkItem]:
+    """Sweep any structure-tree file not already covered by an item into a catch-all item.
+
+    Normally a no-op (the builders emit one item per directory, covering every leaf) — this is
+    the completeness guarantee that stops a future filtering change from silently dropping files.
+    """
+    covered = {f for item in items for f in item.target_files}
+    used_ids = {item.id for item in items}
+    extra: list[WorkItem] = []
+    for prefix, tree in (("backend", resolved.backend_tree), ("frontend", resolved.frontend_tree)):
+        uncovered = [(p, d) for p, d in _source_leaves(tree) if p not in covered]
+        if uncovered:
+            extra += _items_from_groups(prefix, uncovered, used_ids=used_ids)
+    return extra
+
+
+def _match_page(screen_name: str, pages: list[str]) -> str:
+    """Best page component for a screen by token subset (e.g. 'Customer Login' → 'LoginPage.jsx')."""
+    from app.services.design_pack import _tokens
+
+    stoks = _tokens(screen_name) - {"page", "screen", "view"}
+    best, best_score = "", 0
+    for p in pages:
+        # Tokenize the ORIGINAL-CASE stem so _tokens can split camelCase/PascalCase
+        # ("LoginPage" → {"login", "page"}). Using _basename here would lowercase first, gluing it
+        # into {"loginpage"} and defeating the subset test below. _tokens lowercases internally.
+        stem = p.rstrip("/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        ptoks = _tokens(stem) - {"page", "screen", "view", "module", "test"}
+        if not ptoks or not ptoks <= stoks:
+            continue
+        score = len(ptoks & stoks) + (1 if "page" in _basename(p).lower() else 0)
+        if score > best_score:
+            best, best_score = p, score
+    return best
 
 
 # --------------------------------------------------------------------------- write

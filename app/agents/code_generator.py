@@ -19,6 +19,7 @@ Rules honored here:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from typing import Any
@@ -28,6 +29,25 @@ from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.models import GenerationSummary, WorkItem
 from app.services.llm_gateway import LLMGateway
+
+logger = logging.getLogger(__name__)
+
+
+def _project_dir(state: WorkflowState) -> str:
+    """Root dir of the generated project within the workspace. Single source of truth shared by
+    the code_generator (initial write) and the repair path (fix write) so BOTH agree on where a
+    work item's files live — the completeness gate checks ``<project_dir>/<target>``."""
+    return state.get("project_id") or state.get("run_id") or "project"
+
+
+def _project_path(project_dir: str, path: str) -> str:
+    """Map an LLM-proposed, project-relative path to its workspace path under ``project_dir``.
+    Idempotent: a path the model already prefixed with ``project_dir/`` is not double-prefixed."""
+    rel = path.lstrip("/")
+    prefix = f"{project_dir}/"
+    if rel.startswith(prefix):
+        rel = rel[len(prefix):]
+    return f"{project_dir}/{rel}"
 
 
 class CodeGeneratorAgent(BaseAgent):
@@ -52,6 +72,18 @@ class CodeGeneratorAgent(BaseAgent):
         design_package = state.get("design_package") or {}
         context, sections_used = self._assemble_context(work_item, design_package)
         self._append_plan(state, work_item, sections_used)
+
+        phase, subject = _phase_of(work_item)
+        run_id = state.get("run_id") or "-"
+        targets = ", ".join(work_item.target_files) or "(none specified)"
+        logger.info("[code_generator] run=%s | [PLANNING] %s -> %s", run_id, work_item.id, targets)
+        logger.info(
+            "[code_generator] run=%s |   [BOILERPLATE] context: %s",
+            run_id,
+            ", ".join(sections_used) or "(none)",
+        )
+        logger.info("[code_generator] run=%s | [GENERATING %s] %s", run_id, phase, subject)
+
         system = self._load_prompt("code_generation")
 
         started = time.perf_counter()
@@ -87,6 +119,16 @@ class CodeGeneratorAgent(BaseAgent):
     @staticmethod
     def _build_prompt(work_item: WorkItem, context: str) -> str:
         targets = "\n".join(f"- {p}" for p in work_item.target_files) or "- (none specified)"
+        # Per-file spec from the design package's structure tree (e.g. "Express app factory:
+        # mounts middleware, routers, error handler"). This is what grounds generation of files
+        # that aren't tied to any single endpoint/screen — app entrypoints, config, middleware,
+        # stores — which otherwise have no context to build from.
+        specs = "\n".join(
+            f"- {p}: {work_item.file_specs[p]}"
+            for p in work_item.target_files
+            if work_item.file_specs.get(p)
+        )
+        specs_block = f"What each file must contain (from the design package):\n{specs}\n\n" if specs else ""
         return (
             f"Work item: {work_item.id}\n"
             f"Covers requirements: {', '.join(work_item.requirement_ids) or '-'}\n"
@@ -94,6 +136,7 @@ class CodeGeneratorAgent(BaseAgent):
             f"Tables: {', '.join(work_item.tables) or '-'}\n"
             f"Screens: {', '.join(work_item.screens) or '-'}\n"
             f"Target files (produce ONLY these):\n{targets}\n\n"
+            f"{specs_block}"
             f"Context (only the cited slices):\n{context}\n\n"
             'Respond with STRICT JSON only: {"files":[{"path":...,"content":...}],"notes":...}'
         )
@@ -123,11 +166,11 @@ class CodeGeneratorAgent(BaseAgent):
     def _write_files(
         self, executor: Executor, state: WorkflowState, work_item: WorkItem, files: list[dict[str, str]]
     ) -> list[str]:
-        project_dir = state.get("project_id") or state.get("run_id") or "project"
+        project_dir = _project_dir(state)
         generated = list(state.get("generated_code", []))
         written: list[str] = []
         for entry in files:
-            path = f"{project_dir}/{entry['path'].lstrip('/')}"
+            path = _project_path(project_dir, entry["path"])
             executor.write_file(path, entry["content"])
             written.append(path)
             generated.append(path)
@@ -149,6 +192,14 @@ class CodeGeneratorAgent(BaseAgent):
         )
         self._append_summary(state, line)
         self._bump_metrics(state, work_item.id, files=len(written), seconds=seconds)
+        logger.info(
+            "[code_generator] run=%s | [DONE] %s - %d file(s) in %.3fs: %s",
+            state.get("run_id") or "-",
+            work_item.id,
+            len(written),
+            seconds,
+            ", ".join(written) or "(none)",
+        )
 
     def _record_failure(self, state: WorkflowState, work_item: WorkItem, seconds: float) -> None:
         # No files written, no partial state; record the failure and its timing only.
@@ -156,6 +207,12 @@ class CodeGeneratorAgent(BaseAgent):
             state, f"[code_generator] {work_item.id}: FAILED — model did not return valid JSON (0 files)"
         )
         self._bump_metrics(state, work_item.id, files=0, seconds=seconds)
+        logger.warning(
+            "[code_generator] run=%s | [FAILED] %s - model did not return valid JSON (0 files) after %.3fs",
+            state.get("run_id") or "-",
+            work_item.id,
+            seconds,
+        )
 
     @staticmethod
     def _append_summary(state: WorkflowState, line: str) -> None:
@@ -195,18 +252,26 @@ class CodeGeneratorAgent(BaseAgent):
                 sections.append(("DB", "## DB — cited tables\n" + tables))
 
         if work_item.screens:  # frontend
-            routes = _routes_slice(_artifact(design_package, "routes.json"), work_item.screens)
+            # Accept both the canonical names and the design-narrative variants some packs ship
+            # (e.g. tic-tac-toe's design-tokens.json / functional-html-mockup.html / route-list.md).
+            routes = _routes_slice(
+                _artifact(design_package, "routes.json", "route-list.md", "routes.md"),
+                work_item.screens,
+            )
             if routes:
                 sections.append(("Routes", "## Routes — cited\n" + routes))
-            tokens = _artifact(design_package, "tokens.json")
+            tokens = _artifact(design_package, "tokens.json", "design-tokens.json")
             if tokens is not None:
                 sections.append(("Design tokens", "## Design tokens\n" + _as_text(tokens)))
-            mockup = _mockup_slice(_artifact_text(design_package, "mockup.html"), work_item.screens)
+            mockup = _mockup_slice(
+                _artifact_text(design_package, "mockup.html", "functional-html-mockup.html"),
+                work_item.screens,
+            )
             if mockup:
                 sections.append(("Mockup", "## Mockup — cited components\n" + mockup))
 
         rules = _validation_slice(
-            _artifact(design_package, "validation-rules.json"),
+            _artifact(design_package, "validation-rules.json", "validation-rules.md"),
             [*work_item.endpoints, *work_item.screens],
         )
         if rules:
@@ -232,23 +297,51 @@ class CodeGeneratorAgent(BaseAgent):
 # --------------------------------------------------------------------------- helpers
 
 
+def _phase_of(work_item: WorkItem) -> tuple[str, str]:
+    """Classify a work item into a human-readable (phase, subject) for terminal logs.
+
+    Pure logging aid — derived only from the item's own fields, no gate/routing decision.
+    e.g. a screen "login" → ("FRONTEND", "Login page"); tables → ("BACKEND · DATABASE", ...).
+    """
+    if work_item.screens:
+        pretty = ", ".join(f"{s.replace('-', ' ').replace('_', ' ').title()} page" for s in work_item.screens)
+        return "FRONTEND", pretty or "screen"
+    if work_item.tables:
+        return "BACKEND/DATABASE", "tables " + ", ".join(work_item.tables)
+    if work_item.endpoints:
+        return "BACKEND/API", "endpoints " + ", ".join(work_item.endpoints)
+    return "CODE", ", ".join(work_item.target_files) or work_item.id
+
+
 def _extract_json(text: str) -> Any:
-    """Best-effort JSON object extraction from a model reply (handles fences / stray prose)."""
+    """Best-effort JSON object extraction from a model reply.
+
+    Tolerant of the ways a model wraps a big ``{"files":[...]}`` payload: a code fence anywhere
+    (```json … ```), a prose preamble/postamble, and — crucially — **unescaped control characters
+    inside string values** (raw newlines/tabs in generated source). ``strict=False`` lets
+    ``json.loads`` accept those literal control chars instead of rejecting the whole reply, which
+    is the most common reason a code-carrying reply otherwise "has no JSON object".
+    """
     stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z0-9]*", "", stripped).strip()
-        if stripped.endswith("```"):
-            stripped = stripped[:-3].strip()
-    try:
-        return json.loads(stripped)
-    except (ValueError, TypeError):
-        pass
-    start, end = stripped.find("{"), stripped.rfind("}")
-    if start != -1 and end > start:
+
+    # A fenced block anywhere wins (```json … ``` or ``` … ```); fall back to the whole reply.
+    candidates: list[str] = []
+    fence = re.search(r"```[a-zA-Z0-9]*\n?(.*?)```", stripped, re.DOTALL)
+    if fence:
+        candidates.append(fence.group(1).strip())
+    candidates.append(stripped)
+
+    for cand in candidates:
         try:
-            return json.loads(stripped[start : end + 1])
+            return json.loads(cand, strict=False)  # strict=False: allow raw \n/\t in string values
         except (ValueError, TypeError):
-            return None
+            pass
+        start, end = cand.find("{"), cand.rfind("}")  # trim prose around the object
+        if start != -1 and end > start:
+            try:
+                return json.loads(cand[start : end + 1], strict=False)
+            except (ValueError, TypeError):
+                pass
     return None
 
 
@@ -317,14 +410,21 @@ def _routes_slice(routes: Any, screens: list[str]) -> str:
     if isinstance(routes, list):
         picked_list = [r for r in routes if any(s.lower() in json.dumps(r).lower() for s in screens)]
         return json.dumps(picked_list, indent=2, sort_keys=True) if picked_list else ""
+    if isinstance(routes, str):  # markdown/plain routes (e.g. route-list.md) — include as-is
+        return routes
     return ""
 
 
 def _mockup_slice(mockup_html: str, screens: list[str]) -> str:
     if not mockup_html or not screens:
         return ""
-    lines = [ln for ln in mockup_html.splitlines() if any(s.lower() in ln.lower() for s in screens)]
-    return "\n".join(lines)
+    lines = mockup_html.splitlines()
+    # A small mockup is typically a single-screen app (e.g. tic-tac-toe): slicing it by the literal
+    # screen name would drop the very layout the generator needs, so include it whole. Large,
+    # multi-screen mockups (e.g. ecommerce) stay sliced to just the cited screens.
+    if len(lines) <= 200:
+        return mockup_html.strip()
+    return "\n".join(ln for ln in lines if any(s.lower() in ln.lower() for s in screens))
 
 
 def _validation_slice(rules: Any, keys: list[str]) -> str:

@@ -1,9 +1,15 @@
+{% if backend.enabled %}
 __pycache__/
 *.pyc
 .venv/
-.env
 .py_packages/
+{% endif %}
+{% if environment.enabled %}
+.env
+{% endif %}
+{% if frontend.enabled %}
 node_modules/
 dist/
 build/
+{% endif %}
 *.log

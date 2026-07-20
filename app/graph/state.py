@@ -47,15 +47,21 @@ class WorkflowState(TypedDict, total=False):
     work_item_index: int                  # graph cursor: index of the NEXT item to select
     current_work_item: WorkItem | None    # the item currently being generated
     generated_code: list[str]             # workspace-relative paths of files written this run
+    scaffold_files: list[str]             # repo-root-relative boilerplate paths (for the main-branch commit)
     codegen_ok: bool                      # did the current item's generation succeed (files written)?
     gate_result: GateResult | None        # most recent gate evaluation (pass/fail + stderr)
     repair_attempt: int                   # LOCAL repair counter, reset per work item
     generation_summary: str               # human-readable free-text summary of the run
     generation_metrics: dict[str, Any]    # run-level metrics (generation-metrics.json shape)
 
-    # --- Batch human review (end of run, before the single run-level commit) ---
-    review_feedback: dict[str, str]       # item_id -> human feedback for items sent back for rework
-    current_item_feedback: str            # feedback for current_work_item during a rework pass (else "")
+    # --- Git push (opt-in; mandatory workflow rules 4 & 8) ---
+    # When push_enabled AND git_remote are set, the commit step pushes 'main' after the scaffold
+    # commit and 'dev' immediately after EACH feature commit, stopping the run if a push fails
+    # (the next feature commits only after the previous push succeeds). git_remote is a GitHub
+    # "owner/name" slug OR any git remote URL/path; git_token (optional) authenticates the push.
+    push_enabled: bool
+    git_remote: str
+    git_token: str
 
     # --- Downstream pipeline agent outputs (each agent writes only its own) ---
     review_report: str
@@ -75,11 +81,18 @@ def new_state(
     project_id: str = "",
     design_package: dict[str, Any] | None = None,
     work_items: list[WorkItem] | None = None,
+    push_enabled: bool = False,
+    git_remote: str = "",
+    git_token: str = "",
 ) -> WorkflowState:
     """Build the initial state for a run.
 
     Identity + input + Code Generation internals get their starting values; downstream agents'
     output fields are left unset (each adds its own). ``repair_attempt`` starts at 0.
+
+    Push is OFF by default (``push_enabled=False``): the commit step commits ``main``/``dev``
+    locally but pushes nothing. Set ``push_enabled=True`` + ``git_remote`` (and optionally
+    ``git_token``) to push ``main`` after the scaffold and ``dev`` after each feature.
 
     Fails fast on a malformed ``work_items`` (must be a list) rather than crashing deep in the
     graph loop.
@@ -95,11 +108,13 @@ def new_state(
         "work_item_index": 0,
         "current_work_item": None,
         "generated_code": [],
+        "scaffold_files": [],
         "gate_result": None,
         "repair_attempt": 0,
         "generation_summary": "",
         "generation_metrics": {},
-        "review_feedback": {},
-        "current_item_feedback": "",
+        "push_enabled": push_enabled,
+        "git_remote": git_remote,
+        "git_token": git_token,
         "workflow_status": "pending",
     }

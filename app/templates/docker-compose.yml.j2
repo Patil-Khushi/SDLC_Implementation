@@ -1,7 +1,29 @@
 services:
+{% if backend.enabled %}
   backend:
     build: .
     ports:
       - "8000:8000"
+{% if environment.enabled %}
     env_file:
       - .env
+{% endif %}
+{% if database.enabled %}
+    depends_on:
+      - db
+{% endif %}
+{% endif %}
+{% if frontend.enabled %}
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    command: ["npm", "run", "dev"]
+    ports:
+      - "5173:5173"
+{% endif %}
+{% if database.enabled %}
+  db:
+    image: {{ database.provider }}:16
+    ports:
+      - "5432:5432"
+{% endif %}
