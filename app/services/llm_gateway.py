@@ -5,6 +5,8 @@ This keeps prompt execution, retries, logging, and provider choice in one place.
 """
 
 import logging
+import re
+import time
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -14,6 +16,28 @@ import anthropic
 from app.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _retry_after_seconds(exc: Exception, default: float) -> float:
+    """How long to wait before retrying a 429, from the ``Retry-After`` header or the error body.
+
+    Foundry/Azure returns a ``retry-after`` header AND embeds "Please wait N seconds" in the
+    message; honor whichever is present (capped) so we back off exactly as long as the API asks."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            header = resp.headers.get("retry-after")
+        except Exception:  # noqa: BLE001 - defensive: headers shape can vary
+            header = None
+        if header:
+            try:
+                return min(float(header) + 1.0, 60.0)
+            except ValueError:
+                pass
+    match = re.search(r"wait\s+(\d+)\s*second", str(exc), re.IGNORECASE)
+    if match:
+        return min(float(match.group(1)) + 1.0, 60.0)
+    return default
 
 
 class LLMGateway:
@@ -65,12 +89,35 @@ class LLMGateway:
         if self._use_thinking:
             kwargs["thinking"] = {"type": "adaptive"}
 
-        response = self._get_client().messages.create(**kwargs)
+        # Stream and accumulate rather than a single blocking create(): large
+        # outputs (code generation can be tens of thousands of tokens) otherwise
+        # exceed the non-streaming HTTP timeout window. Streaming lets max_tokens
+        # go as high as the model supports (128K on Sonnet 4.6) without timing out.
+        # Retry on 429 (rate limit) honoring the API's requested wait — chunked
+        # generation fires many calls, so the per-minute input limit is easy to hit
+        # in bursts; backing off and retrying makes a run resilient instead of failing.
+        response = None
+        max_attempts = 6
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with self._get_client().messages.stream(**kwargs) as stream:
+                    response = stream.get_final_message()
+                break
+            except anthropic.RateLimitError as exc:
+                if attempt == max_attempts:
+                    raise
+                wait = _retry_after_seconds(exc, default=15.0)
+                logger.warning(
+                    "llm_call 429 rate-limited; waiting %.0fs then retrying (attempt %d/%d)",
+                    wait, attempt, max_attempts,
+                )
+                time.sleep(wait)
         logger.info(
-            "llm_call model=%s input_tokens=%s output_tokens=%s",
+            "llm_call model=%s input_tokens=%s output_tokens=%s stop=%s",
             self._model,
             response.usage.input_tokens,
             response.usage.output_tokens,
+            response.stop_reason,  # 'max_tokens' here means the reply was truncated
         )
         return "".join(
             block.text for block in response.content if block.type == "text"

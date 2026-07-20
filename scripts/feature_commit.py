@@ -58,7 +58,7 @@ from pathlib import Path
 _IMPL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_IMPL_DIR))
 
-from app.agents.code_generator import CodeGeneratorAgent  # noqa: E402
+from app.agents.code_generator import CodeGeneratorAgent, _extract_json  # noqa: E402
 from app.services.boilerplate import render_scaffold  # noqa: E402
 from app.services.llm_gateway import LLMGateway  # noqa: E402
 
@@ -274,15 +274,22 @@ def _layer_prompt(
     )
 
 
+# A full-stack layer can legitimately emit many source files in one JSON reply, so it needs a
+# large output budget — 32K was truncating mid-file (stop_reason=max_tokens → unparseable JSON).
+# 64K fits typical layers with headroom; Sonnet 4.6 supports up to 128K. The gateway streams, so
+# a budget this large doesn't risk an HTTP timeout.
+_GEN_MAX_TOKENS = 64000
+
+
 def _generate(gw: LLMGateway, prompt: str) -> list[dict[str, str]]:
-    raw = gw.complete(prompt=prompt, system=_SYSTEM)
+    raw = gw.complete(prompt=prompt, system=_SYSTEM, max_tokens=_GEN_MAX_TOKENS)
     files, err = CodeGeneratorAgent._parse(raw)
     if files is None:  # one retry, same pattern as the code_generator agent
         retry = (
             f"{prompt}\n\nYour previous reply was not valid JSON ({err}). Reply with STRICT JSON "
             'only — a single {"files":[{"path":...,"content":...}]} object, nothing else.'
         )
-        raw = gw.complete(prompt=retry, system=_SYSTEM)
+        raw = gw.complete(prompt=retry, system=_SYSTEM, max_tokens=_GEN_MAX_TOKENS)
         files, err = CodeGeneratorAgent._parse(raw)
     if files is None:
         # Log what actually came back so an intermittent bad reply is diagnosable (empty? prose?
@@ -295,11 +302,134 @@ def _generate(gw: LLMGateway, prompt: str) -> list[dict[str, str]]:
     return files
 
 
+# --------------------------------------------------------------------------- chunked generation
+#
+# Instead of one LLM call per layer returning EVERY file (output scales with feature size → hits the
+# max_tokens cap → truncated JSON), a small "manifest" call lists the files, then each file is
+# produced in its OWN bounded call. Output per call is one file, so it can't truncate. The per-file
+# prompt sends a compact view of existing code (all paths, contents of only a relevant few) so the
+# extra calls don't resend the whole codebase.
+
+_MANIFEST_MAX_TOKENS = 4000     # a file list (paths + one-line purposes) is small
+_RELEVANT_FILE_CAP = 12         # existing files whose CONTENTS are included in a per-file prompt
+_RELEVANT_CHARS_CAP = 60_000    # char budget for those included bodies
+
+
+def _existing_view(current: dict[str, str], target_dir: str) -> str:
+    """Compact existing-source view for a per-file prompt: ALL paths always, plus the CONTENTS of
+    only the most relevant files (same directory first), within a cap — replaces dumping every file."""
+    if not current:
+        return "Existing files: (none yet)"
+    listing = "\n".join(f"- {p}" for p in sorted(current))
+    same_dir = [p for p in current if (p.rsplit("/", 1)[0] if "/" in p else "") == target_dir]
+    ranked = same_dir + [p for p in current if p not in same_dir]
+    included: list[str] = []
+    budget = _RELEVANT_CHARS_CAP
+    for p in ranked[:_RELEVANT_FILE_CAP]:
+        body = current[p]
+        if len(body) > budget:
+            continue
+        included.append(f"### {p}\n```\n{body}\n```")
+        budget -= len(body)
+    bodies = "\n\n".join(included) or "(paths listed above; contents omitted)"
+    return f"Existing files (paths):\n{listing}\n\nRelevant existing file contents:\n{bodies}"
+
+
+def _layer_manifest(
+    gw: LLMGateway, ctx: str, existing_paths: list[str], sid: str, title: str, body: str,
+    label: str, instruction: str,
+) -> list[dict[str, str]]:
+    """One small LLM call: the list of files this layer will create/modify (paths + purpose, NO
+    content). Tiny output, so it never truncates. Returns [] if unparseable (caller falls back)."""
+    listing = "\n".join(f"- {p}" for p in existing_paths) or "(none yet)"
+    prompt = (
+        f"Design context for this layer:\n{ctx or '(none provided — build from the feature spec)'}\n\n"
+        f"Existing files (paths only):\n{listing}\n\n"
+        f"Feature (user story):\n{sid} — {title}\n{body}\n\n"
+        f"Plan the {label} layer for this feature: {instruction}\n\n"
+        "List ONLY the files to create or modify for THIS layer — do NOT write any code. "
+        'Respond with STRICT JSON: {"files":[{"path":"...","purpose":"one line"}]}. '
+        "No content, no prose, no code fences."
+    )
+    obj = _extract_json(gw.complete(prompt=prompt, system=_SYSTEM, max_tokens=_MANIFEST_MAX_TOKENS))
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    if isinstance(obj, dict) and isinstance(obj.get("files"), list):
+        for entry in obj["files"]:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                continue
+            path = entry["path"].strip().lstrip("/")
+            if path and path not in seen:
+                seen.add(path)
+                out.append({"path": path, "purpose": str(entry.get("purpose", "")).strip()})
+    return out
+
+
+def _generate_file(
+    gw: LLMGateway, ctx: str, sid: str, title: str, body: str, label: str,
+    path: str, purpose: str, manifest_paths: list[str], current: dict[str, str],
+) -> dict[str, str] | None:
+    """Generate EXACTLY ONE file. Bounded output → no truncation. One retry on bad JSON; returns
+    None if it still won't parse (caller skips it rather than failing the whole feature)."""
+    target_dir = path.rsplit("/", 1)[0] if "/" in path else ""
+    siblings = "\n".join(f"- {p}" for p in manifest_paths) or f"- {path}"
+    prompt = (
+        f"Design context for this layer:\n{ctx or '(none provided — build from the feature spec)'}\n\n"
+        f"{_existing_view(current, target_dir)}\n\n"
+        f"Feature (user story):\n{sid} — {title}\n{body}\n\n"
+        f"Layer: {label}\nFiles planned for this layer:\n{siblings}\n\n"
+        f"Generate EXACTLY ONE file now: {path}\n"
+        f"Its purpose: {purpose or '(infer from the feature and the path)'}\n\n"
+        'Respond with STRICT JSON containing ONLY that one file: '
+        '{"files":[{"path":"...","content":"..."}]}. No other files, no prose, no code fences.'
+    )
+    files, err = CodeGeneratorAgent._parse(gw.complete(prompt=prompt, system=_SYSTEM, max_tokens=_GEN_MAX_TOKENS))
+    if files is None:
+        retry = f"{prompt}\n\nYour previous reply was not valid JSON ({err}). Reply with STRICT JSON only."
+        files, err = CodeGeneratorAgent._parse(gw.complete(prompt=retry, system=_SYSTEM, max_tokens=_GEN_MAX_TOKENS))
+    if files is None:
+        logging.getLogger(__name__).warning("codegen: file %r unparseable (%s) — skipping", path, err)
+        return None
+    # Force the manifest path (don't let the model rename); prefer a matching entry, else the first.
+    match = next((f for f in files if f["path"].lstrip("/") == path), files[0])
+    return {"path": path, "content": match["content"]}
+
+
+def _generate_layer_chunked(
+    gw: LLMGateway, ctx: str, current: dict[str, str], sid: str, title: str, body: str,
+    label: str, instruction: str,
+) -> list[dict[str, str]]:
+    """Produce a layer's files ONE PER CALL (manifest → per-file), so output size never depends on
+    how big the feature is. ``current`` is updated as each file is produced, so later files in the
+    layer see earlier ones. Falls back to the whole-layer :func:`_generate` if the manifest is empty
+    or every file fails — a layer never hard-fails on the chunked path alone."""
+    manifest = _layer_manifest(gw, ctx, sorted(current), sid, title, body, label, instruction)
+    if not manifest:
+        return _generate(gw, _layer_prompt(ctx, current, sid, title, body, label, instruction))
+    manifest_paths = [m["path"] for m in manifest]
+    produced: list[dict[str, str]] = []
+    for m in manifest:
+        f = _generate_file(gw, ctx, sid, title, body, label, m["path"], m["purpose"], manifest_paths, current)
+        if f is None:
+            continue
+        current[f["path"]] = f["content"]  # visible to later files in this layer
+        produced.append(f)
+    if not produced:  # manifest parsed but no file did — fall back so the layer still lands
+        return _generate(gw, _layer_prompt(ctx, current, sid, title, body, label, instruction))
+    return produced
+
+
 def _write(project_dir: Path, files: list[dict[str, str]], current: dict[str, str]) -> list[str]:
+    root = project_dir.resolve()
     written = []
     for f in files:
         rel = f["path"].lstrip("/")
-        dest = project_dir / rel
+        dest = (project_dir / rel).resolve()
+        # Refuse paths that escape the project dir (`..`, absolute/drive paths). The paths come
+        # from LLM output, so guard like LocalDiskExecutor._resolve does. Skip, don't crash.
+        if dest != root and root not in dest.parents:
+            logging.getLogger(__name__).warning("skipping path that escapes project dir: %r", f["path"])
+            continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f["content"], encoding="utf-8")
         current[rel] = f["content"]
@@ -410,8 +540,8 @@ def main() -> None:
             print(f"=== {sid} — {title} ===")
             for key, label, instruction in _LAYERS:
                 ctx = _design_context(pack, _LAYER_CONTEXT[key])
-                print(f"  [{label}] generating with Claude ...")
-                files = _generate(gw, _layer_prompt(ctx, current, sid, title, body, label, instruction))
+                print(f"  [{label}] generating with Claude (chunked, one file per call) ...")
+                files = _generate_layer_chunked(gw, ctx, current, sid, title, body, label, instruction)
                 written = _write(project_dir, files, current)
                 print(f"     files: {written or '(none)'}")
             # One commit for the whole feature (all five layers), then push before the next feature.
