@@ -26,7 +26,13 @@ class Settings(BaseSettings):
     anthropic_foundry_resource: str = ""
     # On Foundry the model is the DEPLOYMENT name, not the public Anthropic model id.
     llm_model: str = "claude-sonnet-4-6"
-    llm_max_tokens: int = 16000
+    # A work item is now one whole module/directory (several files in one reply), not a single
+    # endpoint, so each generation returns more code — give it enough output headroom.
+    llm_max_tokens: int = 32000
+    # Per-request wall-clock budget (seconds) for a single LLM call. Larger module items take
+    # longer to generate; without this the SDK default could cut a slow reply short. Passed to
+    # the Anthropic client in llm_gateway.py.
+    llm_timeout_seconds: float = 600.0
     # Adaptive thinking is supported on Claude 4.6+ deployments (beta on Foundry).
     # Set false if you point llm_model at a deployment that lacks extended thinking.
     llm_thinking: bool = True

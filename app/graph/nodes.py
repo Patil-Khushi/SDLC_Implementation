@@ -32,13 +32,16 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     files = render_scaffold(project_dir, state.get("design_package"))
     generated = list(state.get("generated_code", []))
+    scaffold_files = list(state.get("scaffold_files", []))
     written: list[str] = []
     for entry in files:
         path = f"{project_dir}/{entry['path']}"
         executor.write_file(path, entry["content"])
         written.append(path)
         generated.append(path)
+        scaffold_files.append(entry["path"])  # repo-root-relative — used for the main-branch commit
     state["generated_code"] = generated
+    state["scaffold_files"] = scaffold_files
     names = ", ".join(w.rsplit("/", 1)[-1] for w in written)
     state["generation_summary"] = (
         state.get("generation_summary") or ""
@@ -103,13 +106,101 @@ def gate_node(state: WorkflowState) -> WorkflowState:
     return state
 
 
+def _feature_commit_message(work_item) -> str:
+    """A conventional-commit subject for one work item (its module/feature)."""
+    if work_item.screens:
+        subject = ", ".join(work_item.screens)
+    elif work_item.endpoints:
+        subject = ", ".join(work_item.endpoints)
+    elif work_item.tables:
+        subject = "models " + ", ".join(work_item.tables)
+    else:
+        subject = f"{len(work_item.target_files)} file(s)"
+    return f"feat({work_item.id}): {subject}"
+
+
+def _group_feature_commits(work_items) -> list[tuple[str, list[str]]]:
+    """Group work items into ONE commit per user-feature (mandatory rule 6).
+
+    Items sharing a ``feature_id`` (assigned by the plan builder from user_features.json /
+    user-features.md) collapse into a single ``feat(<feature_id>): <feature_title>`` commit whose
+    paths are the union of the group's ``target_files``. Items with no ``feature_id`` are keyed by
+    their own id, so they stay one-commit-per-item — exactly the prior behaviour — and their
+    message keeps the per-work-item subject. Group order follows first appearance in the plan.
+    """
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    for wi in work_items:
+        key = wi.feature_id or wi.id
+        if key not in groups:
+            groups[key] = {"feature_id": wi.feature_id, "title": wi.feature_title, "items": []}
+            order.append(key)
+        groups[key]["items"].append(wi)
+
+    commits: list[tuple[str, list[str]]] = []
+    for key in order:
+        group = groups[key]
+        if group["feature_id"]:
+            title = group["title"] or group["feature_id"]
+            message = f"feat({group['feature_id']}): {title}"
+        else:  # ungrouped single item — keep the per-work-item message (legacy behaviour)
+            message = _feature_commit_message(group["items"][0])
+        paths = list(dict.fromkeys(p for wi in group["items"] for p in wi.target_files))
+        commits.append((message, paths))
+    return commits
+
+
 def commit_node(state: WorkflowState) -> WorkflowState:
-    """FIXED: commit the WHOLE run's files in one commit. Reached automatically once every work
-    item has gate-passed — no human approval (HITL removed)."""
+    """FIXED commit step (never formed by the LLM — CLAUDE.md rule 2). Reached automatically once
+    every work item has gate-passed (no human approval — HITL removed).
+
+    Two shapes, chosen by executor capability:
+    * If the executor supports ``commit_feature_history`` (the local/real disk executor), produce
+      a real branch structure — the scaffold on ``main`` and ONE ``feat(<work-item id>): …``
+      commit per work item on ``dev`` — so the generated repo carries a per-feature history.
+    * Otherwise (the in-memory/sandbox executor), fall back to a single run-level commit, exactly
+      as before — keeps the sandbox/test path and its assertions unchanged.
+    """
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     work_items = state.get("work_items", [])
     files = state.get("generated_code", [])
+
+    if hasattr(executor, "commit_feature_history"):
+        scaffold_files = state.get("scaffold_files", [])
+        feature_commits = _group_feature_commits(work_items)  # ONE commit per feature (rule 6)
+        # Push (opt-in, mandatory rules 4 & 8): push 'main' after the scaffold and 'dev' after each
+        # feature, stopping the run if a push fails. Off unless push_enabled + a remote are set.
+        push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
+        try:
+            result = executor.commit_feature_history(
+                project_dir,
+                scaffold_files=scaffold_files,
+                feature_commits=feature_commits,
+                base_branch="main",
+                feature_branch="dev",
+                push=push,
+                remote=state.get("git_remote") or None,
+                token=state.get("git_token") or None,
+            )
+        except Exception as exc:  # noqa: BLE001 - don't crash the run on a commit failure
+            logger.exception("feature-history commit failed for run %s", state.get("run_id"))
+            state["generation_summary"] = (state.get("generation_summary") or "") + f"[commit] FAILED: {exc}\n"
+            return state
+        pushed = f" (pushed to '{state.get('git_remote')}')" if push else ""
+        if result.exit_code != 0:  # a push failed → run stopped before finishing (rule 8)
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                f"[commit] scaffold on 'main' + feature commit(s) on 'dev' — PUSH FAILED: "
+                f"{(result.stderr or result.stdout).strip()[:200]}\n"
+            )
+            state["workflow_status"] = "push_failed"
+            return state
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            f"[commit] scaffold on 'main' + {len(feature_commits)} feature commit(s) on 'dev'{pushed}\n"
+        )
+        state["workflow_status"] = "completed"
+        return state
+
     message = f"IMP-001 {state.get('run_id', 'run')}: {len(work_items)} work item(s), {len(files)} file(s)"
     try:
         executor.git_commit(project_dir, message)  # LLM never forms/executes this call (rule 2)

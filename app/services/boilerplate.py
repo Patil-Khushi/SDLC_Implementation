@@ -1,9 +1,11 @@
 """Deterministic project-scaffold renderer (no LLM).
 
 Renders the repo-root boilerplate a generated project needs (Dockerfile, .gitignore, README.md,
-docker-compose.yml, .env.example, requirements.txt, package.json) from the Jinja2 templates in
-``app/templates/``, once per run, before any work item is generated — so the LLM is never asked to
-produce files whose shape is already known.
+docker-compose.yml, .env.example, requirements.txt, package.json) once per run, before any work
+item is generated — so the LLM is never asked to produce files whose shape is already known. Most
+files come from the Jinja2 templates in ``app/templates/``; the ``README.md`` is instead built by
+:mod:`app.services.readme`, which mines the Design Package to emit a real, application-specific
+README (features, tech stack, project structure, API, screens, data model) rather than a stub.
 
 INPUT-AWARE, not stack-aware. Two levels of input-drivenness:
 
@@ -115,10 +117,13 @@ class ScaffoldConfig:
 # (template filename, rendered output path, predicate). A file is emitted ONLY if predicate(cfg)
 # is True — skipping happens here, at manifest-filter time, so a disabled capability yields no file
 # at all rather than an empty/whitespace one. Order = the order files are written and logged.
+# ``README.md`` uses the ``_README`` sentinel: it is not a Jinja template but is built by
+# app.services.readme.render_readme (a real, per-application README, not a stub).
+_README = "<readme>"
 _SCAFFOLD: list[tuple[str, str, Callable[[ScaffoldConfig], bool]]] = [
     ("Dockerfile.j2", "Dockerfile", lambda c: c.enabled("docker") and c.enabled("backend")),
     ("gitignore.j2", ".gitignore", lambda c: True),
-    ("README.md.j2", "README.md", lambda c: True),
+    (_README, "README.md", lambda c: True),
     ("docker-compose.yml.j2", "docker-compose.yml", lambda c: c.enabled("docker")),
     ("env.example.j2", ".env.example", lambda c: c.enabled("environment")),
     ("requirements.txt.j2", "requirements.txt", lambda c: c.enabled("backend")),
@@ -289,8 +294,17 @@ def render_scaffold(
         "project_id": config.project_name,  # back-compat: templates historically used project_id
         **config.data,
     }
-    return [
-        {"path": out_path, "content": env.get_template(template_name).render(**context)}
-        for template_name, out_path, predicate in _SCAFFOLD
-        if predicate(config)
-    ]
+    # Imported here (not at module top) to avoid an import cycle: readme.py type-checks against
+    # ScaffoldConfig defined in this module.
+    from app.services.readme import render_readme
+
+    entries: list[dict[str, str]] = []
+    for template_name, out_path, predicate in _SCAFFOLD:
+        if not predicate(config):
+            continue
+        if template_name == _README:
+            content = render_readme(config, design_package)
+        else:
+            content = env.get_template(template_name).render(**context)
+        entries.append({"path": out_path, "content": content})
+    return entries

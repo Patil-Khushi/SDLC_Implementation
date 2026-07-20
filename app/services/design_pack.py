@@ -53,7 +53,12 @@ def _singular(norm: str) -> str:
 
 
 def _tokens(text: str) -> set[str]:
-    return {t for t in re.findall(r"[a-z0-9]+", str(text).lower()) if t}
+    # Split camelCase/PascalCase boundaries BEFORE lowercasing so "LoginPage" tokenizes to
+    # {"login", "page"} — not the single glued token {"loginpage"}. Without this, screen-name
+    # ↔ page-file matching (plan_builder._match_page uses a token-subset test) never succeeds
+    # for PascalCase component files.
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(text))
+    return {t for t in re.findall(r"[a-z0-9]+", spaced.lower()) if t}
 
 
 def endpoint_key(method: str, path: str) -> str:

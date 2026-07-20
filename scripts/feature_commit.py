@@ -47,6 +47,7 @@ It does NOT go through the LangGraph batch-review workflow — its job is a clea
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import shutil
 import subprocess
@@ -274,12 +275,23 @@ def _layer_prompt(
 
 
 def _generate(gw: LLMGateway, prompt: str) -> list[dict[str, str]]:
-    files, err = CodeGeneratorAgent._parse(gw.complete(prompt=prompt, system=_SYSTEM))
+    raw = gw.complete(prompt=prompt, system=_SYSTEM)
+    files, err = CodeGeneratorAgent._parse(raw)
     if files is None:  # one retry, same pattern as the code_generator agent
-        retry = f"{prompt}\n\nYour previous reply was not valid JSON ({err}). Reply with STRICT JSON only."
-        files, err = CodeGeneratorAgent._parse(gw.complete(prompt=retry, system=_SYSTEM))
+        retry = (
+            f"{prompt}\n\nYour previous reply was not valid JSON ({err}). Reply with STRICT JSON "
+            'only — a single {"files":[{"path":...,"content":...}]} object, nothing else.'
+        )
+        raw = gw.complete(prompt=retry, system=_SYSTEM)
+        files, err = CodeGeneratorAgent._parse(raw)
     if files is None:
-        raise RuntimeError(f"generation returned invalid JSON: {err}")
+        # Log what actually came back so an intermittent bad reply is diagnosable (empty? prose?
+        # refusal? truncated?) rather than opaque. Kept short so it doesn't flood the console.
+        preview = (raw or "").strip().replace("\n", "\\n")[:300]
+        logging.getLogger(__name__).warning(
+            "codegen: unparseable reply (%s) len=%d preview=%r", err, len(raw or ""), preview
+        )
+        raise RuntimeError(f"generation returned invalid JSON: {err} (reply len={len(raw or '')})")
     return files
 
 

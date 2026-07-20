@@ -17,6 +17,15 @@ class WorkItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1, description="Stable id, e.g. 'WI-001'. Join key for summaries/metrics.")
+    feature_id: str = Field(
+        default="", description="User-feature this item belongs to, e.g. '4.1' (from user_features.json) "
+        "or 'F-02' (from user-features.md). Items sharing a feature_id are committed together as ONE "
+        "feat(...) commit. Empty = ungrouped (committed on its own, keyed by id)."
+    )
+    feature_title: str = Field(
+        default="", description="Human-readable feature name for the commit subject, e.g. "
+        "'User Registration and Authentication'."
+    )
     requirement_ids: list[str] = Field(
         default_factory=list, description="REQ IDs this work item implements (traceability)."
     )
@@ -31,4 +40,10 @@ class WorkItem(BaseModel):
     )
     target_files: list[str] = Field(
         default_factory=list, description="Workspace-relative file paths this item should produce."
+    )
+    file_specs: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional per-target-file spec (path -> what the file must contain), taken "
+        "verbatim from the design package's structure tree. Grounds generation of files that "
+        "aren't tied to a single endpoint/screen (app entrypoints, config, middleware, stores).",
     )

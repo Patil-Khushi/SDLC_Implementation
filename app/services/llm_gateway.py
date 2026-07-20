@@ -26,6 +26,7 @@ class LLMGateway:
         self._api_key = settings.anthropic_foundry_api_key or None
         self._base_url = settings.anthropic_foundry_base_url or None
         self._resource = settings.anthropic_foundry_resource or None
+        self._timeout = settings.llm_timeout_seconds
         self._use_thinking = settings.llm_thinking
         # Build the client lazily (see _get_client). The Anthropic SDK raises
         # at construction if no credentials/endpoint are resolvable, so building
@@ -36,7 +37,7 @@ class LLMGateway:
     def _get_client(self) -> anthropic.AnthropicFoundry:
         """Create the Foundry client on first use (Claude via Azure AI Foundry)."""
         if self._client is None:
-            kwargs: dict = {"api_key": self._api_key}
+            kwargs: dict = {"api_key": self._api_key, "timeout": self._timeout}
             # base_url and resource are mutually exclusive in the SDK; prefer base_url.
             if self._base_url:
                 kwargs["base_url"] = self._base_url

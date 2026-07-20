@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +85,60 @@ def _canonical_endpoint(method: str, path: str) -> str:
     return f"{method.strip().upper()} {path.split('?', 1)[0].strip()}"
 
 
+# --------------------------------------------------------------------------- feature grouping
+
+#: A user-features.md table row: ``| F-0X <name> | REQ-0YY | <user story> |``.
+_FEATURE_MD_ROW = re.compile(r"^\|\s*(F-\d+)\b\s*([^|]*?)\s*\|\s*([A-Z]+-\d+)\s*\|", re.MULTILINE)
+
+
+def _feature_map(pack: Path, roles: dict) -> dict[str, tuple[str, str]]:
+    """Map ``requirement_id -> (feature_id, feature_title)`` from the pack's feature definition.
+
+    Prefers the structured ``user_features`` artifact (``user_features.json`` — ``features[]``
+    with ``id``/``name``/``requirements``); falls back to a ``user-features.md`` table
+    (``| F-0X name | REQ | … |``). Returns ``{}`` when neither is present (items stay ungrouped).
+    """
+    mapping: dict[str, tuple[str, str]] = {}
+    detected = design_pack._first(roles, "user_features")
+    if detected is not None and isinstance(detected.obj, dict):
+        for feat in detected.obj.get("features", []):
+            if not isinstance(feat, dict):
+                continue
+            feature_id = str(feat.get("id") or feat.get("name") or "").strip()
+            title = str(feat.get("name") or "").strip()
+            if not feature_id:
+                continue
+            for req in feat.get("requirements", []):
+                req = str(req).strip()
+                if req:
+                    mapping.setdefault(req, (feature_id, title))
+    if mapping:
+        return mapping
+
+    md = pack / "user-features.md"
+    if md.exists():
+        for match in _FEATURE_MD_ROW.finditer(md.read_text(encoding="utf-8")):
+            mapping.setdefault(match.group(3), (match.group(1), match.group(2).strip()))
+    return mapping
+
+
+def _assign_features(items: list[WorkItem], feature_map: dict[str, tuple[str, str]]) -> list[WorkItem]:
+    """Return items tagged with the feature of their primary (first-listed) mapped requirement.
+
+    Items whose requirements don't map to any feature are returned unchanged (feature_id stays "").
+    """
+    if not feature_map:
+        return items
+    tagged: list[WorkItem] = []
+    for item in items:
+        feature = next((feature_map[r] for r in item.requirement_ids if r in feature_map), None)
+        if feature:
+            tagged.append(item.model_copy(update={"feature_id": feature[0], "feature_title": feature[1]}))
+        else:
+            tagged.append(item)
+    return tagged
+
+
 # --------------------------------------------------------------------------- builders
 
 def build_plan(pack_dir: str | Path) -> list[WorkItem]:
@@ -109,16 +163,26 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
         tables = design_pack._schema_entities(schema.path, schema.obj) if schema else []
         backend = _structure_obj(roles, "backend_structure")
         frontend = _structure_obj(roles, "frontend_structure")
-        return _backend_items(rows, tables, backend) + _frontend_items(rows, frontend)
+        items = _backend_items(rows, tables, backend) + _frontend_items(rows, frontend)
+    else:
+        # Adaptive path: normalize whatever formats arrived, then build from the neutral view.
+        resolved = design_pack.resolve(pack, roles)
+        if resolved is None or (not resolved.endpoints and not resolved.screens):
+            raise FileNotFoundError(
+                f"{pack_dir}: no recognizable design-package artifacts (need an OpenAPI spec or a "
+                "UI↔API mapping table)."
+            )
+        items = _backend_items_adaptive(resolved) + _frontend_items_adaptive(resolved)
+        # Authoritative-manifest guarantee: every non-test file leaf in the structure trees must be
+        # produced by SOME work item. The builders are exhaustive by construction (one item per
+        # directory), so this normally adds nothing — it's a guard that turns any future coverage
+        # gap into an explicit catch-all item instead of a silent omission.
+        items += _reconcile_uncovered(resolved, items)
 
-    # Adaptive path: normalize whatever formats arrived, then build from the neutral view.
-    resolved = design_pack.resolve(pack, roles)
-    if resolved is None or (not resolved.endpoints and not resolved.screens):
-        raise FileNotFoundError(
-            f"{pack_dir}: no recognizable design-package artifacts (need an OpenAPI spec or a "
-            "UI↔API mapping table)."
-        )
-    return _backend_items_adaptive(resolved) + _frontend_items_adaptive(resolved)
+    # Tag each item with the user-feature it belongs to (feature → REQ traceability), so the commit
+    # step can group items into ONE commit per feature. Items whose requirements don't map to any
+    # feature (bootstrap/cross-cutting files) stay untagged and commit on their own.
+    return _assign_features(items, _feature_map(pack, roles))
 
 
 def _structure_obj(roles: dict, role: str) -> dict:
@@ -393,107 +457,169 @@ def _slug(text: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", text.lower())).strip("-") or "screen"
 
 
-def _backend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
-    entities = resolved.entities
-    leaves = _walk(resolved.backend_tree)
-    handlers = [p for p, _ in leaves if _is_handler(p) and not _is_test_path(p)]
-    services = [p for p, _ in leaves if _is_service(p) and not _is_test_path(p)]
-    schemas = [p for p, _ in leaves if (_is_schema_file(p) or _is_validator(p)) and not _is_test_path(p)]
-    models = [p for p, _ in leaves if _is_model(p) and not _is_test_path(p)]
-    default_ext = _dominant_ext([p for p, _ in leaves]) or ".js"
-    module_search = handlers + services
+# -- tree-driven grouping --------------------------------------------------
+#
+# The structure trees (backend-structure.json / frontend-structure.json) are the AUTHORITATIVE
+# manifest of what to build. We walk the tree and emit ONE work item per directory, so every
+# file leaf is produced by some item — including cross-cutting/bootstrap files (app entrypoints,
+# config, middleware, utils, routers, stores, styles) and endpoint-less/screen-less modules that
+# a per-endpoint or per-screen planner would never reach. Endpoints/tables/screens/req_ids are
+# ATTACHED to items as traceability + prompt-grounding context; they no longer decide which
+# items exist. One item per module also means each shared file (e.g. orders.controller.js) is
+# generated exactly once with all its endpoints in context — never clobbered by sibling items.
+
+
+def _dir_of(path: str) -> str:
+    """Immediate parent directory of a file leaf, trailing slash included ('' if top-level)."""
+    return path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+
+
+def _group_by_dir(leaves: list[tuple[str, Any]]) -> list[tuple[str, list[tuple[str, Any]]]]:
+    """Group file leaves by their immediate parent directory, preserving first-seen order."""
+    groups: dict[str, list[tuple[str, Any]]] = {}
+    order: list[str] = []
+    for path, desc in leaves:
+        d = _dir_of(path)
+        if d not in groups:
+            groups[d] = []
+            order.append(d)
+        groups[d].append((path, desc))
+    return [(d, groups[d]) for d in order]
+
+
+def _dir_item_slug(directory: str) -> str:
+    """Stable, readable work-item slug for a directory (drops the top project dir + src/app noise)."""
+    segs = [s for s in directory.strip("/").split("/") if s]
+    if len(segs) > 1:
+        segs = segs[1:]                      # drop the top project dir (quickbite-backend/…)
+    while segs and segs[0] in ("src", "app"):
+        segs = segs[1:]                      # drop conventional source-root noise
+    return _slug("-".join(segs)) if segs else "root"
+
+
+def _source_leaves(tree: dict) -> list[tuple[str, Any]]:
+    """File leaves of a structure tree, excluding directory entries and test files."""
+    return [(p, d) for p, d in _walk(tree) if not _is_dir_leaf(p) and not _is_test_path(p)]
+
+
+def _items_from_groups(
+    prefix: str,
+    leaves: list[tuple[str, Any]],
+    *,
+    endpoints_by_dir: dict[str, list[str]] | None = None,
+    tables_by_dir: dict[str, set[str]] | None = None,
+    screens_by_dir: dict[str, list[str]] | None = None,
+    reqs_by_dir: dict[str, set[str]] | None = None,
+    used_ids: set[str] | None = None,
+) -> list[WorkItem]:
+    """Build one WorkItem per directory group, attaching whatever metadata maps to that dir."""
+    endpoints_by_dir = endpoints_by_dir or {}
+    tables_by_dir = tables_by_dir or {}
+    screens_by_dir = screens_by_dir or {}
+    reqs_by_dir = reqs_by_dir or {}
+    used_ids = used_ids if used_ids is not None else set()
 
     items: list[WorkItem] = []
-    seen: set[str] = set()
+    for directory, group in _group_by_dir(leaves):
+        base = f"{prefix}-{_dir_item_slug(directory)}"
+        item_id, n = base, 1
+        while item_id in used_ids:           # keep ids unique if two dirs slug the same
+            n += 1
+            item_id = f"{base}-{n}"
+        used_ids.add(item_id)
+        items.append(
+            WorkItem(
+                id=item_id,
+                requirement_ids=sorted(reqs_by_dir.get(directory, set())),
+                endpoints=sorted(dict.fromkeys(endpoints_by_dir.get(directory, []))),
+                tables=sorted(tables_by_dir.get(directory, set())),
+                screens=list(screens_by_dir.get(directory, [])),
+                target_files=[p for p, _ in group],
+                file_specs={p: str(desc) for p, desc in group},
+            )
+        )
+    return items
+
+
+def _backend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
+    leaves = _source_leaves(resolved.backend_tree)
+    if not leaves:
+        return []
+    handlers = [p for p, _ in leaves if _is_handler(p)]
+    services = [p for p, _ in leaves if _is_service(p)]
+    module_search = handlers + services
+    entities = resolved.entities
+
+    # Aggregate each endpoint's traceability onto its module directory (metadata, not the driver).
+    endpoints_by_dir: dict[str, list[str]] = defaultdict(list)
+    tables_by_dir: dict[str, set[str]] = defaultdict(set)
+    reqs_by_dir: dict[str, set[str]] = defaultdict(set)
     for ep in resolved.endpoints:
         op = ep.get("operation_id") or _synth_op(ep["method"], ep["path"])
-        if op in seen:
-            continue
-        seen.add(op)
-
-        endpoint = _canonical_endpoint(ep["method"], ep["path"])
-        touched = _tables_touched(ep["path"], op, entities)
-        req_ids = resolved.tag_reqs.get(ep.get("tag", ""), [])
         module_dir = _module_dir_for_tag(ep.get("tag", ""), module_search)
         if not module_dir:
             first_seg = re.sub(r"\{[^}]+\}", "", ep["path"]).strip("/").split("/")
             module_dir = _module_dir_for_tag(first_seg[0] if first_seg and first_seg[0] else "", module_search)
+        if not module_dir:
+            continue  # unresolved endpoint: its module files are still generated from the tree
+        endpoints_by_dir[module_dir].append(_canonical_endpoint(ep["method"], ep["path"]))
+        tables_by_dir[module_dir].update(_tables_touched(ep["path"], op, entities))
+        reqs_by_dir[module_dir].update(resolved.tag_reqs.get(ep.get("tag", ""), []))
 
-        targets = _adaptive_backend_targets(module_dir, handlers, services, schemas, models, touched, default_ext, op)
-        items.append(
-            WorkItem(
-                id=f"backend-{op}",
-                requirement_ids=req_ids,
-                endpoints=[endpoint],
-                tables=touched,
-                screens=[],
-                target_files=targets,
-            )
-        )
-    return items
-
-
-def _adaptive_backend_targets(
-    module_dir: str,
-    handlers: list[str],
-    services: list[str],
-    schemas: list[str],
-    models: list[str],
-    touched: list[str],
-    default_ext: str,
-    op: str,
-) -> list[str]:
-    files: list[str] = []
-    if module_dir:
-        files += [p for p in handlers if p.startswith(module_dir)]
-        files += [p for p in services if p.startswith(module_dir)]
-        files += [p for p in schemas if p.startswith(module_dir)]
-    wanted = {_table_stem(t) for t in touched}
-    files += [m for m in models if _model_stem(m) in wanted]
-    files = list(dict.fromkeys(files))
-    if files:
-        return files
-    ext = _dominant_ext([p for p in handlers + services if p.startswith(module_dir)]) or default_ext
-    return [f"{module_dir}{op}{ext}"]
+    return _items_from_groups(
+        "backend",
+        leaves,
+        endpoints_by_dir=endpoints_by_dir,
+        tables_by_dir=tables_by_dir,
+        reqs_by_dir=reqs_by_dir,
+    )
 
 
 def _frontend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
-    leaves = _walk(resolved.frontend_tree)
+    leaves = _source_leaves(resolved.frontend_tree)
+    if not leaves:
+        return []
     pages = [p for p, _ in leaves if _is_page(p)]
-    services = [(p, str(v)) for p, v in leaves if _is_api_service(p)]
     ep_index = resolved.endpoint_by_key()
 
-    items: list[WorkItem] = []
-    seen: set[str] = set()
+    # Attach each screen (and the req_ids behind its endpoints) to the directory of its page file.
+    screens_by_dir: dict[str, list[str]] = defaultdict(list)
+    reqs_by_dir: dict[str, set[str]] = defaultdict(set)
     for screen in resolved.screens:
-        name = screen["name"]
-        sid = _slug(name)
-        if sid in seen:
+        page = _match_page(screen["name"], pages)
+        if not page:
             continue
-        keys = screen.get("endpoints", [])
-        tags = {ep_index.get(k, {}).get("tag", "") for k in keys}
-        req_ids = sorted({r for tag in tags for r in resolved.tag_reqs.get(tag, [])})
+        directory = _dir_of(page)
+        if screen["name"] not in screens_by_dir[directory]:
+            screens_by_dir[directory].append(screen["name"])
+        for key in screen.get("endpoints", []):
+            tag = ep_index.get(key, {}).get("tag", "")
+            reqs_by_dir[directory].update(resolved.tag_reqs.get(tag, []))
 
-        target_files: list[str] = []
-        page = _match_page(name, pages)
-        if page:
-            target_files.append(page)
-        target_files += _match_services(services, keys, ep_index)
-        target_files = list(dict.fromkeys(target_files))
-        if not target_files:
-            continue
-        seen.add(sid)
-        items.append(
-            WorkItem(
-                id=f"frontend-{sid}",
-                requirement_ids=req_ids,
-                endpoints=[],
-                tables=[],
-                screens=[name],
-                target_files=target_files,
-            )
-        )
-    return items
+    return _items_from_groups(
+        "frontend",
+        leaves,
+        screens_by_dir=screens_by_dir,
+        reqs_by_dir=reqs_by_dir,
+    )
+
+
+def _reconcile_uncovered(
+    resolved: "design_pack.ResolvedPack", items: list[WorkItem]
+) -> list[WorkItem]:
+    """Sweep any structure-tree file not already covered by an item into a catch-all item.
+
+    Normally a no-op (the builders emit one item per directory, covering every leaf) — this is
+    the completeness guarantee that stops a future filtering change from silently dropping files.
+    """
+    covered = {f for item in items for f in item.target_files}
+    used_ids = {item.id for item in items}
+    extra: list[WorkItem] = []
+    for prefix, tree in (("backend", resolved.backend_tree), ("frontend", resolved.frontend_tree)):
+        uncovered = [(p, d) for p, d in _source_leaves(tree) if p not in covered]
+        if uncovered:
+            extra += _items_from_groups(prefix, uncovered, used_ids=used_ids)
+    return extra
 
 
 def _match_page(screen_name: str, pages: list[str]) -> str:
@@ -511,31 +637,6 @@ def _match_page(screen_name: str, pages: list[str]) -> str:
         if score > best_score:
             best, best_score = p, score
     return best
-
-
-def _match_services(services: list[tuple[str, str]], keys: list[str], ep_index: dict) -> list[str]:
-    """API-module files a screen depends on.
-
-    Matched two robust ways (not by prose): the endpoint's first path segment appearing as a
-    literal ``/segment`` in the module's description (modules list the routes they call), or the
-    segment matching the module filename (``auth`` → ``auth.service.js``). Avoids false hits like
-    ``apiClient.js`` matching every auth screen because its blurb mentions "Authorization".
-    """
-    from app.services.design_pack import _singular as _sing, _norm as _n
-
-    seg0s: set[str] = set()
-    for k in keys:
-        path = ep_index.get(k, {}).get("path") or k.split(" ", 1)[-1]
-        segs = [s for s in re.sub(r"\{[^}]+\}", "", path).strip("/").split("/") if s]
-        if segs:
-            seg0s.add(segs[0])
-    out: list[str] = []
-    for path, desc in services:
-        base = _n(_basename(path))
-        desc_l = desc.lower()
-        if any(f"/{seg}" in desc_l or _sing(_n(seg)) in base for seg in seg0s):
-            out.append(path)
-    return list(dict.fromkeys(out))
 
 
 # --------------------------------------------------------------------------- write

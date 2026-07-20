@@ -102,6 +102,16 @@ class CodeGeneratorAgent(BaseAgent):
     @staticmethod
     def _build_prompt(work_item: WorkItem, context: str) -> str:
         targets = "\n".join(f"- {p}" for p in work_item.target_files) or "- (none specified)"
+        # Per-file spec from the design package's structure tree (e.g. "Express app factory:
+        # mounts middleware, routers, error handler"). This is what grounds generation of files
+        # that aren't tied to any single endpoint/screen — app entrypoints, config, middleware,
+        # stores — which otherwise have no context to build from.
+        specs = "\n".join(
+            f"- {p}: {work_item.file_specs[p]}"
+            for p in work_item.target_files
+            if work_item.file_specs.get(p)
+        )
+        specs_block = f"What each file must contain (from the design package):\n{specs}\n\n" if specs else ""
         return (
             f"Work item: {work_item.id}\n"
             f"Covers requirements: {', '.join(work_item.requirement_ids) or '-'}\n"
@@ -109,6 +119,7 @@ class CodeGeneratorAgent(BaseAgent):
             f"Tables: {', '.join(work_item.tables) or '-'}\n"
             f"Screens: {', '.join(work_item.screens) or '-'}\n"
             f"Target files (produce ONLY these):\n{targets}\n\n"
+            f"{specs_block}"
             f"Context (only the cited slices):\n{context}\n\n"
             'Respond with STRICT JSON only: {"files":[{"path":...,"content":...}],"notes":...}'
         )
@@ -286,22 +297,34 @@ def _phase_of(work_item: WorkItem) -> tuple[str, str]:
 
 
 def _extract_json(text: str) -> Any:
-    """Best-effort JSON object extraction from a model reply (handles fences / stray prose)."""
+    """Best-effort JSON object extraction from a model reply.
+
+    Tolerant of the ways a model wraps a big ``{"files":[...]}`` payload: a code fence anywhere
+    (```json … ```), a prose preamble/postamble, and — crucially — **unescaped control characters
+    inside string values** (raw newlines/tabs in generated source). ``strict=False`` lets
+    ``json.loads`` accept those literal control chars instead of rejecting the whole reply, which
+    is the most common reason a code-carrying reply otherwise "has no JSON object".
+    """
     stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z0-9]*", "", stripped).strip()
-        if stripped.endswith("```"):
-            stripped = stripped[:-3].strip()
-    try:
-        return json.loads(stripped)
-    except (ValueError, TypeError):
-        pass
-    start, end = stripped.find("{"), stripped.rfind("}")
-    if start != -1 and end > start:
+
+    # A fenced block anywhere wins (```json … ``` or ``` … ```); fall back to the whole reply.
+    candidates: list[str] = []
+    fence = re.search(r"```[a-zA-Z0-9]*\n?(.*?)```", stripped, re.DOTALL)
+    if fence:
+        candidates.append(fence.group(1).strip())
+    candidates.append(stripped)
+
+    for cand in candidates:
         try:
-            return json.loads(stripped[start : end + 1])
+            return json.loads(cand, strict=False)  # strict=False: allow raw \n/\t in string values
         except (ValueError, TypeError):
-            return None
+            pass
+        start, end = cand.find("{"), cand.rfind("}")  # trim prose around the object
+        if start != -1 and end > start:
+            try:
+                return json.loads(cand[start : end + 1], strict=False)
+            except (ValueError, TypeError):
+                pass
     return None
 
 

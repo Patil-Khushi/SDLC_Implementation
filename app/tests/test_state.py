@@ -5,16 +5,18 @@ from app.models import WorkItem
 
 ALL_FIELDS = {
     "project_id", "run_id", "attempt", "design_package",
-    "work_items", "work_item_index", "current_work_item", "generated_code", "codegen_ok",
-    "gate_result", "repair_attempt", "generation_summary", "generation_metrics",
+    "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
+    "codegen_ok", "gate_result", "repair_attempt", "generation_summary", "generation_metrics",
+    "push_enabled", "git_remote", "git_token",
     "review_report", "refactored_code", "unit_tests", "documentation", "security_report",
     "workflow_status",
 }
 
 INITIALIZED_FIELDS = {
     "project_id", "run_id", "attempt", "design_package",
-    "work_items", "work_item_index", "current_work_item", "generated_code", "gate_result",
-    "repair_attempt", "generation_summary", "generation_metrics", "workflow_status",
+    "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
+    "gate_result", "repair_attempt", "generation_summary", "generation_metrics",
+    "push_enabled", "git_remote", "git_token", "workflow_status",
 }
 
 
@@ -35,6 +37,15 @@ def test_new_state_defaults() -> None:
     assert state["gate_result"] is None
     assert state["generation_metrics"] == {}
     assert state["workflow_status"] == "pending"
+    assert state["push_enabled"] is False        # push OFF by default (opt-in)
+    assert state["git_remote"] == "" and state["git_token"] == ""
+
+
+def test_new_state_accepts_push_config() -> None:
+    state = new_state(run_id="r", attempt=0, push_enabled=True, git_remote="me/app", git_token="tok")
+    assert state["push_enabled"] is True
+    assert state["git_remote"] == "me/app"
+    assert state["git_token"] == "tok"
 
 
 def test_new_state_leaves_downstream_outputs_unset() -> None:
