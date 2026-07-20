@@ -754,9 +754,10 @@ def _feature_run(
             yield {"type": "layer_start", "id": sid, "layer": label}
             if MODE == "real":
                 ctx = fc._design_context(pack_dir, fc._LAYER_CONTEXT[key])
-                lf = fc._generate(
-                    llm_gateway.llm_gateway,
-                    fc._layer_prompt(ctx, current, sid, title, body, label, instruction),
+                # Chunked: a manifest call lists the layer's files, then each file is generated in
+                # its own bounded call (output can't truncate). current is updated per file.
+                lf = fc._generate_layer_chunked(
+                    llm_gateway.llm_gateway, ctx, current, sid, title, body, label, instruction
                 )
             else:  # dry-run: canned stub per layer so the flow is demoable with no API key
                 lf = [{"path": f"frontend/src/features/{sid}.{key}.tsx",

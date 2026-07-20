@@ -5,15 +5,62 @@ This keeps prompt execution, retries, logging, and provider choice in one place.
 """
 
 import logging
+import re
+import time
 from collections import deque
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeVar
 
 import anthropic
 
 from app.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _retry_after_seconds(exc: Exception, default: float) -> float:
+    """How long to wait before retrying a 429, from the ``Retry-After`` header or the error body.
+
+    Foundry/Azure returns a ``retry-after`` header AND embeds "Please wait N seconds" in the
+    message; honor whichever is present (capped) so we back off exactly as long as the API asks."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            header = resp.headers.get("retry-after")
+        except Exception:  # noqa: BLE001 - defensive: headers shape can vary
+            header = None
+        if header:
+            try:
+                return min(float(header) + 1.0, 60.0)
+            except ValueError:
+                pass
+    match = re.search(r"wait\s+(\d+)\s*second", str(exc), re.IGNORECASE)
+    if match:
+        return min(float(match.group(1)) + 1.0, 60.0)
+    return default
+
+
+_T = TypeVar("_T")
+
+
+def _with_rate_limit_retry(call: Callable[[], _T], *, max_attempts: int = 6) -> _T:
+    """Run ``call`` and retry on ``anthropic.RateLimitError`` (429), honoring the API's requested
+    wait, up to ``max_attempts`` total tries. Shared by :meth:`LLMGateway.complete` (streaming) and
+    :meth:`LLMGateway.complete_with_tools` (the repair path's tool-use loop) — chunked generation
+    fires many calls per feature, and either path can hit the per-minute rate limit in a burst."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return call()
+        except anthropic.RateLimitError as exc:
+            if attempt == max_attempts:
+                raise
+            wait = _retry_after_seconds(exc, default=15.0)
+            logger.warning(
+                "llm_call 429 rate-limited; waiting %.0fs then retrying (attempt %d/%d)",
+                wait, attempt, max_attempts,
+            )
+            time.sleep(wait)
+    raise AssertionError("unreachable")  # loop always returns or raises
 
 
 class LLMGateway:
@@ -65,12 +112,23 @@ class LLMGateway:
         if self._use_thinking:
             kwargs["thinking"] = {"type": "adaptive"}
 
-        response = self._get_client().messages.create(**kwargs)
+        # Stream and accumulate rather than a single blocking create(): large outputs (code
+        # generation can be tens of thousands of tokens) otherwise exceed the non-streaming HTTP
+        # timeout window. Streaming lets max_tokens go as high as the model supports (128K on
+        # Sonnet 4.6) without timing out. 429s are retried by _with_rate_limit_retry (shared with
+        # complete_with_tools) — chunked generation fires many calls, so the per-minute limit is
+        # easy to hit in bursts; backing off and retrying makes a run resilient instead of failing.
+        def _stream_once() -> Any:
+            with self._get_client().messages.stream(**kwargs) as stream:
+                return stream.get_final_message()
+
+        response = _with_rate_limit_retry(_stream_once)
         logger.info(
-            "llm_call model=%s input_tokens=%s output_tokens=%s",
+            "llm_call model=%s input_tokens=%s output_tokens=%s stop=%s",
             self._model,
             response.usage.input_tokens,
             response.usage.output_tokens,
+            response.stop_reason,  # 'max_tokens' here means the reply was truncated
         )
         return "".join(
             block.text for block in response.content if block.type == "text"
@@ -108,7 +166,10 @@ class LLMGateway:
             }
             if system:
                 kwargs["system"] = system
-            response = client.messages.create(**kwargs)
+            # Same 429 backoff as complete() — see _with_rate_limit_retry. Not streamed: proposed
+            # fixes are small compared to a full-module generation, so the blocking HTTP timeout
+            # is not the risk here; the rate limit from repeated repair/tool-loop calls is.
+            response = _with_rate_limit_retry(lambda: client.messages.create(**kwargs))
             final_text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
             tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
             if not tool_uses:
