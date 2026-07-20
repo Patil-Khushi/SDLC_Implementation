@@ -313,6 +313,15 @@ def _generate(gw: LLMGateway, prompt: str) -> list[dict[str, str]]:
 _MANIFEST_MAX_TOKENS = 4000     # a file list (paths + one-line purposes) is small
 _RELEVANT_FILE_CAP = 12         # existing files whose CONTENTS are included in a per-file prompt
 _RELEVANT_CHARS_CAP = 60_000    # char budget for those included bodies
+_MAX_FILES_PER_LAYER = 25       # sanity cap on one layer's manifest (bounds worst-case call count)
+
+
+def _normalize_path(p: str) -> str:
+    """Normalize a model-echoed path for comparison: strip a leading ``/`` or repeated ``./``."""
+    p = p.strip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p.lstrip("/")
 
 
 def _existing_view(current: dict[str, str], target_dir: str) -> str:
@@ -390,8 +399,23 @@ def _generate_file(
     if files is None:
         logging.getLogger(__name__).warning("codegen: file %r unparseable (%s) — skipping", path, err)
         return None
-    # Force the manifest path (don't let the model rename); prefer a matching entry, else the first.
-    match = next((f for f in files if f["path"].lstrip("/") == path), files[0])
+    # Force the manifest path (don't let the model rename/re-case it) — but only when there is no
+    # ambiguity about which returned entry IS the requested file. A normalized match wins outright.
+    # With exactly one file back, it's unambiguously "the" file even if its path string differs
+    # (rename/case/`./`-prefix), so it's safe to relabel. With MULTIPLE files and no path match,
+    # there's no way to tell which one the caller wanted — silently pairing content with the wrong
+    # path would mislabel a sibling file's content as this one (a silent-wrong-code bug that no
+    # error surfaces), so this case is skipped instead of guessing.
+    norm_path = _normalize_path(path)
+    match = next((f for f in files if _normalize_path(f["path"]) == norm_path), None)
+    if match is None and len(files) == 1:
+        match = files[0]
+    if match is None:
+        logging.getLogger(__name__).warning(
+            "codegen: reply for %r contained %d file(s), none matching by path (got %s) — skipping",
+            path, len(files), [f["path"] for f in files],
+        )
+        return None
     return {"path": path, "content": match["content"]}
 
 
@@ -406,6 +430,15 @@ def _generate_layer_chunked(
     manifest = _layer_manifest(gw, ctx, sorted(current), sid, title, body, label, instruction)
     if not manifest:
         return _generate(gw, _layer_prompt(ctx, current, sid, title, body, label, instruction))
+    if len(manifest) > _MAX_FILES_PER_LAYER:
+        # A manifest this large is almost certainly a hallucinated over-listing (a real layer's
+        # file count is small); without a cap, one bad reply triggers dozens of sequential
+        # per-file calls with no upper bound on cost/latency.
+        logging.getLogger(__name__).warning(
+            "codegen: layer %s manifest listed %d files — capping to %d",
+            label, len(manifest), _MAX_FILES_PER_LAYER,
+        )
+        manifest = manifest[:_MAX_FILES_PER_LAYER]
     manifest_paths = [m["path"] for m in manifest]
     produced: list[dict[str, str]] = []
     for m in manifest:
