@@ -34,7 +34,9 @@ def start(request: StartRequest) -> StartResponse:
     # only so ``get_state`` can read the finished run; the workflow makes synchronous LLM calls,
     # so surface failures as a clean 502.
     # TODO: move to background execution + GET /status/{project_id} once the pipeline grows.
-    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 100}
+    # ~3 supersteps per work item, so 100 capped a run at ~30 items (a large module-per-item plan
+    # would raise GraphRecursionError mid-run). 1000 matches scripts/run_fixture.py.
+    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 1000}
     try:
         workflow.invoke(initial, config)
     except Exception as exc:  # noqa: BLE001

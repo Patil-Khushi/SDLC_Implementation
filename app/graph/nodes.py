@@ -156,8 +156,9 @@ def commit_node(state: WorkflowState) -> WorkflowState:
 
     Two shapes, chosen by executor capability:
     * If the executor supports ``commit_feature_history`` (the local/real disk executor), produce
-      a real branch structure — the scaffold on ``main`` and ONE ``feat(<work-item id>): …``
-      commit per work item on ``dev`` — so the generated repo carries a per-feature history.
+      a real branch structure — the scaffold on ``main`` and ONE ``feat(<feature-id>): …`` commit
+      per user-feature on ``dev`` (work items sharing a ``feature_id`` collapse into one commit;
+      see ``_group_feature_commits``) — so the generated repo carries a per-feature history.
     * Otherwise (the in-memory/sandbox executor), fall back to a single run-level commit, exactly
       as before — keeps the sandbox/test path and its assertions unchanged.
     """
@@ -186,6 +187,7 @@ def commit_node(state: WorkflowState) -> WorkflowState:
         except Exception as exc:  # noqa: BLE001 - don't crash the run on a commit failure
             logger.exception("feature-history commit failed for run %s", state.get("run_id"))
             state["generation_summary"] = (state.get("generation_summary") or "") + f"[commit] FAILED: {exc}\n"
+            state["workflow_status"] = "commit_failed"  # else the run reports a mid-run status
             return state
         pushed = f" (pushed to '{state.get('git_remote')}')" if push else ""
         if result.exit_code != 0:  # a push failed → run stopped before finishing (rule 8)
@@ -207,6 +209,7 @@ def commit_node(state: WorkflowState) -> WorkflowState:
     except Exception as exc:  # noqa: BLE001 - don't crash the run on a commit failure
         logger.exception("commit failed for run %s", state.get("run_id"))
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[commit] FAILED: {exc}\n"
+        state["workflow_status"] = "commit_failed"  # else the run reports a mid-run status
         return state
     state["workflow_status"] = "completed"
     return state

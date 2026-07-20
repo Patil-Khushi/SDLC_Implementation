@@ -39,6 +39,22 @@ def test_tokens_splits_camelcase() -> None:
     assert _tokens("Customer Login") == {"customer", "login"}
 
 
+def test_match_page_matches_pascalcase_page_file() -> None:
+    # End-to-end guard for the shipped regression: _match_page ran _basename() (which lowercases)
+    # BEFORE _tokens(), gluing "LoginPage" into {"loginpage"} so the subset test never matched.
+    # test_tokens_splits_camelcase passes without catching this because it calls _tokens directly
+    # on the un-lowercased name — it never exercises the _match_page path. This test does.
+    from app.services.plan_builder import _match_page
+
+    assert _match_page("Customer Login", ["src/pages/LoginPage.jsx"]) == "src/pages/LoginPage.jsx"
+    assert (
+        _match_page("Restaurant List", ["src/pages/RestaurantListPage.tsx"])
+        == "src/pages/RestaurantListPage.tsx"
+    )
+    # A screen with no token overlap must NOT falsely match.
+    assert _match_page("Checkout", ["src/pages/LoginPage.jsx"]) == ""
+
+
 # --- full-coverage guarantee ----------------------------------------------
 
 def test_plan_covers_every_structure_leaf() -> None:

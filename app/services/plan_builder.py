@@ -3,16 +3,17 @@
 Artifacts are identified by ROLE from their content — never by fixed filename — via
 :mod:`app.services.design_pack`, so the API surface may arrive as OpenAPI or a flat CSV, the
 schema as SQL DDL or JSON/Mongo, etc. From that normalized view it emits a list of
-:class:`~app.models.work_item.WorkItem`, grouped by (screen, layer):
+:class:`~app.models.work_item.WorkItem`.
 
-* one BACKEND item per operationId — handler + service + schema/DTO + model(≈entity)
-  target files (located in the backend structure tree), covering its endpoint + req_ids + the
-  tables it touches (inferred from the schema, SQL or JSON);
-* one FRONTEND item per screen — page + api-module target files (located in the frontend
-  structure tree), covering its route + req_ids + screen name.
+Two builders, chosen by input shape:
 
-Legacy self-contained flat-CSV packs keep their original byte-for-byte output; every other
-shape goes through the adaptive builders.
+* ADAPTIVE (the default when structure trees are present): the ``backend-structure.json`` /
+  ``frontend-structure.json`` trees are authoritative — one item is emitted PER DIRECTORY so every
+  file leaf is produced exactly once, and endpoints/tables/screens/req_ids are ATTACHED to those
+  items as traceability + prompt-grounding context (they no longer decide which items exist).
+* LEGACY (self-contained flat-CSV packs, no structure tree): keeps its original byte-for-byte
+  output — one BACKEND item per operationId and one FRONTEND item per screen, grouped by
+  (screen, layer).
 
 Backend file-role detection is STACK-AGNOSTIC: files are classified by role (handler,
 service, schema/DTO, model) via extension-agnostic name/path hints, so the same logic works for
@@ -442,7 +443,11 @@ def _module_dir_for_tag(tag: str, paths: list[str]) -> str:
         segs = p.split("/")[:-1]
         for i, seg in enumerate(segs):
             sn = _singular(_norm(seg))
-            if sn and (sn == stem or stem in sn or sn in stem):
+            # Exact (singularized) match only. A substring test here over-matches — `auth`
+            # would attach to `authors/`, `art` to `cart/` — misrouting an endpoint/table/req to
+            # the wrong module. Unmatched tags are dropped (documented), which is safe: this only
+            # attaches traceability metadata; directory grouping (not this fn) owns file coverage.
+            if sn and sn == stem:
                 candidate = "/".join(segs[: i + 1]) + "/"
                 if len(candidate) > len(best):
                     best = candidate
@@ -629,7 +634,10 @@ def _match_page(screen_name: str, pages: list[str]) -> str:
     stoks = _tokens(screen_name) - {"page", "screen", "view"}
     best, best_score = "", 0
     for p in pages:
-        stem = _basename(p).rsplit(".", 1)[0]
+        # Tokenize the ORIGINAL-CASE stem so _tokens can split camelCase/PascalCase
+        # ("LoginPage" → {"login", "page"}). Using _basename here would lowercase first, gluing it
+        # into {"loginpage"} and defeating the subset test below. _tokens lowercases internally.
+        stem = p.rstrip("/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
         ptoks = _tokens(stem) - {"page", "screen", "view", "module", "test"}
         if not ptoks or not ptoks <= stoks:
             continue

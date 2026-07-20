@@ -70,7 +70,7 @@ def endpoint_key(method: str, path: str) -> str:
 def _load_structured(path: Path) -> Any:
     """Parse a file as JSON, then YAML; return the object or ``None`` if neither works."""
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return None
     suffix = path.suffix.lower()
@@ -100,7 +100,7 @@ def _load_structured(path: Path) -> Any:
 def _read_table(path: Path) -> list[dict[str, str]]:
     """Read a delimited table (csv/tsv) into row dicts; ``[]`` if it is not clearly tabular."""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return []
     lines = text.splitlines()
@@ -137,8 +137,11 @@ def _schema_entities(path: Path, obj: Any) -> list[str]:
     """Entity/table names from either SQL DDL or a JSON schema; ``[]`` if it is not a schema."""
     if path.suffix.lower() == ".sql" or (isinstance(obj, str) and "create table" in obj.lower()):
         try:
-            sql = path.read_text(encoding="utf-8")
-        except OSError:
+            sql = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            # A non-UTF-8 dump (cp1252/UTF-16 — common from SQL Server/MySQL on Windows) must
+            # degrade to "no entities", not crash resolve(). UnicodeDecodeError is a ValueError,
+            # not an OSError, so it must be named explicitly.
             return []
         return re.findall(r"create\s+table\s+(?:if\s+not\s+exists\s+)?[`\"]?(\w+)", sql, re.IGNORECASE)
     if isinstance(obj, dict):
@@ -186,7 +189,9 @@ def _structure_side(path: Path, raw_text: str) -> str:
     name = path.name.lower()
     if "backend" in name or "server" in name:
         return "backend_structure"
-    if "frontend" in name or "client" in name or "ui" in name or "web" in name:
+    # "ui" as a whole word only — a raw substring test misclassifies backend trees like
+    # `build_tree.json` / `guidelines.json` (which merely *contain* "ui") as frontend.
+    if "frontend" in name or "client" in name or "web" in name or re.search(r"(?<![a-z])ui(?![a-z])", name):
         return "frontend_structure"
     low = raw_text.lower()
     back = sum(low.count(h) for h in _BACKEND_HINTS)
@@ -284,7 +289,7 @@ def detect_roles(pack_dir: str | Path) -> dict[str, list[DetectedFile]]:
             elif _is_routes_map(obj):
                 roles["routes"].append(DetectedFile(path, "routes", obj))
             elif _looks_like_tree(obj):
-                side = _structure_side(path, path.read_text(encoding="utf-8", errors="replace"))
+                side = _structure_side(path, path.read_text(encoding="utf-8-sig", errors="replace"))
                 roles[side].append(DetectedFile(path, side, obj))
             else:
                 roles.setdefault("unknown", []).append(DetectedFile(path, "unknown", obj))
@@ -519,7 +524,7 @@ def llm_classify_unknown(pack_dir: str | Path) -> dict[str, str]:
     out: dict[str, str] = {}
     for df in unknown:
         try:
-            snippet = df.path.read_text(encoding="utf-8", errors="replace")[:1500]
+            snippet = df.path.read_text(encoding="utf-8-sig", errors="replace")[:1500]
         except OSError:
             continue
         prompt = (

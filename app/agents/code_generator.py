@@ -33,6 +33,23 @@ from app.services.llm_gateway import LLMGateway
 logger = logging.getLogger(__name__)
 
 
+def _project_dir(state: WorkflowState) -> str:
+    """Root dir of the generated project within the workspace. Single source of truth shared by
+    the code_generator (initial write) and the repair path (fix write) so BOTH agree on where a
+    work item's files live — the completeness gate checks ``<project_dir>/<target>``."""
+    return state.get("project_id") or state.get("run_id") or "project"
+
+
+def _project_path(project_dir: str, path: str) -> str:
+    """Map an LLM-proposed, project-relative path to its workspace path under ``project_dir``.
+    Idempotent: a path the model already prefixed with ``project_dir/`` is not double-prefixed."""
+    rel = path.lstrip("/")
+    prefix = f"{project_dir}/"
+    if rel.startswith(prefix):
+        rel = rel[len(prefix):]
+    return f"{project_dir}/{rel}"
+
+
 class CodeGeneratorAgent(BaseAgent):
     name = "code_generator"
 
@@ -149,11 +166,11 @@ class CodeGeneratorAgent(BaseAgent):
     def _write_files(
         self, executor: Executor, state: WorkflowState, work_item: WorkItem, files: list[dict[str, str]]
     ) -> list[str]:
-        project_dir = state.get("project_id") or state.get("run_id") or "project"
+        project_dir = _project_dir(state)
         generated = list(state.get("generated_code", []))
         written: list[str] = []
         for entry in files:
-            path = f"{project_dir}/{entry['path'].lstrip('/')}"
+            path = _project_path(project_dir, entry["path"])
             executor.write_file(path, entry["content"])
             written.append(path)
             generated.append(path)

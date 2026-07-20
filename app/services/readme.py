@@ -193,6 +193,12 @@ def _render_tree(tree: dict[str, Any], indent: int = 0) -> list[str]:
 
 # --------------------------------------------------------------------------- rendering
 
+def _cell(text: Any) -> str:
+    """Escape a value for a Markdown table cell: collapse whitespace/newlines and escape ``|`` so
+    a summary or screen name containing a pipe can't break the row layout."""
+    return " ".join(str(text).split()).replace("|", "\\|")
+
+
 def render_readme(config: "ScaffoldConfig", design_package: dict[str, Any] | None = None) -> str:
     """Render a comprehensive, application-specific README for the project being generated.
 
@@ -339,7 +345,7 @@ def _api_section(pkg: dict[str, Any], config: "ScaffoldConfig") -> str:
     if not endpoints:
         return ""
     out = ["## API reference", "", "| Method | Endpoint | Description |", "| --- | --- | --- |"]
-    out += [f"| `{method}` | `{path}` | {summary} |" for method, path, summary in endpoints]
+    out += [f"| `{method}` | `{_cell(path)}` | {_cell(summary)} |" for method, path, summary in endpoints]
     return "\n".join(out)
 
 
@@ -350,7 +356,7 @@ def _routes_section(pkg: dict[str, Any], config: "ScaffoldConfig") -> str:
     if not routes:
         return ""
     out = ["## Screens & routes", "", "| Screen | Route |", "| --- | --- |"]
-    out += [f"| {screen} | `{route}` |" for screen, route in routes]
+    out += [f"| {_cell(screen)} | `{_cell(route)}` |" for screen, route in routes]
     return "\n".join(out)
 
 

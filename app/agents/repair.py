@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 from app.agents.base import BaseAgent
-from app.agents.code_generator import _extract_json
+from app.agents.code_generator import _extract_json, _project_dir, _project_path
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.services.llm_gateway import LLMGateway
@@ -54,8 +54,17 @@ class RepairAgent(BaseAgent):
 
         fixes = _parse_files(raw)
         if fixes:
+            # Write under the SAME <project_dir>/ prefix the code_generator used (and that the
+            # completeness gate checks). Without this the repair writes a bare path the gate never
+            # looks for, so the missing file stays "missing" and the loop burns to the cap.
+            project_dir = _project_dir(state)
+            generated = list(state.get("generated_code", []))
             for entry in fixes:
-                executor.write_file(entry["path"], entry["content"])  # fixed code writes the proposal
+                path = _project_path(project_dir, entry["path"])
+                executor.write_file(path, entry["content"])  # fixed code writes the proposal
+                if path not in generated:
+                    generated.append(path)
+            state["generated_code"] = generated
         else:
             # Proposal didn't parse: write nothing (no partial garbage). The gate re-runs and
             # will re-fail/escalate; log it so the no-op repair is debuggable.
