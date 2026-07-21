@@ -60,7 +60,9 @@ def test_commit_node_uses_feature_history_when_supported() -> None:
         }
         out = commit_node(state)  # type: ignore[arg-type]
 
-        assert out["workflow_status"] == "completed"
+        # Non-terminal now: the post-commit Debugging/Unit-Test loop runs after commit_node, so
+        # "completed" is reserved for unit_test_run_node's success path, not this one.
+        assert out["workflow_status"] == "code_committed"
         assert len(ex.feature_calls) == 1
         project_dir, scaffold, feats, base, feat_branch = ex.feature_calls[0]
         assert (base, feat_branch) == ("main", "dev")
@@ -117,7 +119,8 @@ def test_commit_node_falls_back_to_single_commit_without_support() -> None:
             "generated_code": ["app/a.py"],
         }
         out = commit_node(state)  # type: ignore[arg-type]
-        assert out["workflow_status"] == "completed"
+        # Non-terminal now: see comment in test_commit_node_uses_feature_history_when_supported.
+        assert out["workflow_status"] == "code_committed"
         assert len(ex.commits) == 1  # single run-level commit (legacy behavior preserved)
     finally:
         set_executor(None)
