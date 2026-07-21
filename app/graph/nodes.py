@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from app.agents.code_generator import CodeGeneratorAgent
+from app.agents.code_review import CodeReviewAgent
 from app.agents.unit_test import UnitTestAgent
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
@@ -19,6 +20,7 @@ from app.services.boilerplate import render_scaffold
 logger = logging.getLogger(__name__)
 
 _code_generator = CodeGeneratorAgent()
+_code_review = CodeReviewAgent()
 _unit_test_agent = UnitTestAgent()
 
 
@@ -54,6 +56,19 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
 def code_generator_node(state: WorkflowState) -> WorkflowState:
     """LLM: generate + write files for the current work item (no gate/commit here)."""
     return _code_generator.execute(state)
+
+
+def code_review_node(state: WorkflowState) -> WorkflowState:
+    """Clone the committed repo into an ephemeral sandbox, run static analysis, write the report.
+
+    The agent owns the whole sandbox session (clone → ruff/eslint → sonar-scanner → teardown);
+    this node just delegates. Runs ONCE, as the true final stage of the run — after the run-level
+    commit AND after the post-commit Debugging<->Unit-Test loop's tests have passed (every
+    escalate branch bypasses it, same as it bypasses the debug/test loop). Needs ``repo_url`` in
+    state to clone; when absent the agent writes a report noting no repo. Always stamps
+    ``workflow_status = "code_reviewed"`` — the run's actual terminal status.
+    """
+    return _code_review.execute(state)
 
 
 def select_work_item_node(state: WorkflowState) -> WorkflowState:
@@ -140,9 +155,11 @@ def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
 def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic check for the Unit Test phase: ``test`` ONLY.
 
-    A pass here is deliberately THE terminal state of the whole run now (a later step separately
-    renames ``commit_node``'s own success status away from "completed" — out of scope here). An
-    executor error is treated as a failing check — recorded, not raised — mirroring ``gate_node``/
+    A pass here routes on to ``code_review`` (the run's actual final stage), which stamps its own
+    terminal ``workflow_status``; the "completed" set on the passing branch here is an
+    intermediate marker, immediately superseded once code_review runs — kept mainly so a crash
+    between the two nodes still leaves a meaningful status rather than none at all. An executor
+    error is treated as a failing check — recorded, not raised — mirroring ``gate_node``/
     ``debug_check_node``. ``workflow_status`` is only set on the passing branch, mirroring how
     ``gate_node`` never sets it at all.
     """
@@ -256,8 +273,8 @@ def commit_node(state: WorkflowState) -> WorkflowState:
         state["generation_summary"] = (state.get("generation_summary") or "") + (
             f"[commit] scaffold on 'main' + {len(feature_commits)} feature commit(s) on 'dev'{pushed}\n"
         )
-        # Not the run's terminal status anymore — the post-commit Debugging<->Unit-Test loop runs
-        # next; unit_test_run_node sets the new terminal "completed" once tests pass.
+        # Not the run's terminal status anymore — the post-commit Debugging<->Unit-Test loop and
+        # then Code Review run next; code_review_node sets the actual terminal status.
         state["workflow_status"] = "code_committed"
         return state
 
@@ -269,8 +286,8 @@ def commit_node(state: WorkflowState) -> WorkflowState:
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[commit] FAILED: {exc}\n"
         state["workflow_status"] = "commit_failed"  # else the run reports a mid-run status
         return state
-    # Not the run's terminal status anymore — the post-commit Debugging<->Unit-Test loop runs
-    # next; unit_test_run_node sets the new terminal "completed" once tests pass.
+    # Not the run's terminal status anymore — the post-commit Debugging<->Unit-Test loop and then
+    # Code Review run next; code_review_node sets the actual terminal status.
     state["workflow_status"] = "code_committed"
     return state
 

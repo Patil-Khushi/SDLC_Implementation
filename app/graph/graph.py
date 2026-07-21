@@ -4,9 +4,10 @@ Renders the boilerplate scaffold once, then loops over the plan's work items: ge
 gate (files_complete ONLY — did it write every target file? no compile/build) → back to select
 (no per-item commit) | repair→gate | escalate (failure). Once the plan is exhausted, the run
 auto-commits (one run-level commit), then a post-commit Debugging<->Unit-Test loop runs
-(compile/build check → generate/run unit tests, with an LLM debugging repair path on failure)
-before the run finishes — NO human approval step anywhere. The fixed gate/check nodes are the
-router source; the local repair/debug caps live in router.py.
+(compile/build check → generate/run unit tests, with an LLM debugging repair path on failure),
+and finally — once tests pass — the Code Review agent clones the committed repo, runs static
+analysis, and writes its report. NO human approval step anywhere. The fixed gate/check nodes are
+the router source; the local repair/debug caps live in router.py.
 
     scaffold → select → code_generator → gate ─┬─ pass ──────────────→ select (loop)
                   ▲                             ├─ fail, repair<CAP ─→ repair → gate
@@ -21,9 +22,12 @@ router source; the local repair/debug caps live in router.py.
                                                            └─ fail, debug>=CAP ───→ escalate → END
                                              unit_test_generate ─┬─ ok ──→ unit_test_run
                                                                  └─ fail → escalate → END
-                                             unit_test_run ─┬─ pass ────────────→ END (auto, done)
+                                             unit_test_run ─┬─ pass ─────────────→ code_review → END (done)
                                                              ├─ fail, debug<CAP ─→ debugging → debug_check
                                                              └─ fail, debug>=CAP → escalate → END
+
+Code Review runs ONCE, only on this clean completion path — every escalate branch above bypasses
+it entirely, same as it bypasses the debug/test loop.
 
 Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
 rework loop) is gone — a completed plan commits automatically. The escalation path still flags
@@ -68,6 +72,7 @@ def build_graph():
     graph.add_node("debugging", debugging_node)
     graph.add_node("unit_test_generate", nodes.unit_test_generate_node)
     graph.add_node("unit_test_run", nodes.unit_test_run_node)
+    graph.add_node("code_review", nodes.code_review_node)
 
     graph.add_edge(START, "scaffold")
     graph.add_edge("scaffold", "select")
@@ -103,9 +108,10 @@ def build_graph():
     graph.add_conditional_edges(
         "unit_test_run",
         route_after_test_run,
-        {"done": END, "debugging": "debugging", "escalate": "escalate"},
+        {"done": "code_review", "debugging": "debugging", "escalate": "escalate"},
     )
     graph.add_edge("debugging", "debug_check")  # debugging → back to the fixed debug/build check
+    graph.add_edge("code_review", END)         # tests passed, review written → done (auto, no approval)
 
     # Checkpointer kept only so get_state(config) can read a finished run; there are no interrupts.
     return graph.compile(checkpointer=MemorySaver())

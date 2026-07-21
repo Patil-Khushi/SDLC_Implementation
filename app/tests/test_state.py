@@ -4,13 +4,13 @@ from app.graph.state import GateResult, WorkflowState, new_state
 from app.models import WorkItem
 
 ALL_FIELDS = {
-    "project_id", "run_id", "attempt", "design_package",
+    "project_id", "run_id", "attempt", "design_package", "repo_url", "branch", "commit_sha",
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
     "codegen_ok", "gate_result", "repair_attempt", "debug_attempt", "debug_result", "tests_ok",
     "test_result", "generation_summary", "generation_metrics",
     "push_enabled", "git_remote", "git_token",
-    "review_report", "refactored_code", "unit_tests", "documentation", "security_report",
-    "workflow_status",
+    "review_report", "review_report_path", "review_findings_path", "refactored_code", "unit_tests",
+    "documentation", "security_report", "workflow_status",
 }
 
 INITIALIZED_FIELDS = {
