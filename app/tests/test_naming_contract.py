@@ -83,6 +83,44 @@ def test_sql_parser_extracts_only_column_names(tmp_path: Path) -> None:
     assert entities == [{"model": "T", "store": "t", "fields": ["a", "b"]}]
 
 
+def test_sql_multiline_constraint_does_not_leak_a_fake_column() -> None:
+    # A CHECK/CONSTRAINT whose body spans multiple lines must NOT contribute its inner identifiers
+    # as columns — the naming contract treats every field as authoritative, so a fake one is toxic.
+    sql = (
+        "CREATE TABLE products (\n"
+        "    id     UUID NOT NULL,\n"
+        "    price  NUMERIC(10,2) NOT NULL,\n"
+        "    CONSTRAINT products_price_positive CHECK (\n"
+        "        price > 0\n"
+        "    ),\n"
+        "    CONSTRAINT products_name_len CHECK (\n"
+        "        char_length(name) BETWEEN 1 AND 80\n"
+        "    )\n"
+        ");"
+    )
+    entities = fc._entities_from_sql(sql)
+    assert entities == [{"model": "Product", "store": "products", "fields": ["id", "price"]}]
+    # The tokens that live only inside the multi-line CHECK bodies never appear as fields.
+    fields = entities[0]["fields"]
+    assert "char_length" not in fields and "name" not in fields and "BETWEEN" not in fields
+
+
+def test_sql_comment_with_comma_does_not_break_columns() -> None:
+    # A comma inside a "-- ..." comment must not split a column definition mid-comment (which would
+    # both drop real columns and leak the comment's next word as a fake column).
+    sql = (
+        "CREATE TABLE refresh_tokens (\n"
+        "    id          UUID NOT NULL,\n"
+        "    expires_at  TIMESTAMPTZ NOT NULL,   -- default TTL, or extended when remember_me\n"
+        "    revoked_at  TIMESTAMPTZ,            -- NULL while active; set on logout, rotation\n"
+        "    remember_me BOOLEAN NOT NULL\n"
+        ");"
+    )
+    entities = fc._entities_from_sql(sql)
+    assert entities[0]["fields"] == ["id", "expires_at", "revoked_at", "remember_me"]
+    assert "or" not in entities[0]["fields"]  # the comment word that used to leak
+
+
 # ------------------------------------------------------------------- endpoints (CSV, both shapes)
 
 def test_endpoints_from_legacy_api_mapping(tmp_path: Path) -> None:

@@ -1190,6 +1190,12 @@ def run_feature(req: RunFeatureRequest) -> dict[str, Any]:
     if req.index < 0 or req.index >= len(stories):
         raise HTTPException(400, f"index {req.index} out of range 0..{len(stories) - 1}")
 
+    # Same safety as /api/run and /api/run-stream: in ephemeral (temp-dir) mode a push MUST be
+    # possible before we generate anything, and the run must push so the throwaway copy can be
+    # cleaned up afterwards. Persistent (--out-dir) mode keeps req.push as-is (local-only allowed).
+    _guard_ephemeral_push()
+    push = req.push or _ephemeral()
+
     project_dir = OUT_DIR / req.project
     base_branch = "main"  # holds ONLY the scaffold
     branch = "dev"        # all feature commits land here; never on main/master
@@ -1202,7 +1208,7 @@ def run_feature(req: RunFeatureRequest) -> dict[str, Any]:
         fc._git(["init"], project_dir)
         fc._git(["config", "user.email", "codegen@local"], project_dir, check=False)
         fc._git(["config", "user.name", "IMP-001 codegen"], project_dir, check=False)
-        if req.push and req.repoName:
+        if push and req.repoName:
             login = req.owner.strip() or _gh("api", "user", "--jq", ".login")[1]
             if not login:
                 raise HTTPException(502, "could not resolve a GitHub login (is `gh auth` set up?)")
@@ -1220,7 +1226,7 @@ def run_feature(req: RunFeatureRequest) -> dict[str, Any]:
             dest = project_dir / e["path"].lstrip("/")
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(e["content"], encoding="utf-8")
-        sha0, st0 = _ff_commit_push(project_dir, "chore: initial project scaffold", req.push, base_branch)
+        sha0, st0 = _ff_commit_push(project_dir, "chore: initial project scaffold", push, base_branch)
         setup.append(f"scaffold(main): {sha0 or '-'} ({st0})")
         fc._ensure_feature_branch(project_dir, branch)  # dev from main
 
@@ -1257,28 +1263,56 @@ def run_feature(req: RunFeatureRequest) -> dict[str, Any]:
                 current[f["path"].lstrip("/")] = f["content"]
             files.extend(layer_files)
     else:  # dry-run: canned stub so the flow is demoable with no API key
+        contract = ""
         files = [{"path": "frontend/src/pages/GamePage.tsx", "content": _stub_content("GamePage.tsx")}]
+    feat_files: list[str] = []
     for f in files:
-        dest = project_dir / f["path"].lstrip("/")
+        rel = f["path"].lstrip("/")
+        dest = project_dir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(f["content"], encoding="utf-8")
-    sha, status = _ff_commit_push(project_dir, f"feat({sid}): {title}", req.push, branch)
+        if rel not in feat_files:
+            feat_files.append(rel)
+
+    # B3 smoke check: statically check this feature's files and repair what fails BEFORE committing
+    # (same mechanism as /api/run-stream). Never blocks the commit — a still-broken feature is
+    # committed and flagged, consistent with the completeness-only gate.
+    smoke_status = "skipped"
+    if SMOKE_ENABLED and MODE == "real" and feat_files:
+        sr = fc.smoke_check(project_dir, feat_files)
+        if not sr.ok and SMOKE_REPAIR_ROUNDS > 0:
+            sr, _repaired = fc.repair_smoke_errors(
+                llm_gateway.llm_gateway, project_dir, contract, feat_files, sr, current,
+                max_rounds=SMOKE_REPAIR_ROUNDS,
+            )
+        smoke_status = "ok" if sr.ok else "issues"
+
+    # `git add -A` below picks up any files the smoke repair rewrote on disk.
+    sha, status = _ff_commit_push(project_dir, f"feat({sid}): {title}", push, branch)
 
     url = ""
-    if req.push and req.repoName:
+    if push and req.repoName:
         login = req.owner.strip() or _gh("api", "user", "--jq", ".login")[1]
         url = f"https://github.com/{login}/{req.repoName}"
 
     done = req.index == len(stories) - 1
-    # Keep only at the remote: once the LAST feature is pushed, delete the local working copy —
-    # but ONLY when it's a throwaway temp dir. A persistent --out-dir is never auto-deleted.
-    if done and req.push and status == "pushed":
-        _finalize_run(project_dir, is_temp=OUT_DIR_IS_TEMP, success=True)
+    # Cleanup: delete the working copy ONLY when it's a throwaway temp dir AND the WHOLE run has
+    # finished with its last feature actually pushed. On a failed/absent push (or an intermediate
+    # feature) the temp dir is preserved — and its path is ALWAYS reported below so the caller can
+    # find or recover the code, matching the other endpoints' "preserved at: <path>" contract.
+    cleaned = False
+    if done and status == "pushed":
+        cleaned = _finalize_run(project_dir, is_temp=OUT_DIR_IS_TEMP, success=True)
+    preserved = OUT_DIR_IS_TEMP and not cleaned  # temp code still on disk (mid-run, or push failed)
 
     return {
         "index": req.index, "total": len(stories), "id": sid, "title": title,
         "files": [f["path"] for f in files], "sha": sha, "status": status,
-        "done": done, "url": url, "setup": setup,
+        "done": done, "url": url, "setup": setup, "smoke": smoke_status,
+        "out_dir": str(project_dir), "cleaned": cleaned, "kept_locally": not cleaned,
+        "preserved": preserved,
+        "message": (f"generated files preserved at: {project_dir}"
+                    if preserved and done and status != "pushed" else ""),
     }
 
 

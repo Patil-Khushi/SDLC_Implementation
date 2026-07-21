@@ -326,8 +326,43 @@ def _entities_from_mongo(text: str) -> list[dict]:
     return out
 
 
+def _strip_sql_comments(text: str) -> str:
+    """Remove ``-- line`` and ``/* block */`` comments so their punctuation (commas especially)
+    can't be mistaken for structural SQL. A comma inside a ``-- ...`` comment would otherwise split
+    a column definition mid-comment and leak the comment's next word as a fake column."""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", "", text)
+
+
+def _split_top_level_items(body: str) -> list[str]:
+    """Split a ``CREATE TABLE`` body into its column/constraint definitions, on commas ONLY at
+    top-level (paren depth 0). A per-LINE split would let a multi-line ``CONSTRAINT ... CHECK (``
+    whose condition continues on the next line (e.g. ``CHECK (\\n    price > 0\\n)``) leak that
+    continuation line's own identifiers as separate items — one of them then reads like a bare
+    column definition and slips a wrong field into the naming contract. Keeping the whole
+    parenthesized definition as ONE item, however many lines it spans, fixes that: only its first
+    token (``CONSTRAINT``/``CHECK``) is ever checked against ``_SQL_NOT_A_COLUMN``."""
+    items: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        items.append("".join(current))
+    return items
+
+
 def _entities_from_sql(text: str) -> list[dict]:
     """[{model, store, fields[]}] from SQL ``CREATE TABLE`` statements (column names, exact case)."""
+    text = _strip_sql_comments(text)
     out: list[dict] = []
     for m in re.finditer(
         r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"`]?(\w+)[\"`]?\s*\((.*?)\n\s*\)\s*;",
@@ -335,11 +370,11 @@ def _entities_from_sql(text: str) -> list[dict]:
     ):
         table, body = m.group(1), m.group(2)
         fields: list[str] = []
-        for raw in body.splitlines():
-            line = raw.strip().strip(",")
-            if not line:
+        for raw in _split_top_level_items(body):
+            item = raw.strip().strip(",")
+            if not item:
                 continue
-            first = re.split(r"[\s(]", line, maxsplit=1)[0].strip('"`')
+            first = re.split(r"[\s(]", item, maxsplit=1)[0].strip('"`')
             if first.lower() in _SQL_NOT_A_COLUMN or not re.match(r"^[A-Za-z_]\w*$", first):
                 continue
             if first not in fields:
