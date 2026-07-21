@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from app.agents.code_generator import CodeGeneratorAgent
+from app.agents.code_review import CodeReviewAgent
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
 from app.services.boilerplate import render_scaffold
@@ -18,6 +19,7 @@ from app.services.boilerplate import render_scaffold
 logger = logging.getLogger(__name__)
 
 _code_generator = CodeGeneratorAgent()
+_code_review = CodeReviewAgent()
 
 
 def scaffold_node(state: WorkflowState) -> WorkflowState:
@@ -52,6 +54,17 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
 def code_generator_node(state: WorkflowState) -> WorkflowState:
     """LLM: generate + write files for the current work item (no gate/commit here)."""
     return _code_generator.execute(state)
+
+
+def code_review_node(state: WorkflowState) -> WorkflowState:
+    """Clone the committed repo into an ephemeral sandbox, run static analysis, write the report.
+
+    The agent owns the whole sandbox session (clone → ruff/eslint → sonar-scanner → teardown);
+    this node just delegates. Runs ONCE after the run-level commit, on a clean completion only
+    (the escalate path bypasses it). Needs ``repo_url`` in state to clone; when absent the agent
+    writes a report noting no repo and leaves the run status unchanged.
+    """
+    return _code_review.execute(state)
 
 
 def select_work_item_node(state: WorkflowState) -> WorkflowState:

@@ -49,4 +49,6 @@ def start(request: StartRequest) -> StartResponse:
         workflow_status=final.get("workflow_status", "completed"),
         run_id=final.get("run_id", run_id),
         generated_code=final.get("generated_code") or [],
+        review_report=final.get("review_report") or "",
+        review_report_path=final.get("review_report_path") or "",
     )

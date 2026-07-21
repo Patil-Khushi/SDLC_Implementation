@@ -1,0 +1,64 @@
+# Implementation service — local static-analysis stack for the Code Review agent.
+#
+# This compose file is SCOPED TO THIS MICROSERVICE (like its own .env). The repo-root
+# docker-compose.yml owns the shared exec-sandbox infra; SonarQube is a dependency of this
+# service's review stage only, so it lives here.
+#
+# What it runs:
+#   * sonarqube  — SonarQube Community Build (free, no LOC limit). Web UI + API on :9000.
+#   * sonar-db   — a DEDICATED PostgreSQL for SonarQube (never the H2 dev DB, which does not
+#                  persist). Isolated from the app's own database on purpose.
+#
+# Usage (from services/implementation/):
+#   docker compose up -d
+#   # first boot takes ~1-2 min; then open http://localhost:9000 (admin / admin, change it)
+#   # create a project + generate a user token, then set SONARQUBE_* in .env (see .env.example)
+#
+# NOTE (Linux hosts / Docker Desktop WSL2): SonarQube embeds Elasticsearch, which needs
+#   vm.max_map_count >= 262144. If sonarqube exits on boot, run on the host:
+#     sudo sysctl -w vm.max_map_count=262144
+
+services:
+  sonarqube:
+    image: sonarqube:community
+    container_name: impl-sonarqube
+    depends_on:
+      - sonar-db
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD:-sonar}
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    networks:
+      - sonar
+
+  sonar-db:
+    image: postgres:15-alpine
+    container_name: impl-sonar-db
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD:-sonar}
+      POSTGRES_DB: sonar
+    volumes:
+      - sonar_db_data:/var/lib/postgresql/data
+    networks:
+      - sonar
+
+networks:
+  sonar:
+    driver: bridge
+
+volumes:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+  sonar_db_data:

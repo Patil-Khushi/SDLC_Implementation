@@ -63,8 +63,19 @@ class WorkflowState(TypedDict, total=False):
     git_remote: str
     git_token: str
 
+    # --- Code Review inputs (repo to clone) + git working model ---
+    # The public GitHub URL of the generated project. Produced by Code Generation (from the push
+    # step) and consumed by Code Review, which clones it into an ephemeral sandbox for analysis.
+    repo_url: str
+    # ``branch`` is the working branch cloned/reviewed (defaults to settings.working_branch);
+    # ``commit_sha`` is the exact commit Code Review pinned for the audit trail.
+    branch: str
+    commit_sha: str
+
     # --- Downstream pipeline agent outputs (each agent writes only its own) ---
-    review_report: str
+    review_report: str          # Code Review: the Markdown report content
+    review_report_path: str     # Code Review: where the report .md was saved (reports/…)
+    review_findings_path: str   # Code Review: normalized verified-findings JSON (for Refactoring)
     refactored_code: str
     unit_tests: str
     documentation: str

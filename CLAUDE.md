@@ -8,6 +8,11 @@ the four layers (FastAPI → LangGraph → Agents → LLM Gateway), the file lay
 the single LLM door `self.llm` (§5C), the "add an agent" recipe (§6), and the nine rules (§9).
 Read it first; follow it for everything.
 
+**To build the remaining pipeline agents** (refactoring, debugging, unit_test, documentation,
+security) read **`AGENTS_CONTEXT.md`** — a code-verified, ground-truth reference (state fields,
+integrations, the two execution models, per-agent specs, and the open decisions). Read it before
+writing any new agent to avoid hallucinating behavior for the empty stubs.
+
 **This file (CLAUDE.md) adds only the deep rules for the Code Generation slice (IMP-001)** —
 the compile-verify-repair machinery the guide doesn't spell out — expressed in the guide's
 vocabulary (`BaseAgent.execute`, `WorkflowState`, `self.llm`, `app/integrations/executor.py`,

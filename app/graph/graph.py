@@ -10,7 +10,7 @@ router; the local repair cap lives in router.py.
                   ▲                             ├─ fail, repair<CAP ─→ repair → gate
                   │                             └─ fail, repair>=CAP → escalate → END
                   │                                                    (needs_human_review)
-                  └── select: nothing left → commit → END (auto, no approval)
+                  └── select: nothing left → commit → code_review → END (auto, no approval)
 
 Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
 rework loop) is gone — a completed plan commits automatically. The escalation path still flags
@@ -47,6 +47,7 @@ def build_graph():
     graph.add_node("commit", nodes.commit_node)
     graph.add_node("repair", repair_node)
     graph.add_node("escalate", nodes.escalate_node)
+    graph.add_node("code_review", nodes.code_review_node)
 
     graph.add_edge(START, "scaffold")
     graph.add_edge("scaffold", "select")
@@ -61,7 +62,8 @@ def build_graph():
     graph.add_conditional_edges(
         "gate", route_after_gate, {"select": "select", "repair": "repair", "escalate": "escalate"}
     )
-    graph.add_edge("commit", END)            # single run-level commit → done (auto, no approval)
+    graph.add_edge("commit", "code_review")  # clean completion → final review (clone → analysis → report)
+    graph.add_edge("code_review", END)        # review written → done
     graph.add_edge("repair", "gate")          # repair → back to the fixed gate
     graph.add_edge("escalate", END)           # failure flagged (needs_human_review) → done, no pause
 

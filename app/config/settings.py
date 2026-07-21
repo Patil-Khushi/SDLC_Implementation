@@ -54,6 +54,27 @@ class Settings(BaseSettings):
     sandbox_mcp_url: str = "http://localhost:8080/mcp"
     sandbox_mcp_transport: str = "streamable_http"
 
+    # Code Review: clones the generated PUBLIC repo into an EPHEMERAL sandbox, runs static
+    # analysis (ruff/eslint + sonar-scanner) inside it, tears it down, then writes a Markdown
+    # report. No code is executed (Testing does that); no repo token is needed (public repos).
+    review_sandbox_image: str = "sdlc-review-sandbox:latest"  # image w/ git+ruff+node/eslint+sonar-scanner
+    review_sandbox_timeout: float = 900.0                     # hard cap on the whole session (s)
+    reports_dir: str = "reports"                              # where <project>-<run>.md reports land
+    # Git working model: all phases work on this branch; it is merged -> main only after the
+    # Security scan passes (final step).
+    working_branch: str = "dev"
+
+    # SonarQube static analysis (integrations/sonarqube.py). OFF by default; when disabled the
+    # review runs on ruff/eslint + the LLM alone. NOTE two URLs for the same server:
+    #   * sonarqube_scanner_url — used by sonar-scanner INSIDE the sandbox container (upload)
+    #   * sonarqube_url         — used by the agent ON THE HOST to read issues back
+    sonarqube_enabled: bool = False
+    sonarqube_url: str = "http://localhost:9000"                 # host-side read (published port)
+    sonarqube_scanner_url: str = "http://host.docker.internal:9000"  # sandbox-side upload
+    sonarqube_token: str = ""                   # user/analysis token (Bearer auth)
+    sonarqube_project_key: str = ""             # component key to scan + pull issues for
+    sonarqube_timeout: float = 30.0             # HTTP timeout in seconds
+
 
 @lru_cache
 def get_settings() -> Settings:

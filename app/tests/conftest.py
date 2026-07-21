@@ -104,6 +104,14 @@ class ReplayGateway(FakeLLMGateway):
         return self.complete(prompt, system=system)
 
 
+@pytest.fixture(autouse=True)
+def _reports_to_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the Code Review report dir at a tmp path so tests never write into the repo."""
+    from app.config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "reports_dir", str(tmp_path / "reports"))
+
+
 @pytest.fixture
 def dummy_pack_complete() -> Path:
     return _fixtures_root() / "ecommerce_complete"

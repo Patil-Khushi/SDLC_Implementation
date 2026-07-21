@@ -30,4 +30,6 @@ def test_start_route_runs_cleanly() -> None:
     assert body["project_id"] == "p1"
     assert body["run_id"]                            # a run id was assigned
     assert len(body["generated_code"]) == 7           # scaffold's boilerplate files, no work items
-    assert body["workflow_status"] == "completed"     # scaffold done -> auto-commit (no HITL)
+    # scaffold done -> auto-commit -> final review runs; with no repo_url it is a clean no-op.
+    assert body["workflow_status"] == "code_reviewed"
+    assert "No repository URL" in body["review_report"]
