@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -73,10 +74,23 @@ _FIXTURES_DIR = _REPO_ROOT / "fixtures"
 _UI_FILE = Path(__file__).resolve().parent / "demo_ui.html"
 
 # Set by main(): "dry-run" | "real", and where real-mode files are written. Generated projects go
-# OUTSIDE the SDLC repo (fc._DEFAULT_OUT_DIR) so their per-project git repos never nest in the main
-# tree; override with --out-dir.
+# OUTSIDE the SDLC repo so their per-project git repos never nest in the main tree.
+#
+# Storage lifecycle (matches feature_commit.py's CLI policy):
+#   - No --out-dir in real mode  -> OUT_DIR is a throwaway tempfile.mkdtemp() dir and
+#     OUT_DIR_IS_TEMP is True: the code is pushed to the remote and the local copy is DELETED
+#     after a fully successful run (every push OK); kept on any failure so it can be recovered.
+#   - --out-dir given            -> OUT_DIR is that folder and OUT_DIR_IS_TEMP is False: files are
+#     kept permanently and NEVER auto-deleted (explicit opt-in for a persistent local copy).
 MODE = "dry-run"
 OUT_DIR = fc._DEFAULT_OUT_DIR
+OUT_DIR_IS_TEMP = False
+
+# B3 smoke check: after each feature is generated (real mode) its files are statically checked
+# (syntax + undefined names) and repaired before commit. On by default; --no-smoke disables it,
+# --smoke-repair-rounds sets how many repair passes to attempt (0 = report only, no repair).
+SMOKE_ENABLED = True
+SMOKE_REPAIR_ROUNDS = 1
 
 
 # --------------------------------------------------------------------------- canned LLM (dry run)
@@ -272,6 +286,51 @@ def _env_token() -> str:
 def _env_owner() -> str:
     """The account/org to own the repo (GITHUB_OWNER). Blank → the token's own login."""
     return (get_settings().github_owner or "").strip()
+
+
+def _resolve_out_dir(out_dir: Path | None, mode: str) -> tuple[Path, bool]:
+    """Decide where generated projects are written and whether that dir is throwaway.
+
+    Returns ``(path, is_temp)``:
+      - ``out_dir`` given          -> ``(out_dir.resolve(), False)`` — persistent, kept forever.
+      - no ``out_dir``, real mode  -> ``(tempfile.mkdtemp(prefix="sdlc-gen-"), True)`` — throwaway,
+        deleted after a fully successful push (see :func:`_finalize_run`).
+      - no ``out_dir``, dry-run    -> ``(fc._DEFAULT_OUT_DIR, False)`` — unchanged demo behavior
+        (dry-run writes only canned stubs and never pushes, so a temp dir would just accumulate).
+    """
+    if out_dir is not None:
+        return out_dir.resolve(), False
+    if mode == "real":
+        return Path(tempfile.mkdtemp(prefix="sdlc-gen-")), True
+    return fc._DEFAULT_OUT_DIR, False
+
+
+def _push_config_ok() -> tuple[bool, str]:
+    """Whether a git push can authenticate, for the mandatory pre-generation check in ephemeral
+    real mode. OK if a GITHUB_PAT is set (we push as the PAT) or the gh keyring has a login.
+    Returns ``(ok, detail)`` — ``detail`` is a user-facing reason when not OK.
+    """
+    if _env_token():
+        return True, ""
+    if _gh("auth", "status")[0] == 0:
+        return True, ""
+    return False, (
+        "real mode without --out-dir keeps generated code ONLY at the remote, so it requires a "
+        "GitHub push: set GITHUB_PAT (and optionally GITHUB_OWNER) in services/implementation/.env, "
+        "or run `gh auth login`. To keep a local copy instead, start the server with "
+        "--out-dir <path>."
+    )
+
+
+def _finalize_run(project_dir: Path, *, is_temp: bool, success: bool) -> bool:
+    """Delete the working copy ONLY when it is a throwaway temp dir AND the run fully succeeded.
+
+    Persistent (--out-dir) dirs are never deleted, and a failed/partial run is always preserved so
+    the user can recover the files. Returns True iff the directory was removed.
+    """
+    if is_temp and success:
+        return fc._force_rmtree(project_dir)
+    return False
 
 
 def _slug(text: str) -> str:
@@ -725,7 +784,10 @@ def _feature_run(
             ok, detail = _push(base_branch)
             yield {"type": "pushed", "branch": base_branch, "sha": sha0, "ok": ok, "detail": detail}
             if not ok:
-                yield {"type": "error", "message": f"push to {base_branch} failed: {detail}"}
+                yield {"type": "error",
+                       "message": f"push to {base_branch} failed: {detail}",
+                       "out_dir": str(project_dir),
+                       "preserved": True}  # keep the working copy so the user can recover it
                 return
         fc._ensure_feature_branch(project_dir, branch)
 
@@ -744,6 +806,10 @@ def _feature_run(
                         current[rel] = p.read_text(encoding="utf-8")
                     except OSError:
                         pass
+    # Build the naming contract ONCE and inject it into every layer/file call so routers, schemas,
+    # services, models, and the frontend all agree on entity/field/endpoint names (see
+    # fc.build_naming_contract). Empty ("") for packs it can't parse — then it's a no-op.
+    contract = fc.build_naming_contract(pack_dir)
     story_records: list[dict[str, Any]] = []
     for idx, (sid, title, body) in enumerate(stories):
         if sid in done_ids:
@@ -753,7 +819,7 @@ def _feature_run(
         for key, label, instruction in fc._LAYERS:
             yield {"type": "layer_start", "id": sid, "layer": label}
             if MODE == "real":
-                ctx = fc._design_context(pack_dir, fc._LAYER_CONTEXT[key])
+                ctx = fc._prepend_contract(contract, fc._design_context(pack_dir, fc._LAYER_CONTEXT[key]))
                 # Chunked: a manifest call lists the layer's files, then each file is generated in
                 # its own bounded call (output can't truncate). current is updated per file.
                 lf = fc._generate_layer_chunked(
@@ -770,14 +836,38 @@ def _feature_run(
                 current[rel] = f["content"]
                 feat_files.append(rel)
                 yield {"type": "file", "path": rel, "id": sid, "layer": label}
+
+        # B3 smoke check: before committing the feature, statically check its freshly written files
+        # (syntax + undefined names) and repair what fails. Never blocks the commit — a still-broken
+        # feature is committed and flagged (consistent with the completeness-only gate), never lost.
+        smoke_status = "skipped"
+        if SMOKE_ENABLED and MODE == "real":
+            sr = fc.smoke_check(project_dir, feat_files)
+            yield {"type": "smoke", "id": sid, "ok": sr.ok, "errors": sr.errors,
+                   "checked": sr.checked, "skipped": sr.skipped, "summary": sr.summary()}
+            repaired: list[str] = []
+            if not sr.ok and SMOKE_REPAIR_ROUNDS > 0:
+                sr, repaired = fc.repair_smoke_errors(
+                    llm_gateway.llm_gateway, project_dir, contract, feat_files, sr, current,
+                    max_rounds=SMOKE_REPAIR_ROUNDS,
+                )
+                yield {"type": "smoke_repair", "id": sid, "repaired": repaired, "ok": sr.ok,
+                       "errors": sr.errors, "summary": sr.summary()}
+            smoke_status = "ok" if sr.ok else "issues"
+
         sha = _commit(f"feat({sid}): {title}")
-        story_records.append({"id": sid, "plan": title, "files": feat_files, "sha": sha, "failed": False})
-        yield {"type": "story_done", "id": sid, "title": title, "sha": sha, "files": feat_files}
+        story_records.append({"id": sid, "plan": title, "files": feat_files, "sha": sha,
+                              "failed": False, "smoke": smoke_status})
+        yield {"type": "story_done", "id": sid, "title": title, "sha": sha, "files": feat_files,
+               "smoke": smoke_status}
         if live:
             ok, detail = _push(branch)  # push this feature before starting the next (workflow rule 8)
             yield {"type": "pushed", "branch": branch, "sha": sha, "id": sid, "ok": ok, "detail": detail}
             if not ok:
-                yield {"type": "error", "message": f"push of {sid} to {branch} failed: {detail}"}
+                yield {"type": "error",
+                       "message": f"push of {sid} to {branch} failed: {detail}",
+                       "out_dir": str(project_dir),
+                       "preserved": True}  # keep the working copy so the user can recover it
                 return
 
     # 3) LIVE: flip the repo to public now that everything is pushed (best-effort — code is safe).
@@ -792,7 +882,17 @@ def _feature_run(
                "detail": "" if public_ok else (err or out).strip()[:200]}
 
     RUNS[project] = {"project_dir": str(project_dir), "base_branch": base_branch, "branch": branch}
+    # Read the git log BEFORE any cleanup (the working copy may be about to be deleted).
     git_log = fc._run(["git", "log", "--all", "--oneline", "--decorate"], project_dir).stdout
+
+    # Reaching here in a LIVE run means EVERY push succeeded (a push failure returns early above),
+    # so an ephemeral (temp) working copy is now safe to delete — the code lives at the remote.
+    # A persistent (--out-dir) copy is never auto-deleted (is_temp is False there).
+    cleaned = _finalize_run(project_dir, is_temp=OUT_DIR_IS_TEMP, success=live)
+    if cleaned:
+        RUNS[project]["cleaned"] = True
+        print(f"[run-stream] pushed OK — deleted temp working copy: {project_dir}", flush=True)
+
     yield {
         "type": "done",
         "run_id": project, "project": project, "status": "completed",
@@ -802,7 +902,25 @@ def _feature_run(
         "scaffold_files": scaffold_files, "stories": story_records,
         "repo_url": repo_url, "repo": repo, "visibility": visibility,
         "resumed": resuming, "skipped": sorted(done_ids),
+        "cleaned": cleaned, "kept_locally": not cleaned,
     }
+
+
+def _ephemeral() -> bool:
+    """True when generated code must NOT persist locally: real mode with an auto temp dir. Such a
+    run keeps code only at the remote, so it REQUIRES a push (validated before any generation)."""
+    return MODE == "real" and OUT_DIR_IS_TEMP
+
+
+def _guard_ephemeral_push() -> None:
+    """In ephemeral mode, refuse to start a run unless a push can authenticate — BEFORE any LLM
+    call or file is written, so nothing is generated that could never be pushed (and thus never
+    cleaned up). No-op in persistent (--out-dir) or dry-run mode."""
+    if not _ephemeral():
+        return
+    ok, detail = _push_config_ok()
+    if not ok:
+        raise HTTPException(400, detail)
 
 
 @app.post("/api/run")
@@ -811,12 +929,18 @@ def run(req: RunRequest) -> dict[str, Any]:
 
     Runs the whole build, collecting the progress events into the ``events`` list the existing UI
     expects. For LIVE per-file progress (file names appearing with a tick), use ``/api/run-stream``.
+
+    Storage: with a persistent ``--out-dir`` the build stays LOCAL (no push) and files are kept,
+    exactly as before. In ephemeral mode (no ``--out-dir``) the run MUST push (validated up front)
+    and the temp working copy is deleted after a fully successful push — see :func:`_feature_run`.
     """
     pack_dir, stories, project = _prepare_feature_run(req.pack, req.project, req.only)
+    _guard_ephemeral_push()
+    publish = _ephemeral()  # ephemeral pushes (code lives at the remote); persistent stays local
     events: list[dict[str, Any]] = []
     final: dict[str, Any] | None = None
     try:
-        for ev in _feature_run(pack_dir, project, stories):
+        for ev in _feature_run(pack_dir, project, stories, publish=publish):
             if ev["type"] == "scaffold":
                 events.append({"kind": "scaffold",
                                "text": f"scaffold committed to {ev['branch']} ({ev['sha'] or '-'})",
@@ -824,10 +948,20 @@ def run(req: RunRequest) -> dict[str, Any]:
             elif ev["type"] == "story_done":
                 events.append({"kind": "item", "id": ev["id"], "plan": ev["title"],
                                "files": ev["files"], "sha": ev["sha"], "failed": False})
+            elif ev["type"] == "error":
+                # A push/wiring failure stopped the run. Files are preserved (never deleted on
+                # failure); report where so the user can recover them.
+                kept = ev.get("out_dir", str(OUT_DIR / project))
+                raise HTTPException(502, f"{ev['message']} — generated files preserved at: {kept}")
             elif ev["type"] == "done":
                 final = ev
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001 - surface LLM/exec errors to the chat instead of a 500 page
-        raise HTTPException(502, f"run failed ({type(exc).__name__}): {exc}") from exc
+        # Generation raised mid-run: the working copy is NOT deleted, so point the user to it.
+        kept = str(OUT_DIR / project)
+        raise HTTPException(502, f"run failed ({type(exc).__name__}): {exc} — "
+                                 f"generated files preserved at: {kept}") from exc
 
     assert final is not None  # _feature_run always ends with a "done" event unless it raised
     return {
@@ -835,6 +969,7 @@ def run(req: RunRequest) -> dict[str, Any]:
         "branches": final["branches"], "events": events,
         "file_count": final["file_count"], "item_count": final["item_count"],
         "out_dir": final["out_dir"], "git_log": final["git_log"],
+        "cleaned": final.get("cleaned", False), "kept_locally": final.get("kept_locally", True),
     }
 
 
@@ -862,15 +997,23 @@ def run_stream(
     With ``resume=True`` (used by the UI's Retry after a failure), the run continues an existing
     repo — skipping features already committed and building only the rest — instead of starting
     over. ``repo`` (``owner/name``) lets it clone the remote when the local copy is gone.
+
+    Storage: in ephemeral mode (no ``--out-dir``) a push is REQUIRED and validated here (4xx before
+    the stream opens); ``publish`` is forced on so the temp working copy can be cleaned up after a
+    successful push.
     """
     pack_dir, stories, proj = _prepare_feature_run(pack, project, only)
+    _guard_ephemeral_push()
+    effective_publish = publish or _ephemeral()  # ephemeral always pushes (code lives at the remote)
 
     def gen():
         try:
-            for ev in _feature_run(pack_dir, proj, stories, publish=publish, resume=resume, repo=repo):
+            for ev in _feature_run(pack_dir, proj, stories, publish=effective_publish,
+                                   resume=resume, repo=repo):
                 yield _sse(ev)
         except Exception as exc:  # noqa: BLE001 - surface to the stream instead of a 500 page
-            yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+            yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}",
+                        "out_dir": str(OUT_DIR / proj), "preserved": True})
 
     return StreamingResponse(
         gen(),
@@ -1099,11 +1242,13 @@ def run_feature(req: RunFeatureRequest) -> dict[str, Any]:
 
     sid, title, body = stories[req.index]
     if MODE == "real":
-        # Build the feature one layer at a time (Frontend → Backend → Database → Integration →
+        # Build the feature one layer at a time (Frontend → Database → Backend → Integration →
         # Testing), accumulating files so later layers see earlier ones. Committed as ONE feature.
+        # The naming contract binds every call to one set of entity/field/endpoint names.
+        contract = fc.build_naming_contract(pack)
         files: list[dict[str, str]] = []
         for key, label, instruction in fc._LAYERS:
-            ctx = fc._design_context(pack, fc._LAYER_CONTEXT[key])
+            ctx = fc._prepend_contract(contract, fc._design_context(pack, fc._LAYER_CONTEXT[key]))
             layer_files = fc._generate(
                 llm_gateway.llm_gateway,
                 fc._layer_prompt(ctx, current, sid, title, body, label, instruction),
@@ -1125,9 +1270,10 @@ def run_feature(req: RunFeatureRequest) -> dict[str, Any]:
         url = f"https://github.com/{login}/{req.repoName}"
 
     done = req.index == len(stories) - 1
-    # Keep only at the remote: once the LAST feature is pushed, delete the local working copy.
+    # Keep only at the remote: once the LAST feature is pushed, delete the local working copy —
+    # but ONLY when it's a throwaway temp dir. A persistent --out-dir is never auto-deleted.
     if done and req.push and status == "pushed":
-        fc._force_rmtree(project_dir)
+        _finalize_run(project_dir, is_temp=OUT_DIR_IS_TEMP, success=True)
 
     return {
         "index": req.index, "total": len(stories), "id": sid, "title": title,
@@ -1165,20 +1311,30 @@ def _load_pack(pack_dir: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    global MODE, OUT_DIR
+    global MODE, OUT_DIR, OUT_DIR_IS_TEMP, SMOKE_ENABLED, SMOKE_REPAIR_ROUNDS
     parser = argparse.ArgumentParser(description="IMP-001 code-generator demo server")
     # REAL is the default now: starting the backend uses the real Claude gateway
     # (ANTHROPIC_FOUNDRY_API_KEY from .env). Pass --dry-run for the canned/no-key mode.
     parser.add_argument("--dry-run", action="store_true",
                         help="canned LLM, in-memory, NO API key (opt-in; default is real Claude)")
     parser.add_argument("--real", action="store_true", help="(default) real Claude via Foundry")
-    parser.add_argument("--out-dir", type=Path, default=OUT_DIR,
-                        help=f"where real mode writes generated projects, OUTSIDE the repo (default: {OUT_DIR})")
+    parser.add_argument("--out-dir", type=Path, default=None,
+                        help="keep a PERSISTENT local copy of generated projects here (OUTSIDE the "
+                             "repo). Omit to keep the code ONLY at the remote: real mode then writes "
+                             "to a throwaway temp dir that is deleted after a successful push.")
+    parser.add_argument("--no-smoke", action="store_true",
+                        help="disable the B3 smoke check (syntax + undefined-name check of each "
+                             "generated feature before commit)")
+    parser.add_argument("--smoke-repair-rounds", type=int, default=SMOKE_REPAIR_ROUNDS,
+                        help=f"smoke-check repair passes per feature (default {SMOKE_REPAIR_ROUNDS}; "
+                             "0 = report only)")
     parser.add_argument("--port", type=int, default=8100)
     args = parser.parse_args()
 
     MODE = "dry-run" if args.dry_run else "real"
-    OUT_DIR = args.out_dir.resolve()
+    OUT_DIR, OUT_DIR_IS_TEMP = _resolve_out_dir(args.out_dir, MODE)
+    SMOKE_ENABLED = not args.no_smoke
+    SMOKE_REPAIR_ROUNDS = max(0, args.smoke_repair_rounds)
 
     if MODE == "dry-run":
         _install_canned_gateway()
@@ -1186,7 +1342,20 @@ def main() -> None:
     else:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         print(f"IMP-001 demo (REAL: Claude via ANTHROPIC_FOUNDRY_API_KEY) -> http://127.0.0.1:{args.port}")
-        print(f"  generated projects will be written under: {OUT_DIR}")
+        if OUT_DIR_IS_TEMP:
+            print("  Storage: no --out-dir given — generated projects are written to a TEMPORARY "
+                  "directory and DELETED after a successful push (the code lives only at the remote).")
+            print(f"           temp dir: {OUT_DIR}")
+            print("           Real mode here REQUIRES a GitHub push — set GITHUB_PAT/GITHUB_OWNER in "
+                  ".env (or `gh auth login`). Pass --out-dir <path> to keep a persistent local copy.")
+        else:
+            print(f"  Storage: --out-dir given — generated projects are KEPT under: {OUT_DIR}")
+            print("           (persistent local copy; never auto-deleted)")
+        if SMOKE_ENABLED:
+            print(f"  Smoke check: ON (syntax + undefined-name check per feature; "
+                  f"{SMOKE_REPAIR_ROUNDS} repair round(s)). Use --no-smoke to disable.")
+        else:
+            print("  Smoke check: OFF (--no-smoke)")
         print("  (requires ANTHROPIC_FOUNDRY_API_KEY + endpoint in services/implementation/.env)")
 
     # Show the agents' live progress ([PLANNING]/[GENERATING]/[DONE]) in this terminal.
