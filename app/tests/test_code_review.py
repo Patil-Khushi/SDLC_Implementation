@@ -61,15 +61,18 @@ def test_eight_section_report_with_verified_findings_and_observations() -> None:
     assert fake.cloned == [REPO] and fake.opened and fake.closed
     # all 8 sections present, in order
     for s in ("Section 1: Metadata", "Section 2: Executive Summary", "Section 3: Static Analysis Summary",
-              "Section 4: Static Analysis Findings", "4.1 Actionable Findings", "4.2 Suppressed Findings",
-              "Section 5: Engineering Observations", "Section 6: Metrics",
+              "Section 4: Static Analysis Findings", "4.1 Safe Auto-Fix Findings",
+              "4.2 AI-Suggested Refactoring Findings", "4.3 Manual Review Required Findings",
+              "4.4 Suppressed Findings", "Section 5: Engineering Observations", "Section 6: Metrics",
               "Section 7: Recommendations", "Section 8: Final Verdict"):
         assert s in r
-    # F401 is NOT a suppressible rule -> lands in 4.1 Actionable, tagged Very High (tool-detected)
+    # F401 is NOT a suppressible rule -> Safe Auto-Fix bucket, tagged Very High (tool-detected)
     assert "CR-001" in r and "F401" in r and "Very High" in r
     assert "Unused Code" in r
     assert "`import os`" in r                              # EVIDENCE: the offending code line
     assert "Why:" in r and "Fix:" in r                     # F401 has a canned root-cause/fix entry
+    assert "DELETE_UNUSED_IMPORT" in r                      # explicit machine-actionable operation
+    assert "Known gap" in r                                 # dependency/impact-analysis disclaimer
     # LLM interpretation surfaced
     assert "No transaction boundary" in r                 # engineering observation
     assert "Add unit tests for the order service." in r   # recommendation
@@ -315,6 +318,24 @@ def test_sonar_measures_are_deterministic_and_appear_in_metrics() -> None:
     assert "| Lines of code | 2911 | SonarQube |" in r
     assert "| Test coverage | 0.0% | SonarQube |" in r
     assert "| Technical debt | 2h 5m | SonarQube |" in r      # 125 min rendered human-readable
+
+
+def test_findings_json_field_schema_matches_new_contract() -> None:
+    # Guards the findings.json contract for the (currently stubbed) Refactoring agent: every
+    # finding must carry the full enrichment field set, not just the original severity/category.
+    fake = FakeReviewSandbox(files={"main.py": "import os\nx = 1\n"},
+                            responses={"ruff": RunResult(stdout=RUFF_JSON, stderr="", exit_code=1)})
+    agent = CodeReviewAgent(sandbox_factory=lambda: fake, llm=FakeLLMGateway([LLM_JSON]), sonarqube=_sonar_off())
+    out = agent.execute(_state())
+    findings = json.loads(Path(out["review_findings_path"]).read_text(encoding="utf-8"))
+
+    required = {"bucket", "operation", "auto_fix", "risk_level", "requires_tests", "phase",
+                "confidence", "verification", "verification_status", "suppressed_reason_kind"}
+    assert required.issubset(findings[0].keys())
+    assert findings[0]["bucket"] == "Safe Auto-Fix"
+    assert findings[0]["operation"] == "DELETE_UNUSED_IMPORT"
+    assert findings[0]["auto_fix"] is True
+    assert isinstance(findings[0]["confidence"], float)
 
 
 def test_missing_repo_url_is_a_clean_noop() -> None:

@@ -41,6 +41,11 @@ _PY_EXTS = (".py",)
 _JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 _SOURCE_EXTS = _PY_EXTS + _JS_EXTS
 _VERDICT = ("approve", "changes_requested")
+# The sandbox has network egress (see review_sandbox.py), so repo_url reaching `git clone` with no
+# scheme/host check is a clone-anything primitive (internal hosts, cloud-metadata-adjacent
+# addresses, etc.) - SSRF-shaped, once repo_url is wired to any less-trusted source than today's
+# CLI. Restrict to public GitHub HTTPS URLs, the only source this pipeline actually expects.
+_ALLOWED_REPO_RE = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+(?:\.git)?/?$")
 
 
 class CodeReviewAgent(BaseAgent):
@@ -78,6 +83,17 @@ class CodeReviewAgent(BaseAgent):
 
         if not repo_url:
             review = _empty_review("No repository URL was provided, so there was nothing to review.")
+            report = _render(meta, [], review, SonarResult(error="not run"), "not run", tools,
+                             SonarMeasures(error="not run"))
+            return self._finish(state, project_id, run_id, report, [])
+
+        if not _ALLOWED_REPO_RE.match(repo_url):
+            logger.warning("Refusing to clone disallowed repo_url: %s", repo_url)
+            review = _empty_review(
+                f"Repository URL '{repo_url}' is not an allowed GitHub URL (expected "
+                "https://github.com/<owner>/<repo>) - refusing to clone.",
+                verdict="changes_requested",
+            )
             report = _render(meta, [], review, SonarResult(error="not run"), "not run", tools,
                              SonarMeasures(error="not run"))
             return self._finish(state, project_id, run_id, report, [])
@@ -159,8 +175,13 @@ class CodeReviewAgent(BaseAgent):
             logger.info("[2/6] Running ruff ...")
             # Native Python parser (no plugins). Broad rule set: style, bugs (B), complexity (C90),
             # naming (N), security (S/bandit), pyupgrade (UP), perf (PERF), simplify (SIM).
+            # --isolated ignores any pyproject.toml/ruff.toml discovered in the CLONED repo (mirrors
+            # the ESLint invocation below, which never trusts the untrusted repo's own config) - a
+            # repo could otherwise ship `[tool.ruff] exclude = ["**/*.py"]` or blanket
+            # per-file-ignores and silently neuter every "Very High confidence" finding this review
+            # is built on. --config (a CLI-level key=value override, not a config FILE) still applies.
             res = sb.run([
-                "ruff", "check", "--output-format=json",
+                "ruff", "check", "--output-format=json", "--isolated",
                 "--select", "E,F,W,B,C90,N,S,UP,PERF,SIM",
                 "--config", "lint.mccabe.max-complexity=10", ".",
             ])
@@ -188,9 +209,11 @@ class CodeReviewAgent(BaseAgent):
         logger.info("[3/6] Running sonar-scanner (upload + wait) ...")
         cmd = ["sonar-scanner", f"-Dsonar.projectKey={settings.sonarqube_project_key}", "-Dsonar.sources=.",
                f"-Dsonar.host.url={settings.sonarqube_scanner_url}", "-Dsonar.qualitygate.wait=true"]
-        if settings.sonarqube_token:
-            cmd.append(f"-Dsonar.token={settings.sonarqube_token}")  # nosec
-        res = sb.run(cmd, timeout=settings.review_sandbox_timeout)
+        # Token via env var, not argv - sonar-scanner reads SONAR_TOKEN natively. Keeps the secret
+        # out of the container's process list (docker top / /proc/<pid>/cmdline), unlike
+        # -Dsonar.token=... on the command line.
+        env = {"SONAR_TOKEN": settings.sonarqube_token} if settings.sonarqube_token else None
+        res = sb.run(cmd, timeout=settings.review_sandbox_timeout, env=env)
         out = f"{res.stdout or ''}\n{res.stderr or ''}"
         if res.ok:
             logger.info("[3/6] SonarQube scan completed - gate passed")
@@ -405,42 +428,94 @@ def _render(meta: dict[str, Any], verified: list[dict[str, Any]], review: dict[s
         a("")
     else:
         a("_No actionable findings._\n")
+    buckets_n = agg.bucket_counts(actionable)
+    a("**Actionable findings, by bucket (what should happen to them):**\n")
+    a("| Safe Auto-Fix | AI Refactoring | Manual Review |")
+    a("| --- | --- | --- |")
+    a(f"| {buckets_n['Safe Auto-Fix']} | {buckets_n['AI Refactoring']} | {buckets_n['Manual Review']} |\n")
 
-    # 4. Static Analysis Findings (4.1 actionable, 4.2 suppressed false positives)
+    # 4. Static Analysis Findings - split into four buckets by WHAT SHOULD HAPPEN to a finding,
+    # not by category. `bucket` is independent of `category` on purpose: conflating the two is
+    # exactly how a naive rule lookup once mis-flagged a code-simplification rule as a security
+    # issue - see finding_aggregator's rule-mapping table docstring for the concrete bug.
     a("## Section 4: Static Analysis Findings\n")
     a("_A tool detecting a pattern (confidence: Very High) is not the same as that pattern being a "
-      "real, actionable problem - those are different questions. Section 4.1 lists findings that "
-      "survived deterministic false-positive filtering; 4.2 lists what was filtered out, and why._\n")
+      "real, actionable problem - those are different questions. Findings below are grouped by "
+      "`bucket`: 4.1 Safe Auto-Fix (deterministic, no reasoning required), 4.2 AI-Suggested "
+      "Refactoring (needs reasoning, conditional auto-fix), 4.3 Manual Review Required (business "
+      "logic / security - never auto-refactor), 4.4 Suppressed (auto-filtered false positives, "
+      "with why)._\n")
+    if not actionable:
+        a("_No actionable findings - nothing survived filtering as a real issue._\n")
+    by_bucket = _by_bucket(actionable)
 
-    a("### 4.1 Actionable Findings\n")
-    if actionable:
-        a("| ID | Category | Severity | Sources | Rule(s) | Location | Issue | Evidence (code) | Why / Impact / Fix |")
-        a("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-        for f in actionable:
+    a("### 4.1 Safe Auto-Fix Findings\n")
+    safe = by_bucket["Safe Auto-Fix"]
+    if safe:
+        a("| ID | Phase | Category | Severity | Operation | Confidence | Location | Issue | Evidence | Why / Impact / Fix |")
+        a("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for f in safe:
             loc = f"{f['file']}:{f['line']}" if f.get("line") else f["file"]
             detail = "; ".join(f["tool_messages"]) or f["message"]
             evidence = f.get("evidence", "")
             ev_cell = f"`{_esc(evidence)}`" if evidence else "-"
-            a(f"| {f['id']} | {f['category']} | {f['severity']} | {', '.join(f['sources'])} "
-              f"| {', '.join(f['rule_ids']) or '-'} | `{loc}` | {_esc(detail)} "
-              f"| {ev_cell} | {_why_impact_fix(f)} |")
+            a(f"| {f['id']} | {f['phase']} | {f['category']} | {f['severity']} | {f['operation']} "
+              f"| {f['confidence']:.2f} | `{loc}` | {_esc(detail)} | {ev_cell} | {_why_impact_fix(f)} |")
         a("")
     else:
-        a("_No actionable findings - nothing survived filtering as a real issue._\n")
+        a("_No Safe Auto-Fix findings._\n")
 
-    a("### 4.2 Suppressed Findings (Auto-Filtered False Positives)\n")
-    a("_Collapsed to one row per rule (repeated instances rolled into a count) - these are NOT "
-      "shown as individual findings because each was matched against a known, documented "
-      "false-positive pattern (the same patterns real tools solve with `per-file-ignores`/`nosec`)._\n")
+    a("### 4.2 AI-Suggested Refactoring Findings\n")
+    ai = by_bucket["AI Refactoring"]
+    if ai:
+        a("| ID | Phase | Category | Severity | Operation | Risk Level | Requires Tests | Confidence | Location | Issue | Evidence | Why / Impact / Fix |")
+        a("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for f in ai:
+            loc = f"{f['file']}:{f['line']}" if f.get("line") else f["file"]
+            detail = "; ".join(f["tool_messages"]) or f["message"]
+            evidence = f.get("evidence", "")
+            ev_cell = f"`{_esc(evidence)}`" if evidence else "-"
+            a(f"| {f['id']} | {f['phase']} | {f['category']} | {f['severity']} | {f['operation']} "
+              f"| {f['risk_level']} | {'Yes' if f.get('requires_tests') else 'No'} | {f['confidence']:.2f} "
+              f"| `{loc}` | {_esc(detail)} | {ev_cell} | {_why_impact_fix(f)} |")
+        a("")
+    else:
+        a("_No AI-Suggested Refactoring findings._\n")
+
+    a("### 4.3 Manual Review Required Findings\n")
+    a("> **Known gap:** dependency/impact analysis (call graph - whether a rename, signature "
+      "change, or structural edit breaks the API, tests, schema, or a caller elsewhere in the "
+      "codebase) is **not computed** by this pipeline. Treat every finding below as requiring "
+      "manual verification before applying any change, regardless of its `confidence` value.\n")
+    manual = by_bucket["Manual Review"]
+    if manual:
+        a("| ID | Phase | Category | Severity | Verification Status | Location | Issue | Evidence | Why / Impact / Fix |")
+        a("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for f in manual:
+            loc = f"{f['file']}:{f['line']}" if f.get("line") else f["file"]
+            detail = "; ".join(f["tool_messages"]) or f["message"]
+            evidence = f.get("evidence", "")
+            ev_cell = f"`{_esc(evidence)}`" if evidence else "-"
+            a(f"| {f['id']} | {f['phase']} | {f['category']} | {f['severity']} "
+              f"| {f['verification_status']} | `{loc}` | {_esc(detail)} | {ev_cell} | {_why_impact_fix(f)} |")
+        a("")
+    else:
+        a("_No Manual Review findings._\n")
+
+    a("### 4.4 Suppressed Findings (Auto-Filtered False Positives)\n")
+    a("_Collapsed to one row per (rule, suppression reason) pattern (repeated instances rolled "
+      "into a count) - these are NOT shown as individual findings because each was matched against "
+      "a known, documented false-positive pattern (the same patterns real tools solve with "
+      "`per-file-ignores`/`nosec`)._\n")
     if suppressed:
-        a("| Rule(s) | Category | Occurrences | Sample Location | Reason Suppressed |")
-        a("| --- | --- | --- | --- | --- |")
+        a("| Rule(s) | Category | Kind | Occurrences | Sample Location | Reason Suppressed |")
+        a("| --- | --- | --- | --- | --- | --- |")
         for f in suppressed:
             loc = f"{f['file']}:{f['line']}" if f.get("line") else f["file"]
             extra = len(f.get("additional_locations", []))
             loc_cell = f"`{loc}`" + (f" (+{extra} more)" if extra else "")
-            a(f"| {', '.join(f['rule_ids']) or '-'} | {f['category']} | {f.get('occurrences', 1)} "
-              f"| {loc_cell} | {_esc(f.get('suppressed_reason', ''))} |")
+            a(f"| {', '.join(f['rule_ids']) or '-'} | {f['category']} | {f.get('suppressed_reason_kind', '-')} "
+              f"| {f.get('occurrences', 1)} | {loc_cell} | {_esc(f.get('suppressed_reason', ''))} |")
         a("")
     else:
         a("_Nothing was suppressed._\n")
@@ -554,10 +629,21 @@ def _why_impact_fix(f: dict[str, Any]) -> str:
 
 def _split(verified: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Split into (actionable, suppressed). Actionable = requires attention; Suppressed = a
-    deterministic false-positive pattern (see finding_aggregator.classify)."""
+    deterministic false-positive pattern (see finding_aggregator.classify). Kept separate from
+    ``_by_bucket`` below: the verdict only ever needs this simple two-way severity-driven split,
+    never the four-way bucket breakdown used for rendering."""
     actionable = [f for f in verified if f.get("status") != "Suppressed"]
     suppressed = [f for f in verified if f.get("status") == "Suppressed"]
     return actionable, suppressed
+
+
+def _by_bucket(actionable: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group OPEN findings by ``bucket`` for Section 4's four-way rendering. Suppressed findings
+    are handled separately (they're already excluded from ``actionable`` by ``_split``)."""
+    buckets: dict[str, list[dict[str, Any]]] = {"Safe Auto-Fix": [], "AI Refactoring": [], "Manual Review": []}
+    for f in actionable:
+        buckets.setdefault(f.get("bucket", "Manual Review"), []).append(f)
+    return buckets
 
 
 def _empty_review(summary: str, verdict: str = "approve") -> dict[str, Any]:

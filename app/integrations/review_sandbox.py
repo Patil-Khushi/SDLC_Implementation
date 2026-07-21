@@ -60,8 +60,12 @@ class ReviewSandbox(ABC):
         """Clone a PUBLIC repo into the sandbox (shallow). No credentials."""
 
     @abstractmethod
-    def run(self, cmd: Sequence[str], timeout: float | None = None) -> RunResult:
-        """Run ``cmd`` (argv) with the cloned repo as the working directory."""
+    def run(self, cmd: Sequence[str], timeout: float | None = None,
+            env: dict[str, str] | None = None) -> RunResult:
+        """Run ``cmd`` (argv) with the cloned repo as the working directory. ``env`` is passed as
+        real process environment variables, never interpolated into ``cmd`` - secrets (e.g. a
+        SonarQube token) reach the process this way instead of appearing in argv, where they'd be
+        visible via the container's process list (``docker top`` / ``/proc/<pid>/cmdline``)."""
 
     @abstractmethod
     def read_text(self, rel_path: str) -> str:
@@ -105,6 +109,7 @@ class FakeReviewSandbox(ReviewSandbox):
             self._clone_results = list(clone_result)     # per-call results (for fallback tests)
         self._clone_i = 0
         self.commands: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
         self.cloned: list[str] = []
         self.clone_refs: list[str | None] = []
         self.opened = False
@@ -120,9 +125,11 @@ class FakeReviewSandbox(ReviewSandbox):
         self._clone_i += 1
         return result
 
-    def run(self, cmd: Sequence[str], timeout: float | None = None) -> RunResult:
+    def run(self, cmd: Sequence[str], timeout: float | None = None,
+            env: dict[str, str] | None = None) -> RunResult:
         argv = list(cmd)
         self.commands.append(argv)
+        self.envs.append(dict(env or {}))
         if callable(self._responses):
             return self._responses(argv)
         if isinstance(self._responses, dict):
@@ -184,8 +191,9 @@ class DockerReviewSandbox(ReviewSandbox):
         script = f"rm -rf {shlex.quote(_REPO_DIR)} && {shlex.join(git)}"
         return self._exec(["sh", "-c", script], workdir="/work")
 
-    def run(self, cmd: Sequence[str], timeout: float | None = None) -> RunResult:
-        return self._exec(list(cmd), workdir=_REPO_DIR, timeout=timeout)
+    def run(self, cmd: Sequence[str], timeout: float | None = None,
+            env: dict[str, str] | None = None) -> RunResult:
+        return self._exec(list(cmd), workdir=_REPO_DIR, timeout=timeout, env=env)
 
     def read_text(self, rel_path: str) -> str:
         result = self._exec(["cat", rel_path], workdir=_REPO_DIR)
@@ -207,8 +215,12 @@ class DockerReviewSandbox(ReviewSandbox):
 
     # -- docker plumbing ------------------------------------------------------
 
-    def _exec(self, cmd: Sequence[str], *, workdir: str, timeout: float | None = None) -> RunResult:
-        argv = [self._docker, "exec", "--workdir", workdir, self._name, *cmd]
+    def _exec(self, cmd: Sequence[str], *, workdir: str, timeout: float | None = None,
+              env: dict[str, str] | None = None) -> RunResult:
+        env_flags: list[str] = []
+        for key, value in (env or {}).items():
+            env_flags += ["-e", f"{key}={value}"]
+        argv = [self._docker, "exec", *env_flags, "--workdir", workdir, self._name, *cmd]
         return self._invoke(argv, timeout=timeout or self._timeout)
 
     def _docker_cli(self, args: Sequence[str]) -> RunResult:
