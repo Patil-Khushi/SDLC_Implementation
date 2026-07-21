@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from app.agents.code_generator import CodeGeneratorAgent
+from app.agents.unit_test import UnitTestAgent
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
 from app.services.boilerplate import render_scaffold
@@ -18,6 +19,7 @@ from app.services.boilerplate import render_scaffold
 logger = logging.getLogger(__name__)
 
 _code_generator = CodeGeneratorAgent()
+_unit_test_agent = UnitTestAgent()
 
 
 def scaffold_node(state: WorkflowState) -> WorkflowState:
@@ -103,6 +105,60 @@ def gate_node(state: WorkflowState) -> WorkflowState:
         checks.append({"name": "files_complete", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1})
 
     state["gate_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
+    return state
+
+
+def debug_check_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic check for the post-commit Debugging loop: ``compile`` + ``build`` ONLY.
+
+    CLAUDE.md deferred ``compile``/``build`` from the earlier files_complete-only gate to here —
+    this is where they finally run. An executor error (timeout, sandbox/disk failure) is treated
+    as a failing check — recorded, not raised — rather than crashing the graph (mirrors
+    ``gate_node``'s defensive style exactly).
+    """
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    checks: list[GateCheck] = []
+
+    for name, check in (("compile", executor.compile), ("build", executor.build)):
+        try:
+            result = check(project_dir)
+            checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "exit_code": result.exit_code})
+        except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
+            logger.exception("debug_check: %s raised for run %s", name, state.get("run_id"))
+            checks.append({"name": name, "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1})
+
+    state["debug_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
+    return state
+
+
+def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
+    """LLM: write unit tests for the generated project, once (no gate/commit here)."""
+    return _unit_test_agent.execute(state)
+
+
+def unit_test_run_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic check for the Unit Test phase: ``test`` ONLY.
+
+    A pass here is deliberately THE terminal state of the whole run now (a later step separately
+    renames ``commit_node``'s own success status away from "completed" — out of scope here). An
+    executor error is treated as a failing check — recorded, not raised — mirroring ``gate_node``/
+    ``debug_check_node``. ``workflow_status`` is only set on the passing branch, mirroring how
+    ``gate_node`` never sets it at all.
+    """
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+
+    try:
+        result = executor.test(project_dir)
+        check: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "exit_code": result.exit_code}
+    except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
+        logger.exception("unit_test_run: test raised for run %s", state.get("run_id"))
+        check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1}
+
+    state["test_result"] = {"passed": check["passed"], "checks": [check]}
+    if check["passed"]:
+        state["workflow_status"] = "completed"
     return state
 
 
@@ -200,7 +256,9 @@ def commit_node(state: WorkflowState) -> WorkflowState:
         state["generation_summary"] = (state.get("generation_summary") or "") + (
             f"[commit] scaffold on 'main' + {len(feature_commits)} feature commit(s) on 'dev'{pushed}\n"
         )
-        state["workflow_status"] = "completed"
+        # Not the run's terminal status anymore — the post-commit Debugging<->Unit-Test loop runs
+        # next; unit_test_run_node sets the new terminal "completed" once tests pass.
+        state["workflow_status"] = "code_committed"
         return state
 
     message = f"IMP-001 {state.get('run_id', 'run')}: {len(work_items)} work item(s), {len(files)} file(s)"
@@ -211,7 +269,9 @@ def commit_node(state: WorkflowState) -> WorkflowState:
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[commit] FAILED: {exc}\n"
         state["workflow_status"] = "commit_failed"  # else the run reports a mid-run status
         return state
-    state["workflow_status"] = "completed"
+    # Not the run's terminal status anymore — the post-commit Debugging<->Unit-Test loop runs
+    # next; unit_test_run_node sets the new terminal "completed" once tests pass.
+    state["workflow_status"] = "code_committed"
     return state
 
 

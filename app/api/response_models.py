@@ -9,3 +9,5 @@ class StartResponse(BaseModel):
     run_id: str = ""
     # Workspace-relative paths of the files produced this run.
     generated_code: list[str] = Field(default_factory=list)
+    # Workspace-relative paths of unit test files written this run.
+    unit_tests: list[str] = Field(default_factory=list)

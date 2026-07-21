@@ -49,4 +49,5 @@ def start(request: StartRequest) -> StartResponse:
         workflow_status=final.get("workflow_status", "completed"),
         run_id=final.get("run_id", run_id),
         generated_code=final.get("generated_code") or [],
+        unit_tests=final.get("unit_tests") or [],
     )

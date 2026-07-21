@@ -12,6 +12,11 @@ from app.graph.state import WorkflowState
 #: Local repair cap — how many repair attempts a single work item gets before escalation.
 REPAIR_CAP = 3
 
+#: Local retry cap for the separate post-commit Debugging<->Unit-Test loop. This is NOT the
+#: same counter or cap as REPAIR_CAP — that one belongs to the earlier per-work-item
+#: code-generation loop and is already spent by the time this phase runs.
+DEBUG_CAP = 3
+
 
 def route_after_select(state: WorkflowState) -> str:
     """After selecting: generate the next item, or auto-commit when the plan is exhausted.
@@ -41,4 +46,34 @@ def route_after_gate(state: WorkflowState) -> str:
         return "select"
     if int(state.get("repair_attempt", 0)) < REPAIR_CAP:
         return "repair"
+    return "escalate"
+
+
+def route_after_debug_check(state: WorkflowState) -> str:
+    """The debug-check decision: passing → run existing tests if any were already generated in a
+    prior pass, else generate them for the first time; fail under cap → debugging; fail at cap →
+    escalate (needs_human_review)."""
+    debug_result = state.get("debug_result")
+    if debug_result and debug_result.get("passed"):
+        return "unit_test_run" if state.get("unit_tests") else "unit_test_generate"
+    if int(state.get("debug_attempt", 0)) < DEBUG_CAP:
+        return "debugging"
+    return "escalate"
+
+
+def route_after_test_generate(state: WorkflowState) -> str:
+    """After test generation: run the tests on success, or escalate a failed generation (no test
+    run)."""
+    return "unit_test_run" if state.get("tests_ok", True) else "escalate"
+
+
+def route_after_test_run(state: WorkflowState) -> str:
+    """The test-run decision: all-pass → done (the graph maps this string to the real END
+    sentinel, not a node name); fail under cap → debugging; fail at cap → escalate
+    (needs_human_review)."""
+    test_result = state.get("test_result")
+    if test_result and test_result.get("passed"):
+        return "done"
+    if int(state.get("debug_attempt", 0)) < DEBUG_CAP:
+        return "debugging"
     return "escalate"
