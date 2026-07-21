@@ -51,7 +51,9 @@ class WorkflowState(TypedDict, total=False):
     codegen_ok: bool                      # did the current item's generation succeed (files written)?
     gate_result: GateResult | None        # most recent gate evaluation (pass/fail + stderr)
     repair_attempt: int                   # LOCAL repair counter, reset per work item
-    debug_attempt: int                    # LOCAL counter for the post-commit debug/test loop, reset once (NOT per work item, and NOT the same as repair_attempt or the orchestrator attempt)
+    # LOCAL counter for the post-commit debug/test loop, reset once (not per work item like
+    # repair_attempt above, and not the orchestrator's attempt either).
+    debug_attempt: int
     debug_result: GateResult | None        # most recent compile+build check outcome (Debugging phase fixed check)
     tests_ok: bool                        # did unit-test generation produce at least one parseable test file?
     test_result: GateResult | None        # most recent `test` check outcome (Unit Test phase fixed check)

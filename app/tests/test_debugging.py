@@ -4,8 +4,10 @@ Mirrors app/tests/test_repair_paths.py's minimal-fake-LLM-gateway pattern: a scr
 stand-in plus FakeExecutor, no real network/sandbox. Covers: a proposed fix lands under
 ``<project_dir>/`` for both failure signals (a compile/build failure via ``debug_result`` and a
 test failure via ``test_result``), the prompt names the right failing check ("compile/build" vs.
-"test"), ``debug_attempt`` increments by exactly one per ``execute()`` call, and an unparseable
-reply writes nothing without raising.
+"test") - including when a stale failed ``test_result`` from an earlier loop iteration coexists
+with a fresh ``debug_result`` failure, where the fresh signal must win - ``debug_attempt``
+increments by exactly one per ``execute()`` call, and an unparseable reply writes nothing without
+raising.
 """
 
 from __future__ import annotations
@@ -83,6 +85,32 @@ def test_debugging_writes_fix_on_test_failure_and_prompt_names_test() -> None:
     prompt = llm.calls[0]["prompt"]
     assert "test" in prompt
     assert "compile/build" not in prompt
+
+
+def test_fresh_debug_result_failure_outranks_stale_test_result_failure() -> None:
+    """Regression: test_result is only overwritten by unit_test_run_node, so a failed test_result
+    from an earlier loop iteration can still be sitting in state after a later fix introduces a
+    fresh debug_result (compile/build) failure. The fresh, live signal must win, not the stale one."""
+    executor = FakeExecutor()
+    state = _state(
+        debug_result={
+            "passed": False,
+            "checks": [{"name": "build", "passed": False, "stderr": "ImportError: no module named foo", "exit_code": 1}],
+        },
+        test_result={  # stale: left over from an earlier iteration, no longer the live problem
+            "passed": False,
+            "checks": [{"name": "test", "passed": False, "stderr": "AssertionError: expected 2 got 1", "exit_code": 1}],
+        },
+    )
+    llm = _FixedReplyLLM("backend/app/foo.py")
+
+    DebuggingAgent(executor=executor, llm=llm).execute(state)
+
+    assert len(llm.calls) == 1
+    prompt = llm.calls[0]["prompt"]
+    assert "compile/build" in prompt
+    assert "ImportError: no module named foo" in prompt
+    assert "AssertionError: expected 2 got 1" not in prompt  # stale signal must not leak in
 
 
 def test_debug_attempt_increments_by_one_per_execute_call() -> None:

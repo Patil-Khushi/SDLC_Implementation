@@ -44,8 +44,9 @@ class DebuggingAgent(BaseAgent):
 
         executor = self._resolve_executor()
         # The debug path is entered only on a post-commit check failure: propose corrected file
-        # content for the failing check's stderr. A test failure (after compile/build passed) is
-        # the more specific signal, so prefer it over a compile/build failure when both are set.
+        # content for the failing check's stderr. debug_result is always fresh (debug_check_node
+        # overwrites it every run); test_result can be stale (only unit_test_run_node writes it),
+        # so a failing debug_result always wins - see _current_failure.
         check_name, stderr = _current_failure(state)
         current = self._read_current_files(executor, state)
 
@@ -100,16 +101,20 @@ class DebuggingAgent(BaseAgent):
 def _current_failure(state: WorkflowState) -> tuple[str, str]:
     """Pick the freshest failure signal.
 
-    A test failure after compile/build passed is the more specific signal, so it wins when
-    present; otherwise fall back to a compile/build (``debug_result``) failure; otherwise there is
-    nothing to diagnose.
+    ``debug_result`` is always current: ``debug_check_node`` overwrites it every time it runs.
+    ``test_result`` is NOT always current: only ``unit_test_run_node`` writes it, so it can still
+    hold a stale failure from an earlier loop iteration after a later fix changes what actually
+    fails. A failing ``debug_result`` is therefore always the live signal when present - check it
+    first. Falling back to ``test_result`` is still correct for a genuine test failure: reaching
+    ``unit_test_run`` at all requires ``debug_result`` to have been passing at that point (see
+    ``route_after_debug_check``), so it won't shadow a real test failure.
     """
-    test_result = state.get("test_result")
-    if test_result and not test_result.get("passed", True):
-        return "test", _first_failure_stderr(test_result)
     debug_result = state.get("debug_result")
     if debug_result and not debug_result.get("passed", True):
         return "compile/build", _first_failure_stderr(debug_result)
+    test_result = state.get("test_result")
+    if test_result and not test_result.get("passed", True):
+        return "test", _first_failure_stderr(test_result)
     return "unknown", ""
 
 
