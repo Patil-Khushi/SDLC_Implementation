@@ -22,3 +22,7 @@ langchain-mcp-adapters>=0.3,<1.0
 # Testing
 pytest>=8.3,<10.0
 httpx>=0.27,<1.0
+
+# Smoke check (B3): static analysis of generated Python — undefined names / bad imports / syntax.
+# Pure-Python, zero transitive deps. The smoke check degrades gracefully if it's not installed.
+pyflakes>=3.0,<4.0
