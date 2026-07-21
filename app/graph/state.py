@@ -51,6 +51,10 @@ class WorkflowState(TypedDict, total=False):
     codegen_ok: bool                      # did the current item's generation succeed (files written)?
     gate_result: GateResult | None        # most recent gate evaluation (pass/fail + stderr)
     repair_attempt: int                   # LOCAL repair counter, reset per work item
+    debug_attempt: int                    # LOCAL counter for the post-commit debug/test loop, reset once (NOT per work item, and NOT the same as repair_attempt or the orchestrator attempt)
+    debug_result: GateResult | None        # most recent compile+build check outcome (Debugging phase fixed check)
+    tests_ok: bool                        # did unit-test generation produce at least one parseable test file?
+    test_result: GateResult | None        # most recent `test` check outcome (Unit Test phase fixed check)
     generation_summary: str               # human-readable free-text summary of the run
     generation_metrics: dict[str, Any]    # run-level metrics (generation-metrics.json shape)
 
@@ -66,7 +70,7 @@ class WorkflowState(TypedDict, total=False):
     # --- Downstream pipeline agent outputs (each agent writes only its own) ---
     review_report: str
     refactored_code: str
-    unit_tests: str
+    unit_tests: list[str]                  # workspace-relative paths of test files written
     documentation: str
     security_report: str
 
@@ -111,6 +115,8 @@ def new_state(
         "scaffold_files": [],
         "gate_result": None,
         "repair_attempt": 0,
+        "debug_attempt": 0,
+        "debug_result": None,
         "generation_summary": "",
         "generation_metrics": {},
         "push_enabled": push_enabled,
