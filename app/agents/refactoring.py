@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -50,12 +49,31 @@ class RefactoringAgent(BaseAgent):
         return self._executor if self._executor is not None else get_executor()
 
     def execute(self, state: WorkflowState) -> WorkflowState:
-        findings = self._load_findings(state)
-        actionable = [f for f in findings if str(f.get("file", "")).strip()]
+        findings, load_error = self._load_findings(state)
+        if load_error is not None:
+            # The review's structured findings could not be loaded. Surface it as a real failure
+            # instead of a silent "nothing to do": refactoring was skipped because its input was
+            # missing/unreadable, NOT because the code was clean — a human needs to know.
+            state["refactored_code"] = (
+                f"Refactoring skipped — Code Review findings unavailable: {load_error}. No fixes applied."
+            )
+            state["workflow_status"] = "needs_human_review"
+            logger.error(
+                "refactoring: findings unavailable (%s) for run %s", load_error, state.get("run_id")
+            )
+            return state
+
+        # Only OPEN findings are actionable. Skip Code Review's auto-suppressed false positives
+        # (idiomatic test asserts via S101, known-safe auth constants, ...) — mirrors
+        # code_review._split(). "Fixing" a suppressed finding would undo the review's own
+        # false-positive filtering and can break legitimate code (test files especially).
+        actionable = [
+            f for f in findings
+            if str(f.get("file", "")).strip() and f.get("status") != "Suppressed"
+        ]
         if not actionable:
-            # Nothing file-scoped to fix (clean review, or only project-level notes). Stamp the
-            # status so the graph can route on, and record why nothing was written.
-            state["refactored_code"] = "No file-scoped review findings to apply; nothing refactored."
+            # Clean review (or only suppressed / project-level notes) — nothing file-scoped to fix.
+            state["refactored_code"] = "No actionable (Open) review findings to apply; nothing refactored."
             state["workflow_status"] = "refactored"
             logger.info("refactoring: no actionable findings for run %s", state.get("run_id"))
             return state
@@ -120,19 +138,28 @@ class RefactoringAgent(BaseAgent):
 
     # -- findings ------------------------------------------------------------
 
-    def _load_findings(self, state: WorkflowState) -> list[dict[str, Any]]:
-        """Prefer the structured JSON the review recorded; fall back to the report's JSON block."""
+    def _load_findings(self, state: WorkflowState) -> tuple[list[dict[str, Any]], str | None]:
+        """Load the review's structured findings from ``review_findings_path`` (the JSON list
+        written by ``CodeReviewAgent._finish``).
+
+        Returns ``(findings, error)``. On success ``error`` is None and ``findings`` may be empty
+        (a genuinely clean review). On a missing / unreadable / malformed path ``error`` carries a
+        human-readable reason so the caller can surface it rather than silently no-op.
+
+        There is deliberately NO Markdown fallback: the persisted ``review_report`` renders findings
+        as Markdown tables (sections 4.1/4.2), not a parseable JSON block, so a "parse the report"
+        path would be dead code that masks a real upstream failure.
+        """
         path = (state.get("review_findings_path") or "").strip()
-        if path:
-            try:
-                raw = json.loads(Path(path).read_text(encoding="utf-8"))
-                if isinstance(raw, list):
-                    return [f for f in raw if isinstance(f, dict)]
-            except (OSError, ValueError):
-                logger.warning(
-                    "refactoring: could not read findings JSON at %s; falling back to report text", path
-                )
-        return _findings_from_report(state.get("review_report") or "")
+        if not path:
+            return [], "no review_findings_path on state (Code Review did not record findings)"
+        try:
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return [], f"could not read findings JSON at {path} ({type(exc).__name__})"
+        if not isinstance(raw, list):
+            return [], f"findings JSON at {path} is not a list"
+        return [f for f in raw if isinstance(f, dict)], None
 
     # -- prompt --------------------------------------------------------------
 
@@ -166,23 +193,6 @@ def _group_by_file(findings: list[dict[str, Any]]) -> dict[str, list[dict[str, A
     for f in findings:
         out.setdefault(str(f["file"]).strip(), []).append(f)
     return out
-
-
-def _findings_from_report(report: str) -> list[dict[str, Any]]:
-    """Fallback: the Markdown report embeds its actionable findings as a ```json fenced block.
-
-    Scan every fenced JSON block, and return the first that parses to a list of finding dicts
-    (each carrying a ``file``). Best-effort only — the structured ``review_findings_path`` is the
-    primary source; this keeps refactoring working if only the report text is on the state.
-    """
-    for block in re.findall(r"```(?:json)?\s*\n(.*?)```", report, re.DOTALL):
-        try:
-            parsed = json.loads(block, strict=False)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(parsed, list) and any(isinstance(x, dict) and x.get("file") for x in parsed):
-            return [x for x in parsed if isinstance(x, dict)]
-    return []
 
 
 def _parse_files(raw: str) -> list[dict[str, str]] | None:

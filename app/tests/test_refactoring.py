@@ -1,25 +1,31 @@
 """Refactoring agent: apply the fixes the code review named, written where the next agent looks.
 
-The agent reads the review's structured findings (``review_findings_path`` JSON, or the JSON block
-embedded in ``review_report`` as a fallback), asks the LLM for corrected file content per file, and
-writes it back under the SAME ``<project_dir>/`` prefix the code generator / repair path use — so
-the downstream Debugging agent reads the fix where it expects it. It never commits or runs a gate.
+The agent reads the review's structured findings (``review_findings_path`` JSON), skips suppressed
+false positives, asks the LLM for corrected file content per file, and writes it back under the
+SAME ``<project_dir>/`` prefix the code generator / repair path use — so the downstream Debugging
+agent reads the fix where it expects it. It never commits or runs a gate. A missing/unreadable
+findings file is surfaced as ``needs_human_review``, not silently treated as "nothing to do".
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
-from app.agents.refactoring import RefactoringAgent
+from app.agents.refactoring import MAX_FILES_PER_RUN, RefactoringAgent
 from app.integrations.executor import FakeExecutor
 
 
 class _StubLLM:
-    """Minimal gateway stand-in: returns one canned fix, records the prompts it saw."""
+    """Minimal gateway stand-in: returns a fix for whichever file the prompt is about.
 
-    def __init__(self, content: str = "print(1)\n", path: str = "src/foo.py") -> None:
+    By default it echoes the ``File: <path>`` line from the prompt (so a multi-file run fixes each
+    file distinctly); pass ``path=`` to force a specific returned path (e.g. the double-prefix case).
+    """
+
+    def __init__(self, content: str = "print(1)\n", path: str | None = None) -> None:
         self._content = content
         self._path = path
         self.prompts: list[str] = []
@@ -27,13 +33,25 @@ class _StubLLM:
     def complete_with_tools(self, prompt: str, *, system: str | None = None,
                             tools: list | None = None, max_iters: int = 4) -> str:
         self.prompts.append(prompt)
-        return json.dumps({"files": [{"path": self._path, "content": self._content}], "notes": "x"})
+        path = self._path
+        if path is None:
+            m = re.search(r"^File: (.+)$", prompt, re.MULTILINE)
+            path = m.group(1).strip() if m else "unknown"
+        return json.dumps({"files": [{"path": path, "content": self._content}], "notes": "x"})
 
 
 def _findings_file(tmp_path: Path, findings: list[dict[str, Any]]) -> str:
     p = tmp_path / "findings.json"
     p.write_text(json.dumps(findings), encoding="utf-8")
     return str(p)
+
+
+def _open(file: str, **over: Any) -> dict[str, Any]:
+    f: dict[str, Any] = {"file": file, "line": 1, "severity": "High",
+                         "category": "Bug", "rule_id": "B001", "message": "wrong literal",
+                         "status": "Open"}
+    f.update(over)
+    return f
 
 
 def _state(**over: Any) -> dict[str, Any]:
@@ -44,9 +62,7 @@ def _state(**over: Any) -> dict[str, Any]:
 
 def test_applies_fix_from_findings_json(tmp_path: Path) -> None:
     executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
-    findings = [{"file": "src/foo.py", "line": 1, "severity": "High",
-                 "category": "Bug", "rule_id": "B001", "message": "wrong literal"}]
-    state = _state(review_findings_path=_findings_file(tmp_path, findings))
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/foo.py")]))
 
     RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
 
@@ -57,8 +73,7 @@ def test_applies_fix_from_findings_json(tmp_path: Path) -> None:
 
 def test_prompt_carries_the_findings(tmp_path: Path) -> None:
     executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
-    findings = [{"file": "src/foo.py", "line": 7, "severity": "High",
-                 "category": "Bug", "rule_id": "B001", "message": "unique-finding-message"}]
+    findings = [_open("src/foo.py", line=7, message="unique-finding-message")]
     llm = _StubLLM()
     RefactoringAgent(executor=executor, llm=llm).execute(
         _state(review_findings_path=_findings_file(tmp_path, findings))
@@ -70,20 +85,51 @@ def test_prompt_carries_the_findings(tmp_path: Path) -> None:
 
 def test_does_not_double_prefix_an_already_prefixed_path(tmp_path: Path) -> None:
     executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
-    findings = [{"file": "src/foo.py", "severity": "Low", "message": "x"}]
     # A model that echoes the already-prefixed path must not be re-prefixed into proj/proj/....
     RefactoringAgent(executor=executor, llm=_StubLLM(path="proj/src/foo.py")).execute(
-        _state(review_findings_path=_findings_file(tmp_path, findings))
+        _state(review_findings_path=_findings_file(tmp_path, [_open("src/foo.py")]))
     )
 
     assert "proj/src/foo.py" in executor.files
     assert "proj/proj/src/foo.py" not in executor.files
 
 
+def test_skips_suppressed_findings(tmp_path: Path) -> None:
+    # An Open finding on foo.py (fix it) alongside a Suppressed false positive on a test file
+    # (leave it — fixing it would undo Code Review's suppression and can break the test).
+    executor = FakeExecutor(files={
+        "proj/src/foo.py": "print(0)\n",
+        "proj/tests/test_thing.py": "assert compute() == 3\n",
+    })
+    findings = [
+        _open("src/foo.py"),
+        _open("tests/test_thing.py", rule_id="S101", category="Security",
+              message="assert used", status="Suppressed"),
+    ]
+    state = _state(review_findings_path=_findings_file(tmp_path, findings))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    assert executor.files["proj/src/foo.py"] == "print(1)\n"                 # Open finding fixed
+    assert executor.files["proj/tests/test_thing.py"] == "assert compute() == 3\n"  # suppressed untouched
+    assert executor.writes == ["proj/src/foo.py"]                            # only the Open file written
+
+
+def test_all_suppressed_is_a_clean_noop(tmp_path: Path) -> None:
+    executor = FakeExecutor(files={"proj/tests/test_thing.py": "assert x\n"})
+    findings = [_open("tests/test_thing.py", rule_id="S101", status="Suppressed")]
+    state = _state(review_findings_path=_findings_file(tmp_path, findings))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    assert executor.writes == []
+    assert state["workflow_status"] == "refactored"
+    assert "No actionable" in state["refactored_code"]
+
+
 def test_skips_file_not_in_workspace(tmp_path: Path) -> None:
     executor = FakeExecutor()  # empty workspace
-    findings = [{"file": "src/missing.py", "severity": "High", "message": "x"}]
-    state = _state(review_findings_path=_findings_file(tmp_path, findings))
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/missing.py")]))
 
     RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
 
@@ -92,44 +138,57 @@ def test_skips_file_not_in_workspace(tmp_path: Path) -> None:
     assert "not found" in state["refactored_code"]
 
 
-def test_no_actionable_findings_stamps_status(tmp_path: Path) -> None:
+def test_missing_findings_path_surfaces_failure() -> None:
     executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
-    # Only a project-level finding (no file) — nothing file-scoped to apply.
-    findings = [{"file": "", "severity": "Info", "message": "overall looks fine"}]
-    state = _state(review_findings_path=_findings_file(tmp_path, findings))
+    state = _state()  # no review_findings_path at all
 
     RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
 
     assert executor.writes == []
-    assert state["workflow_status"] == "refactored"
-    assert "No file-scoped" in state["refactored_code"]
+    assert state["workflow_status"] == "needs_human_review"        # surfaced, not a silent no-op
+    assert "unavailable" in state["refactored_code"]
 
 
-def test_falls_back_to_report_json_block() -> None:
+def test_unreadable_findings_path_surfaces_failure(tmp_path: Path) -> None:
     executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
-    findings = [{"file": "src/foo.py", "severity": "High", "message": "bad"}]
-    report = "# Code Review\n\nActionable findings:\n\n```json\n" + json.dumps(findings) + "\n```\n"
-    # No review_findings_path — the agent must recover the findings from the report's JSON block.
-    state = _state(review_report=report)
+    state = _state(review_findings_path=str(tmp_path / "does-not-exist.json"))
 
     RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
 
-    assert executor.files["proj/src/foo.py"] == "print(1)\n"
-    assert state["workflow_status"] == "refactored"
+    assert executor.writes == []
+    assert state["workflow_status"] == "needs_human_review"
+    assert "could not read" in state["refactored_code"]
 
 
 def test_bad_llm_reply_writes_nothing(tmp_path: Path) -> None:
     executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
-    findings = [{"file": "src/foo.py", "severity": "High", "message": "bad"}]
 
     class _JunkLLM:
         def complete_with_tools(self, prompt: str, *, system: str | None = None,
                                 tools: list | None = None, max_iters: int = 4) -> str:
             return "sorry, I can't help with that"
 
-    state = _state(review_findings_path=_findings_file(tmp_path, findings))
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/foo.py")]))
     RefactoringAgent(executor=executor, llm=_JunkLLM()).execute(state)
 
     assert executor.files["proj/src/foo.py"] == "print(0)\n"       # unchanged, no partial garbage
     assert executor.writes == []
+    assert state["workflow_status"] == "refactored"
+
+
+def test_defers_files_over_the_fan_out_cap(tmp_path: Path) -> None:
+    # More findings-bearing files than the cap: the first MAX_FILES_PER_RUN are fixed, the rest are
+    # REPORTED as deferred (not silently dropped or processed). Zero-padded names keep sort order.
+    n = MAX_FILES_PER_RUN + 5
+    files = {f"proj/src/f{i:02d}.py": "print(0)\n" for i in range(n)}
+    findings = [_open(f"src/f{i:02d}.py") for i in range(n)]
+    executor = FakeExecutor(files=dict(files))
+    state = _state(review_findings_path=_findings_file(tmp_path, findings))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    assert len(executor.writes) == MAX_FILES_PER_RUN               # exactly the cap were fixed
+    assert "proj/src/f00.py" in executor.writes                    # an early file was fixed
+    assert "proj/src/f29.py" not in executor.writes               # an over-cap file was NOT fixed
+    assert "Deferred" in state["refactored_code"]                  # and it's reported, not dropped
     assert state["workflow_status"] == "refactored"
