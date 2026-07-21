@@ -16,10 +16,10 @@ entry point — see app/agents/debugging.py) so a test can assert "debugging ran
 independent of "unit-test generation ran exactly once".
 
 Covers (CLAUDE.md / app/graph/router.py's ``DEBUG_CAP = 3``):
-1. Happy path: compile/build + tests all pass first try -> "code_reviewed".
-2. compile/build fails once then passes -> ONE debugging call, debug_attempt == 1, "code_reviewed".
+1. Happy path: compile/build + tests all pass first try -> review -> refactoring -> "refactored".
+2. compile/build fails once then passes -> ONE debugging call, debug_attempt == 1, "refactored".
 3. compile/build passes but the test run fails once then passes -> debugging fixes the SOURCE
-   (not the tests); unit tests are NOT regenerated a second time; ends "code_reviewed".
+   (not the tests); unit tests are NOT regenerated a second time; ends "refactored".
 4. Cap exhaustion: compile keeps failing past DEBUG_CAP -> "needs_human_review" (escalate), no
    infinite loop.
 
@@ -109,9 +109,9 @@ def test_happy_path_compile_build_and_tests_pass_first_try(stub_llm) -> None:
     executor = FakeExecutor()
     final = _invoke(executor, "t-happy")
 
-    # code_review now runs as the true final stage after a passing unit_test_run, and always
-    # stamps its own terminal status (even with no repo_url to clone) — see nodes.code_review_node.
-    assert final["workflow_status"] == "code_reviewed"
+    # After a passing unit_test_run, code_review runs (no-op with no repo_url) and then refactoring
+    # runs as the terminal stage, stamping "refactored" — see graph.py (code_review -> refactoring).
+    assert final["workflow_status"] == "refactored"
     assert final["debug_result"]["passed"] is True
     assert final["test_result"]["passed"] is True
     assert final["unit_tests"]                                   # non-empty
@@ -127,7 +127,7 @@ def test_compile_build_fails_once_then_passes(stub_llm) -> None:
 
     assert stub_llm.debug_calls == 1                              # debugging invoked exactly once
     assert final["debug_attempt"] == 1
-    assert final["workflow_status"] == "code_reviewed"            # code_review runs after tests pass
+    assert final["workflow_status"] == "refactored"              # review then refactoring (terminal)
     assert final["test_result"]["passed"] is True
     assert final["unit_tests"]
     assert stub_llm.test_gen_calls == 1                           # tests generated normally, once
@@ -145,7 +145,7 @@ def test_test_run_fails_once_then_passes_debugging_fixes_source_not_tests(stub_l
     unit_tests_after = final["unit_tests"]
     assert len(unit_tests_after) == 1
     assert unit_tests_after[0].endswith("tests/test_thing.py")
-    assert final["workflow_status"] == "code_reviewed"            # code_review runs after tests pass
+    assert final["workflow_status"] == "refactored"              # review then refactoring (terminal)
     assert final["test_result"]["passed"] is True
 
 

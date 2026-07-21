@@ -22,12 +22,14 @@ the router source; the local repair/debug caps live in router.py.
                                                            └─ fail, debug>=CAP ───→ escalate → END
                                              unit_test_generate ─┬─ ok ──→ unit_test_run
                                                                  └─ fail → escalate → END
-                                             unit_test_run ─┬─ pass ─────────────→ code_review → END (done)
+                                             unit_test_run ─┬─ pass ─────────────→ code_review → refactoring → END
                                                              ├─ fail, debug<CAP ─→ debugging → debug_check
                                                              └─ fail, debug>=CAP → escalate → END
 
 Code Review runs ONCE, only on this clean completion path — every escalate branch above bypasses
-it entirely, same as it bypasses the debug/test loop.
+it entirely, same as it bypasses the debug/test loop. Refactoring then applies the fixes the
+review named (writing corrected files back to the shared exec-sandbox) and ends the run; it does
+not commit, push, or re-run any gate — downstream verification is a separate concern.
 
 Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
 rework loop) is gone — a completed plan commits automatically. The escalation path still flags
@@ -44,6 +46,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.debugging import debugging_node
+from app.agents.refactoring import refactoring_node
 from app.agents.repair import repair_node
 from app.graph import nodes
 from app.graph.router import (
@@ -73,6 +76,7 @@ def build_graph():
     graph.add_node("unit_test_generate", nodes.unit_test_generate_node)
     graph.add_node("unit_test_run", nodes.unit_test_run_node)
     graph.add_node("code_review", nodes.code_review_node)
+    graph.add_node("refactoring", refactoring_node)
 
     graph.add_edge(START, "scaffold")
     graph.add_edge("scaffold", "select")
@@ -111,7 +115,8 @@ def build_graph():
         {"done": "code_review", "debugging": "debugging", "escalate": "escalate"},
     )
     graph.add_edge("debugging", "debug_check")  # debugging → back to the fixed debug/build check
-    graph.add_edge("code_review", END)         # tests passed, review written → done (auto, no approval)
+    graph.add_edge("code_review", "refactoring")  # review written → apply the fixes it named
+    graph.add_edge("refactoring", END)            # fixes applied → done (auto, no approval)
 
     # Checkpointer kept only so get_state(config) can read a finished run; there are no interrupts.
     return graph.compile(checkpointer=MemorySaver())
