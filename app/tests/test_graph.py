@@ -87,7 +87,7 @@ def test_incomplete_then_completed_repairs_once_then_auto_commits() -> None:
     final = _invoke(executor, [TWO_FILE_ITEM], "t-happy")
 
     assert final["repair_attempt"] == 1                  # exactly one repair
-    assert final["workflow_status"] == "code_reviewed"   # gate-passed -> auto-commit -> final review
+    assert final["workflow_status"] == "refactored"      # gate-passed -> commit -> review -> refactoring (terminal)
     assert len(executor.commits) == 1                    # committed exactly once, run-level
     assert executor.commits[0][0] == "p1"
     assert final["attempt"] == 7                         # orchestrator's counter echoed unchanged
@@ -146,7 +146,7 @@ def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
     executor = FakeExecutor()
     final = _invoke(executor, [LOGIN_ITEM], "t-scaffold")
 
-    assert final["workflow_status"] == "code_reviewed"    # single item passed -> auto-commit -> review
+    assert final["workflow_status"] == "refactored"       # single item passed -> commit -> review -> refactoring (terminal)
     scaffold_files = [f for f in final["generated_code"] if not f.endswith("login.py")]
     assert len(scaffold_files) == SCAFFOLD_FILE_COUNT
     assert final["generated_code"][0] == "p1/Dockerfile"      # scaffold wrote first, in template order
