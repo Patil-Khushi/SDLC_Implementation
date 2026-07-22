@@ -11,9 +11,12 @@ Two builders, chosen by input shape:
   ``frontend-structure.json`` trees are authoritative — one item is emitted PER DIRECTORY so every
   file leaf is produced exactly once, and endpoints/tables/screens/req_ids are ATTACHED to those
   items as traceability + prompt-grounding context (they no longer decide which items exist).
-* LEGACY (self-contained flat-CSV packs, no structure tree): keeps its original byte-for-byte
-  output — one BACKEND item per operationId and one FRONTEND item per screen, grouped by
-  (screen, layer).
+* LEGACY (self-contained flat-CSV packs): per-operation/per-screen item generation is
+  unchanged — one BACKEND item per operationId and one FRONTEND item per screen, grouped by
+  (screen, layer) — but when structure trees are present, the overall output also runs the same
+  completeness sweep as the adaptive path (see ``_reconcile_uncovered``), adding catch-all items
+  for any shared/cross-cutting file (main.py, config/settings.py, App.tsx, ...) that no
+  per-operation/per-screen item targets on its own.
 
 Backend file-role detection is STACK-AGNOSTIC: files are classified by role (handler,
 service, schema/DTO, model) via extension-agnostic name/path hints, so the same logic works for
@@ -152,7 +155,9 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
     so filenames and formats can vary between design hand-offs. Two shapes are supported:
 
     * the legacy flat mapping (a CSV carrying its own operation_id/req_ids/endpoint_path columns)
-      → the original stack-agnostic builders, unchanged;
+      → the original stack-agnostic builders, PLUS the same completeness sweep as the adaptive
+      path (any structure-tree file no per-operation/per-screen item targets is swept into a
+      catch-all item — see ``_reconcile_uncovered``);
     * anything else (OpenAPI + a UI↔API table + a SQL *or* JSON schema + structure trees)
       → the adaptive builders below.
     """
