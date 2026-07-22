@@ -139,6 +139,14 @@ def refactoring_node(state: WorkflowState) -> WorkflowState:
     Reached only via the Security<->Refactoring loop (`router.route_after_security`, capped at
     `SECURITY_LOOP_CAP`) — never on the `approve` path, which goes straight to `finalize`.
 
+    Increments the LOCAL ``security_loop_attempt`` counter HERE, at the node level, rather than
+    inside ``RefactoringAgent`` itself (unlike ``repair_attempt``/``debug_attempt``, which their
+    respective agents own — see ``repair.py``/``debugging.py``). That's deliberate: the real
+    ``RefactoringAgent`` lives on `main` and was built for an earlier Code-Review-driven loop, with
+    no knowledge of this security loop or its counter. Owning the increment here means the cap is
+    enforced correctly regardless of what that agent does, and is testable without needing the
+    real (cross-branch) implementation.
+
     Imports ``RefactoringAgent`` lazily (not at module load, unlike the other agents above): its
     real implementation lives on `main` and isn't necessarily present on every branch this module
     is edited from. Keeping the import inside the function means the rest of the graph — which
@@ -148,10 +156,14 @@ def refactoring_node(state: WorkflowState) -> WorkflowState:
     """
     from app.agents.refactoring import RefactoringAgent
 
+    attempt = int(state.get("security_loop_attempt", 0)) + 1
+    state["security_loop_attempt"] = attempt
     logger.info("[refactoring] run=%s | starting (repo_url=%s, loop attempt %s)",
-                state.get("run_id") or "-", state.get("repo_url") or "none",
-                int(state.get("security_loop_attempt", 0)) + 1)
+                state.get("run_id") or "-", state.get("repo_url") or "none", attempt)
     out = RefactoringAgent().execute(state)
+    # Belt-and-suspenders: if the agent itself ALSO tracks/overwrites this field (e.g. a future
+    # main-branch implementation adopts the same name), never let the loop counter go backwards.
+    out["security_loop_attempt"] = max(attempt, int(out.get("security_loop_attempt", 0)))
     logger.info("[refactoring] run=%s | done - status=%s", state.get("run_id") or "-",
                 out.get("workflow_status") or "-")
     return out

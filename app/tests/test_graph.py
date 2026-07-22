@@ -12,8 +12,9 @@ import json
 
 import pytest
 
+import app.agents.refactoring as refactoring_module
 from app.graph.graph import workflow
-from app.graph.router import REPAIR_CAP
+from app.graph.router import REPAIR_CAP, SECURITY_LOOP_CAP
 from app.graph.state import new_state
 from app.integrations.executor import FakeExecutor, set_executor
 from app.models import WorkItem
@@ -155,6 +156,37 @@ def test_documentation_and_security_run_after_code_review_on_the_happy_path() ->
     assert final["documentation"]  # Documentation ran and produced something (the stubbed LLM reply)
     assert "No repository URL" in final["security_report"]
     assert final["security_report_path"]
+
+
+def test_security_loop_caps_at_3_then_escalates_no_pr(monkeypatch) -> None:
+    # A disallowed repo_url makes Security (and Code Review) take their deterministic
+    # "changes_requested" no-clone path every single call — no Docker/sandbox needed, and no
+    # dependence on the LLM stub's output. RefactoringAgent's REAL implementation lives on `main`
+    # (this branch's app/agents/refactoring.py is an empty stub), so it's monkeypatched in here;
+    # its only job for this test is to exist and return the state unchanged.
+    class _FakeRefactoringAgent:
+        def execute(self, state):
+            state["refactored_code"] = "fixed (fake, for this test only)"
+            state["workflow_status"] = "refactored"
+            return state
+
+    monkeypatch.setattr(refactoring_module, "RefactoringAgent", _FakeRefactoringAgent, raising=False)
+
+    executor = FakeExecutor()
+    set_executor(executor)
+    initial = new_state(run_id="run-1", attempt=7, project_id="p1")
+    initial["work_items"] = [LOGIN_ITEM]
+    initial["repo_url"] = "https://evil.com/acme/repo"  # disallowed -> deterministic changes_requested
+    config = {"configurable": {"thread_id": "t-security-loop-cap"}, "recursion_limit": 100}
+    workflow.invoke(initial, config)
+    final = dict(workflow.get_state(config).values)
+
+    assert final["workflow_status"] == "needs_human_review"      # escalated, no PR opened
+    assert final["security_verdict"] == "changes_requested"
+    assert final["security_loop_attempt"] == SECURITY_LOOP_CAP   # exactly 3 refactoring attempts
+    assert "finalize_status" not in final                        # finalize never reached
+    assert "pr_url" not in final
+    assert final["refactored_code"] == "fixed (fake, for this test only)"  # refactoring DID run
 
 
 def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
