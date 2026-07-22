@@ -1,0 +1,6 @@
+-- Tic-Tac-Toe — database schema
+--
+-- INTENTIONALLY EMPTY: this application has NO database and NO persistence
+-- (see extracted-requirements.md constraints C-02/C-03 and backend-project-structure.md).
+-- No CREATE TABLE statements are declared, so the deterministic planner infers
+-- zero tables and produces no database/backend work items.

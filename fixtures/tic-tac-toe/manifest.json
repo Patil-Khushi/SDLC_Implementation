@@ -1,0 +1,87 @@
+{
+  "name": "tic-tac-toe-fixture",
+  "version": "1.0.0",
+  "description": "Design-artifact fixture for a simple client-side Tic-Tac-Toe application. Consumed by a code-generation agent to build the app. Contains NO implementation.",
+  "generatedFor": "code-generation agent",
+  "artifactCount": 13,
+  "artifacts": [
+    {
+      "file": "extracted-requirements.md",
+      "purpose": "Functional and non-functional requirements, assumptions, constraints, and acceptance criteria.",
+      "dependencies": []
+    },
+    {
+      "file": "glossary.md",
+      "purpose": "Definitions of core domain terms (Board, Cell, Turn, Player, Winner, Draw, Reset, Game State, Winning Combination).",
+      "dependencies": ["validation-rules.md", "state-transition.md"]
+    },
+    {
+      "file": "user-features.md",
+      "purpose": "User stories with acceptance criteria describing features from the player's perspective.",
+      "dependencies": ["extracted-requirements.md"]
+    },
+    {
+      "file": "route-list.md",
+      "purpose": "List of application routes (/ required, /about optional) and their purposes.",
+      "dependencies": ["frontend-project-structure.md"]
+    },
+    {
+      "file": "state-transition.md",
+      "purpose": "The application state machine: Idle, Playing, Winner, Draw, and Reset transitions.",
+      "dependencies": ["validation-rules.md", "glossary.md"]
+    },
+    {
+      "file": "design-tokens.json",
+      "purpose": "Design tokens: colors, typography, spacing, border radius, board/cell sizing, buttons, shadows, transitions.",
+      "dependencies": []
+    },
+    {
+      "file": "SKILL.md",
+      "purpose": "Coding guidelines for the implementation agent (React, naming, folders, hooks, state, CSS, a11y, formatting).",
+      "dependencies": ["design-tokens.json", "frontend-project-structure.md", "validation-rules.md"]
+    },
+    {
+      "file": "frontend-project-structure.md",
+      "purpose": "Desired React (Vite) project structure with per-file responsibilities.",
+      "dependencies": ["SKILL.md", "design-tokens.json", "validation-rules.md"]
+    },
+    {
+      "file": "backend-project-structure.md",
+      "purpose": "Minimal backend structure (health endpoint only) with explicit non-goals.",
+      "dependencies": ["extracted-requirements.md"]
+    },
+    {
+      "file": "validation-rules.md",
+      "purpose": "All gameplay validation rules and per-move validation order.",
+      "dependencies": ["glossary.md", "SKILL.md"]
+    },
+    {
+      "file": "functional-html-mockup.html",
+      "purpose": "Static, JavaScript-free semantic HTML mockup of the UI, styled from the design tokens.",
+      "dependencies": ["design-tokens.json"]
+    },
+    {
+      "file": "manifest.json",
+      "purpose": "This file. Enumerates every artifact with its purpose and dependencies.",
+      "dependencies": []
+    },
+    {
+      "file": "mandatory-checklist.md",
+      "purpose": "Completion checklist verifying every artifact is present, complete, and cross-linked.",
+      "dependencies": [
+        "extracted-requirements.md",
+        "glossary.md",
+        "user-features.md",
+        "route-list.md",
+        "state-transition.md",
+        "design-tokens.json",
+        "SKILL.md",
+        "frontend-project-structure.md",
+        "backend-project-structure.md",
+        "validation-rules.md",
+        "functional-html-mockup.html",
+        "manifest.json"
+      ]
+    }
+  ]
+}

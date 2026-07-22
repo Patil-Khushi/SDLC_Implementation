@@ -1,0 +1,44 @@
+{
+  "artifact": "frontend-structure.json",
+  "version": "1.0.0",
+  "note": "Mapped from frontend-project-structure.md. React + TypeScript + Vite. Pages carry 'route <route_id>' descriptions matching api-mapping.csv route_ids; supporting components/hooks/utils/styles are listed for context.",
+  "stack": {
+    "framework": "React 18",
+    "language": "TypeScript (strict)",
+    "bundler": "Vite",
+    "styling": "CSS driven by design-tokens.json (no inline styles)",
+    "routing": "react-router-dom v6 (game '/', about '/about')"
+  },
+  "conventions": {
+    "pages": "One page component per route in api-mapping.csv; pages compose presentational components.",
+    "logic": "Game state and rules live in hooks/useGame.ts and utils/winner.ts; components stay presentational.",
+    "styling": "All styling flows through styles/app.css from design-tokens.json."
+  },
+  "tree": {
+    "index.html": "Vite entry; mounts #root and loads /src/main.tsx",
+    "vite.config.ts": "React plugin; no backend proxy (client-side only)",
+    "src/": {
+      "main.tsx": "bootstrap: create React root, render <App/> into #root, import global styles",
+      "App.tsx": "top-level: router + layout (header, Status, Board, ResetButton); owns useGame",
+      "pages/": {
+        "GamePage.tsx": "route game",
+        "AboutPage.tsx": "route about"
+      },
+      "components/": {
+        "Board.tsx": "renders the 3x3 grid by mapping board[] to nine Cell components",
+        "Cell.tsx": "single cell as a button showing X / O / empty; presentational",
+        "Status.tsx": "shows current status (X's turn / O wins / Draw) via an aria-live region",
+        "ResetButton.tsx": "reset control; calls onReset to start a new game"
+      },
+      "hooks/": {
+        "useGame.ts": "single source of game state: board, currentPlayer, winner, isDraw, playMove, reset"
+      },
+      "utils/": {
+        "winner.ts": "pure winner detection: 8 winning combinations + calculateWinner(board)"
+      },
+      "styles/": {
+        "app.css": "CSS custom properties from design-tokens.json; board/cell/status/button styles; responsive"
+      }
+    }
+  }
+}
