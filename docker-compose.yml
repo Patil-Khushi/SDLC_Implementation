@@ -62,3 +62,5 @@ volumes:
   sonarqube_extensions:
   sonarqube_logs:
   sonar_db_data:
+
+ 

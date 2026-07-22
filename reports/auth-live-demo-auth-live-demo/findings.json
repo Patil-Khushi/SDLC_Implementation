@@ -1,0 +1,366 @@
+[
+  {
+    "id": "CR-001",
+    "category": "Code Style",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "E501"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/router.py",
+    "line": 6,
+    "column": 89,
+    "message": "Style issue",
+    "evidence": "from app.auth.schemas import ErrorDetail, ErrorResponse, LoginRequest, LoginResponse, TokenData",
+    "tool_messages": [
+      "E501 Line too long (95 > 88)"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "FORMAT_CODE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 1,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-002",
+    "category": "Code Style",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "E501"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/service.py",
+    "line": 36,
+    "column": 89,
+    "message": "Style issue",
+    "evidence": "def _create_access_token(subject: str, extra_claims: dict[str, Any] | None = None) -> tuple[str, int]:",
+    "tool_messages": [
+      "E501 Line too long (102 > 88)"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "FORMAT_CODE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 1,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-003",
+    "category": "Unused Code",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "F401"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/router.py",
+    "line": 3,
+    "column": 41,
+    "message": "Unused import",
+    "evidence": "from fastapi import APIRouter, Depends, Request, status",
+    "tool_messages": [
+      "F401 `fastapi.Request` imported but unused",
+      "F401 `fastapi.responses.JSONResponse` imported but unused"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_IMPORT",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 2,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-004",
+    "category": "Unused Code",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "F401"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/router.py",
+    "line": 6,
+    "column": 30,
+    "message": "Unused import",
+    "evidence": "from app.auth.schemas import ErrorDetail, ErrorResponse, LoginRequest, LoginResponse, TokenData",
+    "tool_messages": [
+      "F401 `app.auth.schemas.ErrorDetail` imported but unused"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_IMPORT",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 2,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-005",
+    "category": "Maintainability",
+    "severity": "Medium",
+    "sources": [
+      "SonarQube"
+    ],
+    "rule_ids": [
+      "python:S125"
+    ],
+    "file": "auth-backend/app/auth/router.py",
+    "line": 30,
+    "column": null,
+    "message": "Maintainability issue",
+    "evidence": "# ---------------------------------------------------------------------------",
+    "tool_messages": [
+      "Remove this commented out code."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "AI Refactoring",
+    "operation": "REDUCE_COMPLEXITY",
+    "auto_fix": "conditional",
+    "risk_level": "Low",
+    "requires_tests": true,
+    "phase": 4,
+    "confidence": 0.75,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-006",
+    "category": "Maintainability",
+    "severity": "Low",
+    "sources": [
+      "SonarQube"
+    ],
+    "rule_ids": [
+      "python:S8409"
+    ],
+    "file": "auth-backend/app/auth/router.py",
+    "line": 38,
+    "column": null,
+    "message": "Maintainability issue",
+    "evidence": "response_model=LoginResponse,",
+    "tool_messages": [
+      "Remove this redundant \"response_model\" parameter; it duplicates the return type annotation."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "AI Refactoring",
+    "operation": "REDUCE_COMPLEXITY",
+    "auto_fix": "conditional",
+    "risk_level": "Low",
+    "requires_tests": true,
+    "phase": 4,
+    "confidence": 0.75,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-007",
+    "category": "Maintainability",
+    "severity": "Low",
+    "sources": [
+      "SonarQube"
+    ],
+    "rule_ids": [
+      "python:S8410"
+    ],
+    "file": "auth-backend/app/auth/router.py",
+    "line": 54,
+    "column": null,
+    "message": "Maintainability issue",
+    "evidence": "user_repo: object = Depends(get_user_repository),",
+    "tool_messages": [
+      "Use \"Annotated\" type hints for FastAPI dependency injection"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "AI Refactoring",
+    "operation": "REDUCE_COMPLEXITY",
+    "auto_fix": "conditional",
+    "risk_level": "Low",
+    "requires_tests": true,
+    "phase": 4,
+    "confidence": 0.75,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-008",
+    "category": "Security",
+    "severity": "High",
+    "sources": [
+      "SonarQube"
+    ],
+    "rule_ids": [
+      "docker:S6470"
+    ],
+    "file": "Dockerfile",
+    "line": 9,
+    "column": null,
+    "message": "Security issue",
+    "evidence": "COPY . .",
+    "tool_messages": [
+      "Copying recursively might inadvertently add sensitive data to the container. Make sure it is safe here."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "High",
+    "requires_tests": true,
+    "phase": 6,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-009",
+    "category": "Security",
+    "severity": "Low",
+    "sources": [
+      "SonarQube"
+    ],
+    "rule_ids": [
+      "docker:S6471"
+    ],
+    "file": "Dockerfile",
+    "line": 2,
+    "column": null,
+    "message": "Security issue",
+    "evidence": "FROM python:3.12-slim",
+    "tool_messages": [
+      "The \"python\" image runs with \"root\" as the default user. Make sure it is safe here."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "High",
+    "requires_tests": true,
+    "phase": 6,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-010",
+    "category": "Security",
+    "severity": "High",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "S105"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/schemas.py",
+    "line": 12,
+    "column": 23,
+    "message": "Security issue",
+    "evidence": "token_type: str = \"bearer\"",
+    "tool_messages": [
+      "S105 Possible hardcoded password assigned to: \"token_type\""
+    ],
+    "verification": "Low (auto-suppressed: likely false positive)",
+    "status": "Suppressed",
+    "suppressed_reason": "Ruff S105/S106 flags any string literal assigned to a password/token/secret-looking variable name, regardless of the actual value. The captured value here is a known-safe constant (an auth-scheme name or an error-code whose value equals its own name), not a real secret.",
+    "suppressed_reason_kind": "safe_secret_value",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Suppressed",
+    "operation": "NONE",
+    "auto_fix": false,
+    "risk_level": "High",
+    "requires_tests": true,
+    "phase": 6,
+    "confidence": 0.0,
+    "verification_status": "Suppressed"
+  },
+  {
+    "id": "CR-011",
+    "category": "Security",
+    "severity": "High",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "S106"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/service.py",
+    "line": 87,
+    "column": 9,
+    "message": "Security issue",
+    "evidence": "token_type=\"bearer\",",
+    "tool_messages": [
+      "S106 Possible hardcoded password assigned to argument: \"token_type\""
+    ],
+    "verification": "Low (auto-suppressed: likely false positive)",
+    "status": "Suppressed",
+    "suppressed_reason": "Ruff S105/S106 flags any string literal assigned to a password/token/secret-looking variable name, regardless of the actual value. The captured value here is a known-safe constant (an auth-scheme name or an error-code whose value equals its own name), not a real secret.",
+    "suppressed_reason_kind": "safe_secret_value",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Suppressed",
+    "operation": "NONE",
+    "auto_fix": false,
+    "risk_level": "High",
+    "requires_tests": true,
+    "phase": 6,
+    "confidence": 0.0,
+    "verification_status": "Suppressed"
+  }
+]

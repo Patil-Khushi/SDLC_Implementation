@@ -37,7 +37,7 @@ if (-not (Test-Path .env)) {
 $img = "sdlc-review-sandbox:latest"
 if (-not (docker images -q $img)) {
     Write-Host "Building $img (first run only) ..."
-    docker build -t $img ..\..\tools\review-sandbox
+    docker build -t $img .\tools\review-sandbox
 }
 
 # 4. run the agent

@@ -142,4 +142,6 @@ _debugging_agent = DebuggingAgent()
 
 
 def debugging_node(state: WorkflowState) -> WorkflowState:
+    logger.info("================ AGENT: Debugging ================")
+    logger.info("   -> fixing the failing compile/build/test check via the LLM repair path")
     return _debugging_agent.execute(state)
