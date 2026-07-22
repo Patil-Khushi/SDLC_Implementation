@@ -9,10 +9,12 @@ fixes the review named, writing corrected files back to the shared exec-sandbox 
 report) → Refactoring Publish (FIXED commit + push of the edited files to 'dev', so the Debugging
 agent — or Security, on a re-scan — can pull the refactored code from the remote) → a
 Debugging<->Unit-Test loop (compile/build check → generate/run unit tests on the refactored code,
-with an LLM debugging repair path on failure) → Documentation (writes a README from the final
-source) → Security (clones the repo again, runs Semgrep, writes a verdict). NO human approval
-step anywhere. The fixed gate/check nodes (and Security's verdict) are the router source; the
-local repair/debug caps live in router.py.
+with an LLM debugging repair path on failure) → Debug Publish (FIXED commit + push of the debug
+fixes + generated unit tests to 'dev', so Security's re-scan and the eventual PR include the tested
+code and the tests themselves) → Documentation (writes a README from the final source) → Security
+(clones the repo again, runs Semgrep, writes a verdict). NO human approval step anywhere. The fixed
+gate/check nodes (and Security's verdict) are the router source; the local repair/debug caps live
+in router.py.
 
 Security's verdict drives what happens next (``route_after_security``): ``approve`` →
 ``finalize`` opens (or finds) a `dev -> main` pull request — it never auto-merges, a human
@@ -39,7 +41,7 @@ no PR/zip) — the same terminal path a repair/debug cap-out already uses.
                                                            └─ fail, debug>=CAP ───→ escalate → END
                                              unit_test_generate ─┬─ ok ──→ unit_test_run
                                                                  └─ fail → escalate → END
-                                             unit_test_run ─┬─ pass ──→ documentation → security
+                                             unit_test_run ─┬─ pass ──→ debug_publish → documentation → security
                                                              ├─ fail, debug<CAP ─→ debugging → debug_check
                                                              └─ fail, debug>=CAP → escalate → END
                                              security ─┬─ verdict=approve ────────────→ finalize → package → END
@@ -52,8 +54,10 @@ to ``SECURITY_LOOP_CAP`` MORE times later, driven by Security instead — each o
 publishes too, so Security's re-scan (a fresh clone) actually sees the fix. Every escalate branch
 in the code-generation loop above bypasses the whole post-commit pipeline. The Refactoring AGENT
 never forms a git call (rule 2) and runs no gate — the fixed ``refactoring_publish`` node right
-after it commits the edited files and pushes `dev` (a no-op when nothing was edited); downstream
-verification (the debug/test loop, or Security's re-scan) is the caller's job. Documentation/
+after it commits the edited files and pushes `dev` (a no-op when nothing was edited). Symmetrically,
+the Debugging/Unit-Test agents never commit either — the fixed ``debug_publish`` node on the
+``unit_test_run`` pass edge is what persists their output (debug fixes + the generated unit tests)
+to `dev`, so Security's re-scan and finalize's PR carry the tested code and the tests. Documentation/
 Security/finalize all degrade gracefully on a missing ``repo_url`` or a GitHub API hiccup rather
 than crashing the run; ``package`` runs even if ``finalize``'s PR call failed, so a GitHub hiccup
 never withholds the tangible zip output. The run's true terminal ``workflow_status`` is set by
@@ -107,6 +111,9 @@ def build_graph():
     graph.add_node("debugging", debugging_node)
     graph.add_node("unit_test_generate", nodes.unit_test_generate_node)
     graph.add_node("unit_test_run", nodes.unit_test_run_node)
+    # FIXED publish of the Debugging<->Unit-Test loop's output (debug fixes + generated tests) to
+    # 'dev' — the debug/test analogue of refactoring_publish, on the unit_test_run pass edge.
+    graph.add_node("debug_publish", nodes.debug_publish_node)
     graph.add_node("code_review", nodes.code_review_node)
     graph.add_node("refactoring", refactoring_node)
     graph.add_node("refactoring_publish", nodes.refactoring_publish_node)
@@ -150,11 +157,14 @@ def build_graph():
         route_after_test_generate,
         {"unit_test_run": "unit_test_run", "escalate": "escalate"},
     )
+    # A passing test run routes to debug_publish (persist the loop's output to 'dev'), THEN on to
+    # Documentation/Security/finalize/package — NOT straight to END.
     graph.add_conditional_edges(
         "unit_test_run",
         route_after_test_run,
-        {"done": "documentation", "debugging": "debugging", "escalate": "escalate"},
+        {"done": "debug_publish", "debugging": "debugging", "escalate": "escalate"},
     )
+    graph.add_edge("debug_publish", "documentation")  # debug/test output published → document it
     graph.add_edge("debugging", "debug_check")    # debugging → back to the fixed debug/build check
     graph.add_edge("code_review", "refactoring")  # review written → apply the fixes it named
     # fixes applied → FIXED commit+push of the edited files to 'dev' (rule 2; no-op when nothing

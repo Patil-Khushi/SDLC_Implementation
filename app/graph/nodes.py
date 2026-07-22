@@ -317,13 +317,13 @@ def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
 def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic check for the Unit Test phase: ``test`` ONLY.
 
-    A pass here routes on to ``documentation`` (then ``security``, the run's actual final stage),
-    which stamp their own status; the "completed" set on the passing branch here is an
-    intermediate marker, immediately superseded later — kept mainly so a crash between nodes
-    still leaves a meaningful status rather than none at all. An executor error is treated as a
-    failing check — recorded, not raised — mirroring ``gate_node``/``debug_check_node``.
-    ``workflow_status`` is only set on the passing branch, mirroring how ``gate_node`` never sets
-    it at all.
+    A pass here routes on to ``debug_publish`` (persist the loop's fixes + tests to 'dev'), then
+    ``documentation`` and ``security`` (the run's actual final stages), which stamp their own
+    status; the "completed" set on the passing branch here is an intermediate marker, immediately
+    superseded later — kept mainly so a crash between nodes still leaves a meaningful status rather
+    than none at all. An executor error is treated as a failing check — recorded, not raised —
+    mirroring ``gate_node``/``debug_check_node``. ``workflow_status`` is only set on the passing
+    branch, mirroring how ``gate_node`` never sets it at all.
     """
     _stage("Unit Testing", "running the generated test suite")
     executor = get_executor()
@@ -337,8 +337,90 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
         check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1}
 
     state["test_result"] = {"passed": check["passed"], "checks": [check]}
-    if check["passed"]:
-        state["workflow_status"] = "completed"
+    return state
+
+
+def debug_publish_node(state: WorkflowState) -> WorkflowState:
+    """FIXED commit + push of the Debugging<->Unit-Test loop's output to the working branch ('dev').
+
+    The debug/test analogue of ``refactoring_publish_node`` — same shape, same rule-2 boundary
+    (the Debugging/Unit-Test AGENTS never form a git call; this deterministic node does the git
+    work). Runs on the ``unit_test_run`` pass edge, BEFORE Documentation/Security/finalize, so the
+    debug agent's fixes and the generated unit tests land on the remote 'dev' branch that Security
+    re-clones and that ``finalize`` opens the ``dev -> main`` PR from. Without this step, those
+    files would exist only in the shared sandbox workspace: Security's re-scan (a fresh clone)
+    and the PR would carry the pre-debug code and NO tests, so the Testing team would never see
+    the tests. ``commit_node`` ran much earlier (right after code generation), so it never captured
+    any of this.
+
+    Three shapes, mirroring ``refactoring_publish_node`` / ``feature_publish_node``:
+    * Nothing produced by the loop (no unit tests written AND the debug agent never ran) → pass
+      through, no commit — keeps the graph acceptance tests' "committed exactly once" invariant on
+      runs where the loop was a pure no-op.
+    * Push enabled AND the executor supports incremental publish (``publish_sweep``, the local-disk
+      executor) → sweep + push everything the loop produced (debug fixes + tests) to the working
+      branch in one commit.
+    * Otherwise (local-disk ``--no-publish``, or the sandbox/test path) → a plain fixed-path
+      ``git_commit`` so the loop's output is at least recorded in the workspace repo; no push is
+      available there.
+
+    A publish/commit failure is logged + noted in ``generation_summary`` — never crashes the run
+    and never re-enters the debug/test loop (the checks already passed). It deliberately does NOT
+    stamp a terminal ``workflow_status`` — Documentation/Security/``package`` (or ``escalate``)
+    own the run's true terminal status; this is a mid-pipeline persist step, not the end.
+
+    KNOWN GAP (see also the README "Notes"): ``MCPExecutor`` (the exec-sandbox path —
+    ``SANDBOX_ENABLED=true`` / the real ``POST /implementation/start`` API / ``run_fixture.py
+    --sandbox``) deliberately has NO ``publish_sweep``/push method: the sandbox's egress is locked
+    to PyPI+npm only, with no route to github.com by design (tools/exec-sandbox/squid.conf), so it
+    cannot push to a git remote. That path also never sets ``push_enabled``, so this node always
+    takes the plain-``git_commit`` branch there — the tests get committed into the sandbox
+    container's own local git only, not the pushed GitHub repo. WORKAROUND today: run via the demo
+    CLI's default ``--real`` mode (LocalDiskExecutor), which pushes to 'dev' normally so the tests
+    reach the remote. A proper fix (host-side "export the finished workspace out of the sandbox,
+    then push with real credentials") is deferred — flagged, not built.
+    """
+    # No-op guard: if the loop produced nothing (no tests generated and the debug agent never ran),
+    # there is nothing to persist. Mirrors refactoring_publish's "nothing edited -> skip".
+    produced_tests = bool(state.get("unit_tests"))
+    debug_ran = int(state.get("debug_attempt", 0)) > 0
+    if not (produced_tests or debug_ran):
+        return state
+
+    _stage("Debug Publish", "committing the debug fixes + generated unit tests and pushing 'dev' so "
+           "Security's re-scan and the PR carry the tested code and the tests")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    message = f"test({state.get('run_id') or 'run'}): debug fixes + unit tests"
+    push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
+
+    try:
+        if push and hasattr(executor, "publish_sweep"):
+            res = executor.publish_sweep(project_dir, token=state.get("git_token") or None)
+            ok = getattr(res, "exit_code", 1) == 0
+            logger.info("[publish] debug/test output pushed to 'dev' (%s)", "ok" if ok else "PUSH FAILED")
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                "[publish] debug fixes + unit tests pushed to 'dev'" + ("" if ok else " (PUSH FAILED)") + "\n"
+            )
+        else:
+            res = executor.git_commit(project_dir, message)  # LLM never forms/executes this (rule 2)
+            ok = bool(getattr(res, "committed", False))
+            if not ok:
+                logger.warning(
+                    "[publish] debug/test local commit FAILED for run %s: %s",
+                    state.get("run_id"),
+                    (getattr(res, "stderr", "") or getattr(res, "stdout", "")).strip()[:200],
+                )
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                f"[publish] {message} committed locally (push not available)"
+                + ("" if ok else " (COMMIT FAILED)") + "\n"
+            )
+    except Exception as exc:  # noqa: BLE001 - a publish failure must never crash the run
+        action = "push" if (push and hasattr(executor, "publish_sweep")) else "local commit"
+        logger.exception("debug/test %s failed for run %s", action, state.get("run_id"))
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            f"[publish] debug/test {action} FAILED: {exc}\n"
+        )
     return state
 
 

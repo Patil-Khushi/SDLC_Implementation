@@ -19,12 +19,16 @@ agents run automatically in sequence.
 scaffold ─(push main early)─→ select ─┬─ code_generator → gate ─┬─ pass → feature_publish → select (loop)
                                        │                         ├─ fail & repair<3 → repair → gate
                                        │                         └─ fail & repair≥3 → escalate → END
-                                       └─ plan done → commit ──→ code_review → refactoring → refactoring_publish → debug_check
-                                                                                                                        │
-                                          debug_check ─┬─ pass → unit_test_generate → unit_test_run → END ("completed")
-                                                       ├─ fail & debug<3 → debugging → debug_check
-                                                       └─ fail & debug≥3 → escalate → END
+                                       └─ plan done → commit → code_review → refactoring → refactoring_publish → debug_check
+                                                                                                                       │
+   debug_check ─┬─ pass → unit_test_generate → unit_test_run ─┬─ pass → debug_publish → documentation → security ─┬─ approve → finalize(PR) → package → END ("completed")
+                │                                             │                                                    ├─ changes & loop<3 → refactoring → refactoring_publish → security
+                ├─ fail & debug<3 → debugging → debug_check   ├─ fail & debug<3 → debugging → debug_check          └─ changes & loop≥3 → escalate → END
+                └─ fail & debug≥3 → escalate → END            └─ fail & debug≥3 → escalate → END
 ```
+
+`finalize` opens (never auto-merges) a `dev → main` PR once Security approves; a human merges it on
+GitHub. `package` then zips the project + reports as the run's downloadable output.
 
 ### The agents
 
@@ -36,7 +40,12 @@ scaffold ─(push main early)─→ select ─┬─ code_generator → gate ─
 | 3 | **Refactoring** | agentic edit loop — reads/edits the flagged files directly to apply the review's findings; writes a report | `refactored_code`, `refactored_files`, `refactoring_report(_path)` |
 | — | **Refactoring Publish** (no LLM) | FIXED: commits the edited files and pushes `dev` (no-op if nothing was edited) | `generation_summary` |
 | 4 | **Debugging** | compile/build check; LLM fixes failures and re-checks (≤3) | `debug_result`, `debug_attempt` |
-| 5 | **Unit Testing** | generates + runs unit tests; a pass ends the run | `unit_tests`, `test_result`, `workflow_status` |
+| 5 | **Unit Testing** | generates + runs unit tests | `unit_tests`, `test_result` |
+| — | **Debug Publish** (no LLM) | FIXED: on a passing test run, commits the debug fixes + generated tests and pushes `dev` (no-op if the loop produced nothing), so Security's re-scan + the PR carry the tests | `generation_summary` |
+| 6 | **Documentation** | writes a README from the final generated source | `documentation` |
+| 7 | **Security** | clones the repo again, runs Semgrep, writes a report + verdict; `changes_requested` loops back to Refactoring (≤3) | `security_report(_path)`, `security_verdict` |
+| — | **Finalize** (no LLM) | on Security approve, opens (never merges) a `dev → main` PR | `pr_url`, `finalize_status` |
+| — | **Package** (no LLM) | zips the project + README/review/security reports as the run's downloadable output; sets terminal `workflow_status` | `package_path`, `workflow_status` |
 
 Each feature is committed + pushed to `dev` **as it is generated** (live incremental publish), so
 the GitHub repo fills in feature-by-feature during the run.
@@ -82,13 +91,22 @@ fields it wrote, live.
 1. **Python 3.12+** and the venv: `python -m venv .venv` then `./.venv/Scripts/python.exe -m pip install -r requirements.txt`
 2. **`.env`** (copy from `.env.example`): `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_BASE_URL`, `LLM_MODEL`; `GITHUB_PAT` + `GITHUB_OWNER` for publishing; `SONARQUBE_*` (optional, for Sonar findings).
 3. **Authenticated `gh` CLI** (`gh auth status`) — used to create + push the repo.
-4. **Docker / Rancher Desktop running** (dockerd/moby engine) — the Code Review sandbox runs in a container. Two one-time setup steps:
+4. **Docker / Rancher Desktop running** (dockerd/moby engine) — the Code Review sandbox runs in a container, and so does the exec-sandbox the Debugging/Unit-Test loop runs against.
    ```powershell
    # build the review sandbox image (git + ruff + eslint + sonar-scanner)
    docker build -t sdlc-review-sandbox:latest tools/review-sandbox
 
    # start SonarQube (Community) + its Postgres
-   docker compose up -d
+   docker compose up -d sonarqube sonar-db
+
+   # start the exec-sandbox (compile/build/test + repair tools) + its egress-locked network:
+   #   egress-proxy    — Squid; the ONLY route exec-sandbox has out (PyPI/npm only, no git remotes)
+   #   exec-sandbox    — runs the MCP server MCPExecutor connects to
+   #   sandbox-gateway — dumb TCP relay so the sandbox is reachable on localhost:8080 despite
+   #                     having no direct route out (see tools/exec-sandbox/ + docker-compose.yml)
+   docker compose up -d egress-proxy exec-sandbox sandbox-gateway
+   # then set SANDBOX_ENABLED=true in .env and verify with:
+   SANDBOX_MCP_URL=http://localhost:8080/mcp pytest app/tests/test_mcp_integration.py
    ```
    On WSL2 (incl. Rancher), SonarQube's Elasticsearch needs a raised map count, else the
    `impl-sonarqube` container exits on boot:
@@ -121,7 +139,8 @@ app/
   integrations/ executor.py (fixed/repair tools) · review_sandbox.py (Docker) · sonarqube.py
   tests/        pytest suites
 scripts/        run_fixture.py · run_pipeline.py · local_executor.py · demo_server.py
-tools/          review-sandbox/ (Dockerfile + eslint config for the Code Review container)
+tools/          review-sandbox/ (Code Review container) · exec-sandbox/ (MCP server the
+                Debugging/Unit-Test loop's MCPExecutor runs against; squid.conf egress allowlist)
 reports/        generated review reports (<project>-<run>/report.md + findings.json)
 ```
 
@@ -145,8 +164,18 @@ pre-existing failures (missing fixtures), unrelated to the pipeline.
 
 - **No human-in-the-loop inside the graph** — a completed plan auto-commits; the only approval is
   the CLI plan gate. A repair/debug-cap failure ends the run flagged `needs_human_review`.
-- **Refactoring edits are published** — after Refactoring edits the flagged files, a fixed
-  `refactoring_publish` step commits exactly those files and pushes them to `dev` (a no-op when
-  nothing was edited; a push failure is logged and never crashes the run), so the remote repo
-  holds the reviewed + refactored code before the debug/test loop runs. It also writes a Markdown
-  refactoring report next to the Code Review report (`reports/<project>-<run>/refactoring-report.md`).
+- **The LLM agents edit the working copy directly; fixed "publish" nodes persist it** — Refactoring
+  and the Debugging/Unit-Test agents never commit (the repair-path rule: the LLM proposes content,
+  it never runs git). Two fixed nodes do the git work: `refactoring_publish` commits exactly the
+  files Refactoring edited and pushes `dev` (also writing a Markdown refactoring report next to the
+  Code Review report, `reports/<project>-<run>/refactoring-report.md`), and `debug_publish` — on a
+  passing test run — commits the debug fixes + generated unit tests and pushes `dev`, so Security's
+  re-scan and the `dev → main` PR carry the tested code and the tests. Both are no-ops when there
+  was nothing to persist, and both log (never crash) on a push failure.
+- **The exec-sandbox path doesn't push anywhere yet** — `MCPExecutor` has no publish/push
+  capability (by design: the sandbox's egress is locked to PyPI/npm only, no `github.com`), and
+  `SANDBOX_ENABLED=true` / `run_fixture.py --sandbox` / the real `POST /implementation/start` API
+  never set `push_enabled`. So in the sandbox path `debug_publish` only commits into the sandbox
+  container's own local git — the tests don't reach a repo the Testing team can see. **Workaround:**
+  the demo CLI's default `--real` mode (LocalDiskExecutor) pushes to `dev` normally. A proper fix
+  (host-side "export the finished workspace, then push with real git credentials") is deferred.

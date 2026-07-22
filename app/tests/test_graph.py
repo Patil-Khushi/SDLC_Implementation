@@ -139,10 +139,11 @@ def test_incomplete_then_completed_repairs_once_then_auto_commits() -> None:
     final = _invoke(executor, [TWO_FILE_ITEM], "t-happy")
 
     assert final["repair_attempt"] == 1                  # exactly one repair
-    # gate-passed -> commit -> review -> refactoring -> refactoring_publish (no-op: nothing
-    # refactored, empty findings) -> debug/test (terminal)
+    # gate-passed -> commit -> review -> refactoring -> refactoring_publish (no-op: empty findings)
+    # -> debug/test loop -> debug_publish (commits the generated tests) -> documentation -> security
+    # (no repo -> approve) -> finalize (skipped) -> package (sets terminal "completed").
     assert final["workflow_status"] == "completed"
-    assert len(executor.commits) == 1                    # committed exactly once, run-level
+    assert len(executor.commits) == 2                    # commit_node's run-level commit + debug_publish's
     assert executor.commits[0][0] == "p1"
     assert final["attempt"] == 7                         # orchestrator's counter echoed unchanged
     # the repair supplied the missing file
@@ -200,7 +201,8 @@ def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
     executor = FakeExecutor()
     final = _invoke(executor, [LOGIN_ITEM], "t-scaffold")
 
-    # single item passed -> commit -> review -> refactoring -> refactoring_publish (no-op) -> debug/test (terminal)
+    # single item passed -> commit -> review -> refactoring -> refactoring_publish (no-op) ->
+    # debug/test loop -> debug_publish -> documentation -> security -> finalize -> package (terminal)
     assert final["workflow_status"] == "completed"
     scaffold_files = [f for f in final["generated_code"] if not f.endswith("login.py")]
     assert len(scaffold_files) == SCAFFOLD_FILE_COUNT
@@ -339,7 +341,10 @@ def test_refactoring_publish_commits_the_edited_file_after_review(monkeypatch, t
     assert final["workflow_status"] == "completed"
     assert final["refactored_files"] == ["p1/app/api/login.py"]
     assert executor.files["p1/app/api/login.py"] == "# refactored\n"   # debug_check saw this content
-    # run-level commit, THEN the refactor commit — proves the node is wired and actually ran
-    assert len(executor.commits) == 2
+    # Three commits, in order: (0) commit_node's run-level commit, (1) refactoring_publish's
+    # refactor commit — proves that node is wired and actually ran — and (2) debug_publish's commit
+    # of the generated unit tests on the passing test run.
+    assert len(executor.commits) == 3
     assert executor.commits[0][0] == "p1"
     assert executor.commits[1] == ("p1", "refactor(run-1): apply code review fixes to 1 file(s)")
+    assert executor.commits[2] == ("p1", "test(run-1): debug fixes + unit tests")

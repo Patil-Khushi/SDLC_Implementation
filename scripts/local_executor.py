@@ -108,7 +108,9 @@ class LocalDiskExecutor(Executor):
         r = self.run_command(["git", "diff"], cwd=project_dir)
         return r.stdout + r.stderr
 
-    def install_package(self, project_dir: StrPath, package: str) -> RunResult:
+    def install_package(self, project_dir: StrPath, package: str, manager: str = "pip") -> RunResult:
+        if manager == "npm":
+            return self.run_command(["npm", "install", "--no-audit", "--no-fund", package], cwd=project_dir)
         return self.run_command(
             ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", package],
             cwd=project_dir,

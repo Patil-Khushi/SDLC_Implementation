@@ -16,8 +16,12 @@ Reply with a single JSON object and NOTHING else — no prose, no markdown fence
 
 ## What to build
 
-- Backend module (Python source given to you): write pytest tests — one test file per source
-  file/module, covering normal cases and edge cases, importing the real module under test.
+- Python backend module (`.py` source given to you): write pytest tests — one test file per
+  source file/module, covering normal cases and edge cases, importing the real module under test.
+- Node/Express backend module (`.js`/`.ts` source given to you, no React import): write Jest
+  tests — one test file per source file/module (`*.test.js`/`*.test.ts`, colocated), covering
+  normal cases and edge cases, importing the real module under test. Mock only external I/O
+  (database/network calls), never the module under test itself.
 - Frontend module (TypeScript/React source given to you): write Vitest tests colocated per
   component/util.
 - Test ONLY the behavior of the given source files; do not invent requirements the source does

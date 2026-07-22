@@ -15,11 +15,17 @@ never does), and separately counts ``complete_with_tools`` calls (the Debugging 
 entry point — see app/agents/debugging.py) so a test can assert "debugging ran exactly once"
 independent of "unit-test generation ran exactly once".
 
-The post-commit order is: commit -> code_review -> refactoring -> Debugging<->Unit-Test loop
+The post-commit order is: commit -> code_review -> refactoring -> refactoring_publish ->
+Debugging<->Unit-Test loop -> debug_publish -> documentation -> security -> finalize -> package
 (see app/graph/graph.py). Code Review + Refactoring run first (no-op here: no ``repo_url`` to
 clone, so review writes a graceful "no repository URL" report and empty findings, and refactoring
 finds nothing to apply), THEN the debug/test loop verifies the (unchanged) code. A passing
-unit_test_run is the terminal stage and stamps ``workflow_status = "completed"``.
+unit_test_run routes to ``debug_publish``, which commits the loop's own changes (a second
+``git_commit`` beyond ``commit_node``'s run-level one); the run's terminal ``workflow_status =
+"completed"`` is then set by ``package`` at the very end (Security here defaults to "approve" with
+no repo to scan). These tests assert on the debug/test loop's own fields (debug_result,
+test_result, debug_attempt, unit_tests) — the Documentation/Security/finalize/package tail is
+covered by test_graph.py.
 
 Covers (CLAUDE.md / app/graph/router.py's ``DEBUG_CAP = 3``):
 1. Happy path: compile/build + tests all pass first try -> terminal "completed".
@@ -109,27 +115,28 @@ def _invoke(executor: FakeExecutor, thread_id: str) -> dict:
 def test_happy_path_compile_build_and_tests_pass_first_try(stub_llm) -> None:
     # No queues scripted -> FakeExecutor's default_pass=True answers every compile/build/test call.
     executor = FakeExecutor()
-    final = _invoke(executor, "t-happy")
+    final = _invoke(executor, "dtl-happy")
 
-    # commit -> code_review (no-op, no repo_url) -> refactoring (no-op) -> debug/test loop passes;
-    # unit_test_run is the terminal stage and stamps "completed" — see graph.py.
+    # commit -> code_review (no-op) -> refactoring (no-op) -> debug/test loop passes -> debug_publish
+    # (commits the generated tests) -> documentation -> security (no repo -> approve) -> finalize
+    # (skipped) -> package sets the terminal "completed" — see graph.py.
     assert final["workflow_status"] == "completed"
     assert final["debug_result"]["passed"] is True
     assert final["test_result"]["passed"] is True
     assert final["unit_tests"]                                   # non-empty
     assert stub_llm.debug_calls == 0                              # never entered the debugging path
     assert final.get("debug_attempt", 0) == 0
-    assert len(executor.commits) == 1                             # single run-level commit
+    assert len(executor.commits) == 2                             # commit_node's + debug_publish's
 
 
 def test_compile_build_fails_once_then_passes(stub_llm) -> None:
     # compile fails on the first debug_check, passes on the second (post-debugging) recheck.
     executor = FakeExecutor(compile_results=[False, True])
-    final = _invoke(executor, "t-compile-once")
+    final = _invoke(executor, "dtl-compile-once")
 
     assert stub_llm.debug_calls == 1                              # debugging invoked exactly once
     assert final["debug_attempt"] == 1
-    assert final["workflow_status"] == "completed"               # review -> refactoring -> debug/test (terminal)
+    assert final["workflow_status"] == "completed"               # ...debug/test loop -> debug_publish -> ... -> package (terminal)
     assert final["test_result"]["passed"] is True
     assert final["unit_tests"]
     assert stub_llm.test_gen_calls == 1                           # tests generated normally, once
@@ -138,7 +145,7 @@ def test_compile_build_fails_once_then_passes(stub_llm) -> None:
 def test_test_run_fails_once_then_passes_debugging_fixes_source_not_tests(stub_llm) -> None:
     # compile/build always pass; the test run fails once, then passes on the recheck.
     executor = FakeExecutor(test_results=[False, True])
-    final = _invoke(executor, "t-test-once")
+    final = _invoke(executor, "dtl-test-once")
 
     assert stub_llm.debug_calls == 1                              # debugging fixed the SOURCE once
     assert final["debug_attempt"] == 1
@@ -147,7 +154,7 @@ def test_test_run_fails_once_then_passes_debugging_fixes_source_not_tests(stub_l
     unit_tests_after = final["unit_tests"]
     assert len(unit_tests_after) == 1
     assert unit_tests_after[0].endswith("tests/test_thing.py")
-    assert final["workflow_status"] == "completed"               # review -> refactoring -> debug/test (terminal)
+    assert final["workflow_status"] == "completed"               # ...debug/test loop -> debug_publish -> ... -> package (terminal)
     assert final["test_result"]["passed"] is True
 
 
@@ -155,7 +162,7 @@ def test_cap_exhaustion_escalates_to_needs_human_review(stub_llm) -> None:
     # compile keeps failing across every debug_check call (initial + one per debugging attempt),
     # so debug_attempt climbs to DEBUG_CAP without ever passing -> escalate, never loops forever.
     executor = FakeExecutor(compile_results=[False] * (DEBUG_CAP + 3))
-    final = _invoke(executor, "t-cap")
+    final = _invoke(executor, "dtl-cap")
 
     assert final["workflow_status"] == "needs_human_review"
     assert final["debug_attempt"] == DEBUG_CAP

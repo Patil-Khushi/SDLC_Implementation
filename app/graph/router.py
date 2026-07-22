@@ -74,9 +74,10 @@ def route_after_test_generate(state: WorkflowState) -> str:
 
 
 def route_after_test_run(state: WorkflowState) -> str:
-    """The test-run decision: all-pass → done (the graph maps this to ``documentation``, not the
-    real END sentinel — Documentation/Security/finalize still run); fail under cap → debugging;
-    fail at cap → escalate (needs_human_review)."""
+    """The test-run decision: all-pass → done (the graph maps this to ``debug_publish`` — which
+    commits/pushes the loop's fixes + tests to 'dev' — then Documentation/Security/finalize still
+    run; NOT the real END sentinel); fail under cap → debugging; fail at cap → escalate
+    (needs_human_review)."""
     test_result = state.get("test_result")
     if test_result and test_result.get("passed"):
         return "done"

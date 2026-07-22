@@ -1,0 +1,3 @@
+# exec-sandbox MCP server's own deps (NOT the generated project's deps — those install
+# project-local via the install_package tool / MCPExecutor.build(), into .py_packages/node_modules).
+mcp>=1.9,<2.0
