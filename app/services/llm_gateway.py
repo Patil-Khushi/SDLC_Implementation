@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 import anthropic
+import httpx
 
 from app.config.settings import get_settings
 
@@ -63,11 +64,25 @@ def _summarize_tool_input(tool_input: Any) -> str:
 _T = TypeVar("_T")
 
 
+# Transient failures worth retrying alongside 429s. Mid-stream drops surface as RAW httpx
+# errors (httpx.ReadError / RemoteProtocolError, e.g. WinError 10054 connection reset): once
+# the response has started streaming, the Anthropic SDK does NOT wrap them in APIConnectionError
+# — that wrapper only covers failures while ESTABLISHING the request. A multi-call run (unit
+# test generation fires one call per module) must survive a single dropped connection.
+_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+	anthropic.APIConnectionError,
+	httpx.ReadError,
+	httpx.WriteError,
+	httpx.RemoteProtocolError,
+)
+
+
 def _with_rate_limit_retry(call: Callable[[], _T], *, max_attempts: int = 6) -> _T:
-	"""Run ``call`` and retry on ``anthropic.RateLimitError`` (429), honoring the API's requested
-	wait, up to ``max_attempts`` total tries. Shared by :meth:`LLMGateway.complete` (streaming) and
+	"""Run ``call`` and retry on ``anthropic.RateLimitError`` (429, honoring the API's requested
+	wait) and on transient network drops (see ``_TRANSIENT_ERRORS``, fixed 10s backoff), up to
+	``max_attempts`` total tries. Shared by :meth:`LLMGateway.complete` (streaming) and
 	:meth:`LLMGateway.complete_with_tools` (the repair path's tool-use loop) — chunked generation
-	fires many calls per feature, and either path can hit the per-minute rate limit in a burst."""
+	fires many calls per feature, and either path can hit the per-minute limit or lose a socket."""
 	for attempt in range(1, max_attempts + 1):
 		try:
 			return call()
@@ -80,6 +95,14 @@ def _with_rate_limit_retry(call: Callable[[], _T], *, max_attempts: int = 6) -> 
 				wait, attempt, max_attempts,
 			)
 			time.sleep(wait)
+		except _TRANSIENT_ERRORS as exc:
+			if attempt == max_attempts:
+				raise
+			logger.warning(
+				"llm_call transient network error (%s: %s); waiting 10s then retrying (attempt %d/%d)",
+				type(exc).__name__, exc, attempt, max_attempts,
+			)
+			time.sleep(10.0)
 	raise AssertionError("unreachable")  # loop always returns or raises
 
 
