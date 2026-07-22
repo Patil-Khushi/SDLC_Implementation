@@ -5,6 +5,12 @@ Regression coverage for a PR #2 review finding: the original resilience work onl
 ``complete()``'s streaming call, leaving ``complete_with_tools()`` to call the blocking
 ``client.messages.create()`` directly with no retry — a rate limit hit during repair failed
 immediately. Both paths now share one retry helper.
+
+Also covers transient network drops: a mid-stream connection reset surfaces as a RAW
+``httpx.ReadError`` (e.g. WinError 10054) — NOT ``anthropic.APIConnectionError``, which the
+SDK only raises for failures while ESTABLISHING the request. The original retry caught only
+``RateLimitError``, so one dropped socket 100+ calls into a code-generation run crashed the
+whole graph (seen live: ``httpx.ReadError`` during the resources-app backend-config item).
 """
 
 from __future__ import annotations
@@ -68,3 +74,56 @@ def test_with_rate_limit_retry_does_not_swallow_other_errors(monkeypatch: pytest
 
     with pytest.raises(ValueError):
         _with_rate_limit_retry(boom, max_attempts=5)
+
+
+@pytest.mark.parametrize("exc_type", [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError])
+def test_transient_network_error_is_retried_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, exc_type: type[Exception]
+) -> None:
+    # The live failure mode: a mid-stream connection reset (WinError 10054) raises a raw httpx
+    # error. One drop must not kill a multi-call run — the retry re-opens the stream from scratch.
+    sleeps: list[float] = []
+    monkeypatch.setattr(gw_module.time, "sleep", sleeps.append)
+
+    calls = {"n": 0}
+
+    def drops_once() -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise exc_type("[WinError 10054] An existing connection was forcibly closed")
+        return "ok"
+
+    assert _with_rate_limit_retry(drops_once, max_attempts=3) == "ok"
+    assert calls["n"] == 2
+    assert sleeps == [10.0]  # fixed transient backoff, not the 429 retry-after path
+
+
+def test_transient_network_error_raises_after_exhausting_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gw_module.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def always_drops() -> str:
+        calls["n"] += 1
+        raise httpx.ReadError("connection reset")
+
+    with pytest.raises(httpx.ReadError):
+        _with_rate_limit_retry(always_drops, max_attempts=3)
+    assert calls["n"] == 3  # tried the full budget before giving up
+
+
+def test_api_connection_error_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Failures while ESTABLISHING the request are wrapped by the SDK — also transient.
+    monkeypatch.setattr(gw_module.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def refused_once() -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise gw_module.anthropic.APIConnectionError(
+                request=httpx.Request("POST", "https://example.com")
+            )
+        return "ok"
+
+    assert _with_rate_limit_retry(refused_once, max_attempts=3) == "ok"
