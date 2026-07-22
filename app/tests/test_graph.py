@@ -70,13 +70,11 @@ def _stub_llm(monkeypatch):
     set_executor(None)
 
 
-def _invoke(executor: FakeExecutor, work_items: list[WorkItem], thread_id: str, *, repo_url: str = "") -> dict:
+def _invoke(executor: FakeExecutor, work_items: list[WorkItem], thread_id: str) -> dict:
     """Fresh invoke; runs to completion (no HITL pause) and returns the final state."""
     set_executor(executor)
     initial = new_state(run_id="run-1", attempt=7, project_id="p1")
     initial["work_items"] = work_items
-    if repo_url:
-        initial["repo_url"] = repo_url
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
     workflow.invoke(initial, config)
     return dict(workflow.get_state(config).values)
@@ -89,7 +87,7 @@ def test_incomplete_then_completed_repairs_once_then_auto_commits() -> None:
     final = _invoke(executor, [TWO_FILE_ITEM], "t-happy")
 
     assert final["repair_attempt"] == 1                  # exactly one repair
-    assert final["workflow_status"] == "security_reviewed"   # gate-passed -> auto-commit -> full pipeline -> final review
+    assert final["workflow_status"] == "completed"       # gate-passed -> commit -> review -> refactoring -> debug/test (terminal)
     assert len(executor.commits) == 1                    # committed exactly once, run-level
     assert executor.commits[0][0] == "p1"
     assert final["attempt"] == 7                         # orchestrator's counter echoed unchanged
@@ -144,39 +142,11 @@ def test_missing_target_file_fails_the_completeness_gate(monkeypatch) -> None:
     assert executor.commits == []
 
 
-def test_documentation_and_security_run_after_code_review_on_the_happy_path() -> None:
-    # Full pipeline: gate passes -> commit -> code_review -> debug/unit-test loop -> documentation
-    # -> security -> END. No repo_url is ever set in this test (push disabled), so Code Review and
-    # Security both take their graceful "no repository" no-op path - but they still RUN, and
-    # Documentation (which needs no repo_url) actually generates content.
-    executor = FakeExecutor()
-    final = _invoke(executor, [LOGIN_ITEM], "t-full-pipeline")
-
-    assert final["workflow_status"] == "security_reviewed"
-    assert "No repository URL" in final["review_report"]
-    assert final["documentation"]  # Documentation ran and produced something (the stubbed LLM reply)
-    assert "No repository URL" in final["security_report"]
-    assert final["security_report_path"]
-
-
-def test_security_verdict_is_advisory_only_run_still_completes() -> None:
-    # A disallowed repo_url makes Security (and Code Review) take their deterministic
-    # "changes_requested" no-clone path — no Docker/sandbox needed, no dependence on the LLM
-    # stub's output. Nothing currently routes on the verdict: the run still ends normally
-    # (security_node -> END unconditionally), same terminal status as the approve case.
-    executor = FakeExecutor()
-    final = _invoke(executor, [LOGIN_ITEM], "t-security-verdict", repo_url="https://evil.com/acme/repo")
-
-    assert final["workflow_status"] == "security_reviewed"
-    assert final["security_verdict"] == "changes_requested"
-    assert "not an allowed GitHub URL" in final["security_report"]
-
-
 def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
     executor = FakeExecutor()
     final = _invoke(executor, [LOGIN_ITEM], "t-scaffold")
 
-    assert final["workflow_status"] == "security_reviewed"    # single item passed -> auto-commit -> full pipeline -> review
+    assert final["workflow_status"] == "completed"        # single item passed -> commit -> review -> refactoring -> debug/test (terminal)
     scaffold_files = [f for f in final["generated_code"] if not f.endswith("login.py")]
     assert len(scaffold_files) == SCAFFOLD_FILE_COUNT
     assert final["generated_code"][0] == "p1/Dockerfile"      # scaffold wrote first, in template order

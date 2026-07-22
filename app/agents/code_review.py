@@ -1,7 +1,8 @@
 """Code Review Agent - deterministic findings + LLM interpretation -> engineering report.
 
-Runs ONCE at the end of the pipeline. **Static, read-only, advisory** (Testing executes;
-Refactoring modifies). Accuracy comes from separating two things:
+Runs ONCE, right after the run-level commit and before Refactoring / the Debugging<->Unit-Test
+loop. **Static, read-only, advisory** (Testing executes; Refactoring modifies). Accuracy comes
+from separating two things:
 
 * **Verified findings** - produced by the deterministic tools (Ruff, ESLint, SonarQube) and merged
   by ``services/finding_aggregator`` in pure Python. Reproducible, no LLM, confidence "Very High".
