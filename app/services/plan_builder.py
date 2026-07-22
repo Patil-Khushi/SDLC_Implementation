@@ -30,6 +30,7 @@ Run ``python -m app.services.plan_builder`` to (re)generate
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections import Counter, defaultdict
@@ -38,6 +39,8 @@ from typing import Any
 
 from app.models import WorkItem
 from app.services import design_pack
+
+logger = logging.getLogger(__name__)
 
 # app/services/plan_builder.py -> services -> app -> implementation -> services -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -164,7 +167,20 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
         tables = design_pack._schema_entities(schema.path, schema.obj) if schema else []
         backend = _structure_obj(roles, "backend_structure")
         frontend = _structure_obj(roles, "frontend_structure")
+        backend_tree = backend.get("tree", {})
+        frontend_tree = frontend.get("tree", {})
         items = _backend_items(rows, tables, backend) + _frontend_items(rows, frontend)
+        # Authoritative-manifest guarantee (same guard the adaptive path already used below): the
+        # legacy builders emit ONE item per operation/screen, so any file that isn't itself a
+        # handler/service/schema/model tied to a SPECIFIC operation — shared/cross-cutting
+        # infrastructure like main.py, config/settings.py, db/database.py, core/security.py, a
+        # frontend App.tsx/main.tsx, api/client.ts, AuthContext, shared form components, ... —
+        # is never assigned to any item and silently never gets generated. Sweep every structure-
+        # tree leaf the per-operation/per-screen items didn't claim into directory-grouped
+        # catch-all items, exactly like the adaptive path does. (Zero per-operation items is NOT
+        # itself suspicious — a pack can legitimately have no REST surface, e.g. a client-only
+        # game — so this reconciles on FILE coverage, not on whether any operation matched.)
+        items += _reconcile_uncovered(backend_tree, frontend_tree, items)
     else:
         # Adaptive path: normalize whatever formats arrived, then build from the neutral view.
         resolved = design_pack.resolve(pack, roles)
@@ -173,12 +189,26 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
                 f"{pack_dir}: no recognizable design-package artifacts (need an OpenAPI spec or a "
                 "UI↔API mapping table)."
             )
+        backend_tree, frontend_tree = resolved.backend_tree, resolved.frontend_tree
         items = _backend_items_adaptive(resolved) + _frontend_items_adaptive(resolved)
         # Authoritative-manifest guarantee: every non-test file leaf in the structure trees must be
         # produced by SOME work item. The builders are exhaustive by construction (one item per
         # directory), so this normally adds nothing — it's a guard that turns any future coverage
         # gap into an explicit catch-all item instead of a silent omission.
-        items += _reconcile_uncovered(resolved, items)
+        items += _reconcile_uncovered(backend_tree, frontend_tree, items)
+
+    # Final completeness check, run for BOTH paths: after the builders AND the reconcile sweep,
+    # every non-test structure-tree leaf must be targeted by some item. This should be
+    # structurally impossible to fail — reconcile sweeps whatever the builders didn't claim — so a
+    # hit here means a leaf slipped past BOTH stages (a genuinely new, unanticipated gap, not the
+    # already-fixed "zero per-operation matches" case, which reconcile already covers). Warn loudly
+    # with the exact missing paths rather than silently ship an incomplete app again.
+    still_missing = _missing_after_reconcile(backend_tree, frontend_tree, items)
+    if still_missing:
+        logger.warning(
+            "%s: %d design file(s) are not targeted by any work item even after reconciliation — "
+            "they will NOT be generated: %s", pack_dir, len(still_missing), ", ".join(still_missing),
+        )
 
     # Tag each item with the user-feature it belongs to (feature → REQ traceability), so the commit
     # step can group items into ONE commit per feature. Items whose requirements don't map to any
@@ -186,10 +216,35 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
     return _assign_features(items, _feature_map(pack, roles))
 
 
+def _missing_after_reconcile(backend_tree: dict, frontend_tree: dict, items: list[WorkItem]) -> list[str]:
+    """Non-test structure-tree leaves NOT targeted by any of ``items``, sorted. Empty in normal
+    operation (``_reconcile_uncovered`` already swept everything it found) — a non-empty result
+    means a leaf slipped past both the builders and the sweep, e.g. a future edit to either one."""
+    targeted = {f for item in items for f in item.target_files}
+    return sorted(
+        p for tree in (backend_tree, frontend_tree) for p, _ in _source_leaves(tree) if p not in targeted
+    )
+
+
 def _structure_obj(roles: dict, role: str) -> dict:
-    """Full structure JSON (with its ``tree`` wrapper) for the legacy builders, or ``{}``."""
+    """Full structure JSON for the legacy builders, normalized to always carry a ``tree`` key.
+
+    The expected shape is ``{"tree": {...}, "notes": ...}``, but some design hand-offs omit the
+    wrapper and put the directory tree directly at the top level (e.g. a ``frontend-structure.json``
+    shaped like ``{"auth-frontend/": {...}}`` with no ``"tree"`` key at all — seen in practice
+    sitting right next to a properly-wrapped ``backend-structure.json`` in the SAME pack). Both
+    ``_backend_items``/``_frontend_items`` read ``obj.get("tree", {})``, so an un-normalized bare
+    tree silently resolves to an EMPTY tree — zero leaves, zero work items for that side — with no
+    error at all; the plan just quietly omits that whole side of the app (e.g. no frontend). Detect
+    the un-wrapped case (no ``"tree"`` key, or one whose value isn't itself a dict) and wrap it.
+    """
     df = design_pack._first(roles, role)
-    return df.obj if df and isinstance(df.obj, dict) else {}
+    if not df or not isinstance(df.obj, dict):
+        return {}
+    obj = df.obj
+    if isinstance(obj.get("tree"), dict):
+        return obj
+    return {"tree": obj}
 
 
 # -- stack-agnostic file-role detection ------------------------------------
@@ -354,25 +409,44 @@ def _backend_targets(
     return list(dict.fromkeys(files)) or [f"{module_dir}{op}{module_ext}"]
 
 
+#: A page leaf's description starts with the literal word "route" then the route path — e.g.
+#: "route /login" or, just as commonly in a real hand-off, "route /login: email + password, ...".
+#: Capture ONLY the path token, stopping at whitespace OR a trailing punctuation mark (the colon
+#: introducing the free-text explanation) — a blunt ``str.replace("route", "")`` (the old approach)
+#: instead kept everything after the word "route", including ": <free-text explanation>", and a
+#: naive ``\S+`` capture (an earlier attempt at this same fix) still swallowed a trailing ":" —
+#: both produce a key nothing in the CSV ever matches.
+_ROUTE_DESC_RE = re.compile(r"^route\s+([^\s:,;]+)")
+
+
+def _route_key(text: str) -> str:
+    """Normalize a route path for matching: drop a leading '/' and any trailing '/'. A structure
+    tree's page description and a mapping CSV's ``route_id`` column commonly disagree on whether
+    the leading slash is included ("/login" vs "login") — this makes both compare equal."""
+    return text.strip().strip("/")
+
+
 def _frontend_items(rows: list[dict[str, str]], frontend: dict) -> list[WorkItem]:
     leaves = _walk(frontend.get("tree", {}))
-    page_by_route = {
-        str(desc).replace("route", "").strip(): path
-        for path, desc in leaves
-        if "/pages/" in path and path.endswith(".tsx") and str(desc).startswith("route ")
-    }
+    page_by_route: dict[str, str] = {}
+    for path, desc in leaves:
+        if "/pages/" not in path or not path.endswith(".tsx"):
+            continue
+        m = _ROUTE_DESC_RE.match(str(desc))
+        if m:
+            page_by_route[_route_key(m.group(1))] = path
     api_files = [(path, str(desc)) for path, desc in leaves if "/api/" in path and path.endswith(".ts")]
 
     items: list[WorkItem] = []
     seen: set[str] = set()
     for row in rows:
-        route_id = row.get("route_id", "").strip()
+        route_id = _route_key(row.get("route_id", ""))
         screen = row.get("screen", "").strip()
         if not route_id or route_id in seen or route_id not in page_by_route:
             continue  # skip globals / logout / anything without a real page
         seen.add(route_id)
 
-        screen_rows = [r for r in rows if r.get("route_id", "").strip() == route_id]
+        screen_rows = [r for r in rows if _route_key(r.get("route_id", "")) == route_id]
         req_ids = sorted({rid.strip() for r in screen_rows for rid in r["req_ids"].split(",") if rid.strip() and rid.strip() != "-"})
         ops = {r.get("operation_id", "").strip() for r in screen_rows}
         target_files = [page_by_route[route_id]]
@@ -610,17 +684,21 @@ def _frontend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkI
 
 
 def _reconcile_uncovered(
-    resolved: "design_pack.ResolvedPack", items: list[WorkItem]
+    backend_tree: dict, frontend_tree: dict, items: list[WorkItem]
 ) -> list[WorkItem]:
     """Sweep any structure-tree file not already covered by an item into a catch-all item.
 
-    Normally a no-op (the builders emit one item per directory, covering every leaf) — this is
-    the completeness guarantee that stops a future filtering change from silently dropping files.
+    Shared by both builders. For the adaptive builders this is normally a no-op (they emit one
+    item per directory, covering every leaf) — a guard against a future filtering change silently
+    dropping files. For the LEGACY (per-operation/per-screen) builders it does real work: those
+    only ever target files tied to a SPECIFIC operation/screen, so shared/cross-cutting
+    infrastructure (main.py, config/settings.py, core/security.py, a frontend App.tsx, api/
+    client.ts, ...) is never assigned to any item on its own — this is what sweeps those in.
     """
     covered = {f for item in items for f in item.target_files}
     used_ids = {item.id for item in items}
     extra: list[WorkItem] = []
-    for prefix, tree in (("backend", resolved.backend_tree), ("frontend", resolved.frontend_tree)):
+    for prefix, tree in (("backend", backend_tree), ("frontend", frontend_tree)):
         uncovered = [(p, d) for p, d in _source_leaves(tree) if p not in covered]
         if uncovered:
             extra += _items_from_groups(prefix, uncovered, used_ids=used_ids)
