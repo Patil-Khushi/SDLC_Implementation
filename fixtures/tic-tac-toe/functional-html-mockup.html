@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tic-Tac-Toe — Mockup</title>
+  <!--
+    Static, JavaScript-free visual mockup of the Tic-Tac-Toe UI.
+    Colors, spacing, and radii mirror design-tokens.json.
+    This is a DESIGN ARTIFACT — not the implementation.
+  -->
+  <style>
+    :root {
+      --bg-app: #0f172a;
+      --bg-surface: #1e293b;
+      --bg-board: #111827;
+      --bg-cell: #1f2937;
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --marker-x: #38bdf8;
+      --marker-o: #fb7185;
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --border: #334155;
+      --radius-board: 1rem;
+      --radius-cell: 0.5rem;
+      --radius-btn: 0.5rem;
+      --shadow-board: 0 12px 32px rgba(0, 0, 0, 0.45);
+      --font-base: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-base);
+      background: var(--bg-app);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .title {
+      font-size: 2.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      margin-top: 0.25rem;
+    }
+
+    main {
+      width: 100%;
+      max-width: 420px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.5rem;
+    }
+
+    .status {
+      font-size: 1.25rem;
+      font-weight: 600;
+      min-height: 1.75rem;
+      text-align: center;
+    }
+
+    .board {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.5rem;
+      width: min(90vw, 420px);
+      aspect-ratio: 1 / 1;
+      background: var(--bg-board);
+      padding: 0.5rem;
+      border-radius: var(--radius-board);
+      box-shadow: var(--shadow-board);
+    }
+
+    .cell {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-cell);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-cell);
+      font-size: 3rem;
+      font-weight: 700;
+      aspect-ratio: 1 / 1;
+      cursor: pointer;
+    }
+
+    .cell.x { color: var(--marker-x); }
+    .cell.o { color: var(--marker-o); }
+
+    .reset {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-btn);
+      padding: 0.75rem 1.5rem;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .reset:hover { background: var(--accent-hover); }
+
+    footer {
+      margin-top: 2rem;
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+    }
+
+    @media (max-width: 480px) {
+      .title { font-size: 2rem; }
+      .cell { font-size: 2.25rem; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 class="title">Tic-Tac-Toe</h1>
+    <p class="subtitle">Two-player · pass and play</p>
+  </header>
+
+  <main>
+    <p class="status" role="status" aria-live="polite">X's turn</p>
+
+    <section class="board" role="grid" aria-label="Tic-Tac-Toe board">
+      <div class="cell x" role="gridcell" aria-label="Row 1, Column 1, X">X</div>
+      <div class="cell o" role="gridcell" aria-label="Row 1, Column 2, O">O</div>
+      <div class="cell x" role="gridcell" aria-label="Row 1, Column 3, X">X</div>
+      <div class="cell" role="gridcell" aria-label="Row 2, Column 1, empty"></div>
+      <div class="cell o" role="gridcell" aria-label="Row 2, Column 2, O">O</div>
+      <div class="cell" role="gridcell" aria-label="Row 2, Column 3, empty"></div>
+      <div class="cell x" role="gridcell" aria-label="Row 3, Column 1, X">X</div>
+      <div class="cell" role="gridcell" aria-label="Row 3, Column 2, empty"></div>
+      <div class="cell" role="gridcell" aria-label="Row 3, Column 3, empty"></div>
+    </section>
+
+    <button type="button" class="reset">Reset</button>
+  </main>
+
+  <footer>
+    <p>Static mockup — no gameplay logic. See validation-rules.md.</p>
+  </footer>
+</body>
+</html>

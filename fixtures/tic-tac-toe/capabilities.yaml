@@ -1,0 +1,27 @@
+project:
+  name: tic-tac-toe
+  description: Two-player 3x3 Tic-Tac-Toe game — React + TypeScript, client-side only
+  version: 1.0.0
+
+frontend:
+  enabled: true
+  framework: react
+  bundler: vite
+
+backend:
+  enabled: false
+
+database:
+  enabled: false
+
+authentication:
+  enabled: false
+
+docker:
+  enabled: false
+
+environment:
+  enabled: false
+
+testing:
+  enabled: true

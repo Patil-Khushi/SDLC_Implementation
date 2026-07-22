@@ -129,6 +129,15 @@ class CodeGeneratorAgent(BaseAgent):
             if work_item.file_specs.get(p)
         )
         specs_block = f"What each file must contain (from the design package):\n{specs}\n\n" if specs else ""
+        svg_hint = ""
+        if any(p.lower().endswith(".svg") for p in work_item.target_files):
+            svg_hint = (
+                "For any .svg target, `content` must be a COMPLETE standalone SVG document "
+                '(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" …>…</svg>). Use '
+                "currentColor for strokes/fills so it inherits the design tokens, and keep the same "
+                "24×24 stroke style as the mockup. Reuse a provided mockup icon's paths verbatim "
+                "when the target filename matches an icon shown there.\n\n"
+            )
         return (
             f"Work item: {work_item.id}\n"
             f"Covers requirements: {', '.join(work_item.requirement_ids) or '-'}\n"
@@ -137,6 +146,7 @@ class CodeGeneratorAgent(BaseAgent):
             f"Screens: {', '.join(work_item.screens) or '-'}\n"
             f"Target files (produce ONLY these):\n{targets}\n\n"
             f"{specs_block}"
+            f"{svg_hint}"
             f"Context (only the cited slices):\n{context}\n\n"
             'Respond with STRICT JSON only: {"files":[{"path":...,"content":...}],"notes":...}'
         )
@@ -270,6 +280,26 @@ class CodeGeneratorAgent(BaseAgent):
             if mockup:
                 sections.append(("Mockup", "## Mockup — cited components\n" + mockup))
 
+        is_asset_item = any(p.lower().endswith(".svg") for p in work_item.target_files)
+        if is_asset_item:  # asset items have no screens, so the screen-keyed frontend context above is skipped
+            tokens = _artifact(design_package, "tokens.json", "design-tokens.json")
+            if tokens is not None:
+                sections.append(("Design tokens", "## Design tokens\n" + _as_text(tokens)))
+            svgs = _all_svgs(_artifact_text(design_package, "mockup.html", "functional-html-mockup.html"))
+            if svgs:
+                sections.append((
+                    "Mockup SVGs",
+                    "## SVG icons provided by the mockup (reuse verbatim where an icon matches the target filename)\n" + svgs,
+                ))
+
+        if work_item.id.startswith("frontend") and not is_asset_item:
+            assets = _available_assets(design_package)
+            if assets:
+                sections.append((
+                    "Assets",
+                    "## Available asset files (import these EXACT paths; do NOT invent asset names)\n" + assets,
+                ))
+
         rules = _validation_slice(
             _artifact(design_package, "validation-rules.json", "validation-rules.md"),
             [*work_item.endpoints, *work_item.screens],
@@ -343,6 +373,42 @@ def _extract_json(text: str) -> Any:
             except (ValueError, TypeError):
                 pass
     return None
+
+
+def _all_svgs(mockup_html: str) -> str:
+    """Every distinct inline ``<svg>…</svg>`` block from the mockup, so an asset item can reuse the
+    icons the design already provides instead of inventing new ones. Capped to keep the prompt bounded."""
+    if not mockup_html:
+        return ""
+    blocks = re.findall(r"<svg\b[^>]*>.*?</svg>", mockup_html, re.DOTALL | re.IGNORECASE)
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for block in blocks:
+        key = re.sub(r"\s+", " ", block).strip()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(block.strip())
+    return "\n".join(uniq[:40])
+
+
+def _available_assets(design_package: dict[str, Any]) -> str:
+    """The exact ``@/assets/…`` import paths the planner synthesized, so components import real files.
+
+    Names come from the SAME helper the planner uses (single source of truth), derived from the
+    frontend structure tree — whether it's wrapped in a ``tree`` key or is the tree directly.
+    """
+    from app.services.plan_builder import _asset_leaves
+
+    struct = _artifact(design_package, "frontend-structure.json", "frontend_structure.json", "frontend-structure")
+    if not isinstance(struct, dict):
+        return ""
+    tree = struct.get("tree", struct)
+    lines: list[str] = []
+    for path, _ in _asset_leaves(tree):
+        idx = path.find("src/")
+        imp = "@/" + path[idx + len("src/") :] if idx != -1 else path
+        lines.append(f"- {imp}")
+    return "\n".join(lines)
 
 
 def _artifact(design_package: dict[str, Any], *names: str) -> Any:

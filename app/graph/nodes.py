@@ -13,16 +13,27 @@ import re
 
 from app.agents.code_generator import CodeGeneratorAgent
 from app.agents.code_review import CodeReviewAgent
+from app.agents.documentation import DocumentationAgent
+from app.agents.security import SecurityAgent
 from app.agents.unit_test import UnitTestAgent
+from app.config.settings import get_settings
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
+from app.integrations.github import get_github_client
+from app.integrations.review_sandbox import is_allowed_repo_url
 from app.services.boilerplate import render_scaffold
+from app.services.packaging import build_project_zip
 
 logger = logging.getLogger(__name__)
 
 _code_generator = CodeGeneratorAgent()
 _code_review = CodeReviewAgent()
 _unit_test_agent = UnitTestAgent()
+_documentation_agent = DocumentationAgent()
+_security_agent = SecurityAgent()
+
+# owner/repo out of the same https://github.com/<owner>/<repo> form `is_allowed_repo_url` accepts.
+_OWNER_REPO_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
 
 def _stage(agent: str, doing: str) -> None:
@@ -111,6 +122,76 @@ def code_review_node(state: WorkflowState) -> WorkflowState:
     _stage("Code Reviewer", "cloning the pushed repo, running ruff / eslint / sonar-scanner, "
            "aggregating findings, writing the report")
     return _code_review.execute(state)
+
+
+def refactoring_publish_node(state: WorkflowState) -> WorkflowState:
+    """FIXED commit + push of the Refactoring agent's edits to the working branch ('dev').
+
+    Runs right after Refactoring and BEFORE the debug/test loop, so the fixed files land on the
+    remote 'dev' branch as soon as they exist in the sandbox — the Debugging agent (and anything
+    else downstream) can then fetch the refactored code from GitHub instead of relying only on
+    the shared sandbox workspace. Never formed by the LLM (CLAUDE.md rule 2) — the agent records
+    WHAT it edited (``refactored_files``); this deterministic node does the git work.
+
+    Three shapes, mirroring ``feature_publish_node`` / ``commit_node``:
+    * Nothing edited (clean review / early exit) → pass through, no commit (keeps the graph
+      acceptance tests' "committed exactly once" invariant on runs where refactoring is a no-op).
+    * Push enabled AND the executor supports incremental publish (``publish_feature``, the
+      local-disk executor) → ONE ``refactor(...)`` commit of exactly the edited paths on the
+      working branch, pushed to the remote.
+    * Otherwise (sandbox/test path) → a plain fixed-path ``git_commit`` so the refactor is at
+      least recorded in the workspace repo; no push is available there.
+
+    A publish/commit failure is logged + noted in ``generation_summary`` — never crashes the run
+    (the debug/test loop still verifies the refactored code from the shared workspace).
+    """
+    touched = [p for p in (state.get("refactored_files") or []) if p]
+    if not touched:
+        return state  # nothing refactored -> nothing to publish
+
+    _stage("Refactoring Publish", "committing the refactored files and pushing 'dev' so the "
+           "Debugging agent can pull them from the remote")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    branch = (state.get("branch") or get_settings().working_branch or "").strip() or "dev"
+    message = f"refactor({state.get('run_id') or 'run'}): apply code review fixes to {len(touched)} file(s)"
+    # refactored_files are project-prefixed (like generated_code); publish_feature stages paths
+    # relative to project_dir, so strip the prefix.
+    rel_paths = [p[len(project_dir) + 1:] if p.startswith(f"{project_dir}/") else p for p in touched]
+    push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
+
+    try:
+        if push and hasattr(executor, "publish_feature"):
+            res = executor.publish_feature(
+                project_dir, message, rel_paths,
+                feature_branch=branch, token=state.get("git_token") or None,
+            )
+            ok = getattr(res, "exit_code", 1) == 0
+            logger.info("[publish] refactoring fixes pushed to '%s': %s (%s)",
+                        branch, message, "ok" if ok else "PUSH FAILED")
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                f"[publish] {message} pushed to '{branch}'" + ("" if ok else " (PUSH FAILED)") + "\n"
+            )
+        else:
+            res = executor.git_commit(project_dir, message)  # LLM never forms/executes this (rule 2)
+            ok = bool(getattr(res, "committed", False))
+            if not ok:
+                logger.warning(
+                    "[publish] refactoring local commit FAILED for run %s: %s",
+                    state.get("run_id"),
+                    (getattr(res, "stderr", "") or getattr(res, "stdout", "")).strip()[:200],
+                )
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                f"[publish] {message} committed locally (push not available)"
+                + ("" if ok else " (COMMIT FAILED)") + "\n"
+            )
+    except Exception as exc:  # noqa: BLE001 - a publish failure must never crash the run
+        action = "push" if (push and hasattr(executor, "publish_feature")) else "local commit"
+        logger.exception("refactoring %s failed for run %s", action, state.get("run_id"))
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            f"[publish] refactoring {action} FAILED: {exc}\n"
+        )
+    return state
 
 
 def select_work_item_node(state: WorkflowState) -> WorkflowState:
@@ -236,11 +317,13 @@ def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
 def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic check for the Unit Test phase: ``test`` ONLY.
 
-    Unit Testing is the final CHECK of the post-commit pipeline (Code Review and Refactoring
-    already ran, before the debug/test loop). A pass here routes to ``finalize_node``, which owns
-    the terminal ``workflow_status``; a fail routes to ``debugging``/``escalate`` same as
-    ``debug_check_node``. An executor error is treated as a failing check — recorded, not raised —
-    mirroring ``gate_node``/``debug_check_node``.
+    A pass here routes on to ``debug_publish`` (persist the loop's fixes + tests to 'dev'), then
+    ``documentation`` and ``security`` (the run's actual final stages), which stamp their own
+    status; the "completed" set on the passing branch here is an intermediate marker, immediately
+    superseded later — kept mainly so a crash between nodes still leaves a meaningful status rather
+    than none at all. An executor error is treated as a failing check — recorded, not raised —
+    mirroring ``gate_node``/``debug_check_node``. ``workflow_status`` is only set on the passing
+    branch, mirroring how ``gate_node`` never sets it at all.
     """
     _stage("Unit Testing", "running the generated test suite")
     executor = get_executor()
@@ -257,70 +340,174 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     return state
 
 
-def finalize_node(state: WorkflowState) -> WorkflowState:
-    """FIXED commit step for the debug/test loop's pass edge (never formed by the LLM — rule 2).
+def debug_publish_node(state: WorkflowState) -> WorkflowState:
+    """FIXED commit + push of the Debugging<->Unit-Test loop's output to the working branch ('dev').
 
-    Reached ONLY once ``unit_test_run`` passes. Code Review / Refactoring / Debugging / Unit
-    Testing all write directly to the workspace without committing (the repair-path rule: the LLM
-    proposes content, it never commits) — ``commit_node`` ran BEFORE any of them, so until this
-    node existed, every fix Debugging made and every test file Unit Testing wrote landed in the
-    workspace/sandbox but never in git and never on the pushed remote. This is the single place
-    that captures those changes, mirroring ``commit_node``'s own push-capability detection:
+    The debug/test analogue of ``refactoring_publish_node`` — same shape, same rule-2 boundary
+    (the Debugging/Unit-Test AGENTS never form a git call; this deterministic node does the git
+    work). Runs on the ``unit_test_run`` pass edge, BEFORE Documentation/Security/finalize, so the
+    debug agent's fixes and the generated unit tests land on the remote 'dev' branch that Security
+    re-clones and that ``finalize`` opens the ``dev -> main`` PR from. Without this step, those
+    files would exist only in the shared sandbox workspace: Security's re-scan (a fresh clone)
+    and the PR would carry the pre-debug code and NO tests, so the Testing team would never see
+    the tests. ``commit_node`` ran much earlier (right after code generation), so it never captured
+    any of this.
 
-    * If incremental live-publish is active (``push_enabled`` + a remote + the executor supports
-      ``publish_sweep``), sweep + push any changes made since ``commit_node``'s own sweep.
-    * Otherwise, a plain ``executor.git_commit`` — a local, best-effort commit (nothing to commit
-      is not an error; it just means Debugging/Refactoring/Unit Testing produced no net diff).
+    Three shapes, mirroring ``refactoring_publish_node`` / ``feature_publish_node``:
+    * Nothing produced by the loop (no unit tests written AND the debug agent never ran) → pass
+      through, no commit — keeps the graph acceptance tests' "committed exactly once" invariant on
+      runs where the loop was a pure no-op.
+    * Push enabled AND the executor supports incremental publish (``publish_sweep``, the local-disk
+      executor) → sweep + push everything the loop produced (debug fixes + tests) to the working
+      branch in one commit.
+    * Otherwise (local-disk ``--no-publish``, or the sandbox/test path) → a plain fixed-path
+      ``git_commit`` so the loop's output is at least recorded in the workspace repo; no push is
+      available there.
 
-    KNOWN GAP: ``MCPExecutor`` (the exec-sandbox path — ``SANDBOX_ENABLED=true`` / the real
-    ``POST /implementation/start`` API / ``run_fixture.py --sandbox``) has no publish/push method
-    at all, and that whole path never sets ``push_enabled``/``git_remote`` to begin with. So in
-    that path this always falls to the plain-commit branch: the unit tests DO get committed, but
-    only into the sandbox container's own local git history — nothing reaches the pushed GitHub
-    repo, so the Testing team won't see them. Only the demo CLI's default `--real` (LocalDiskExecutor)
-    mode actually pushes today. Fixing this needs either a host-side "export the finished workspace
-    out of the sandbox, then push with real git credentials" step, or opening the egress-proxy up to
-    github.com from inside the sandbox (the latter weakens the PyPI/npm-only lockdown on purpose —
-    avoid). Flagged, not fixed, as of 2026-07-22.
+    A publish/commit failure is logged + noted in ``generation_summary`` — never crashes the run
+    and never re-enters the debug/test loop (the checks already passed). It deliberately does NOT
+    stamp a terminal ``workflow_status`` — Documentation/Security/``package`` (or ``escalate``)
+    own the run's true terminal status; this is a mid-pipeline persist step, not the end.
 
-    Stamps the run's terminal ``workflow_status``: ``"completed"`` on success, ``"push_failed"``/
-    ``"commit_failed"`` if the finalize step itself fails (an executor exception or a failed push)
-    — a failure HERE does not re-enter the debug/test loop; the checks already passed, this is
-    only about persisting that already-good result.
+    KNOWN GAP (see also the README "Notes"): ``MCPExecutor`` (the exec-sandbox path —
+    ``SANDBOX_ENABLED=true`` / the real ``POST /implementation/start`` API / ``run_fixture.py
+    --sandbox``) deliberately has NO ``publish_sweep``/push method: the sandbox's egress is locked
+    to PyPI+npm only, with no route to github.com by design (tools/exec-sandbox/squid.conf), so it
+    cannot push to a git remote. That path also never sets ``push_enabled``, so this node always
+    takes the plain-``git_commit`` branch there — the tests get committed into the sandbox
+    container's own local git only, not the pushed GitHub repo. WORKAROUND today: run via the demo
+    CLI's default ``--real`` mode (LocalDiskExecutor), which pushes to 'dev' normally so the tests
+    reach the remote. A proper fix (host-side "export the finished workspace out of the sandbox,
+    then push with real credentials") is deferred — flagged, not built.
     """
-    _stage("Finalize", "committing debug/refactor/test fixes and pushing if enabled")
+    # No-op guard: if the loop produced nothing (no tests generated and the debug agent never ran),
+    # there is nothing to persist. Mirrors refactoring_publish's "nothing edited -> skip".
+    produced_tests = bool(state.get("unit_tests"))
+    debug_ran = int(state.get("debug_attempt", 0)) > 0
+    if not (produced_tests or debug_ran):
+        return state
+
+    _stage("Debug Publish", "committing the debug fixes + generated unit tests and pushing 'dev' so "
+           "Security's re-scan and the PR carry the tested code and the tests")
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
+    message = f"test({state.get('run_id') or 'run'}): debug fixes + unit tests"
     push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
 
-    if push and hasattr(executor, "publish_sweep"):
-        try:
+    try:
+        if push and hasattr(executor, "publish_sweep"):
             res = executor.publish_sweep(project_dir, token=state.get("git_token") or None)
-        except Exception as exc:  # noqa: BLE001 - a push failure must never crash the run
-            logger.exception("finalize: publish_sweep failed for run %s", state.get("run_id"))
-            state["generation_summary"] = (state.get("generation_summary") or "") + f"[finalize] push FAILED: {exc}\n"
-            state["workflow_status"] = "push_failed"
-            return state
-        ok = getattr(res, "exit_code", 1) == 0
+            ok = getattr(res, "exit_code", 1) == 0
+            logger.info("[publish] debug/test output pushed to 'dev' (%s)", "ok" if ok else "PUSH FAILED")
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                "[publish] debug fixes + unit tests pushed to 'dev'" + ("" if ok else " (PUSH FAILED)") + "\n"
+            )
+        else:
+            res = executor.git_commit(project_dir, message)  # LLM never forms/executes this (rule 2)
+            ok = bool(getattr(res, "committed", False))
+            if not ok:
+                logger.warning(
+                    "[publish] debug/test local commit FAILED for run %s: %s",
+                    state.get("run_id"),
+                    (getattr(res, "stderr", "") or getattr(res, "stdout", "")).strip()[:200],
+                )
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                f"[publish] {message} committed locally (push not available)"
+                + ("" if ok else " (COMMIT FAILED)") + "\n"
+            )
+    except Exception as exc:  # noqa: BLE001 - a publish failure must never crash the run
+        action = "push" if (push and hasattr(executor, "publish_sweep")) else "local commit"
+        logger.exception("debug/test %s failed for run %s", action, state.get("run_id"))
         state["generation_summary"] = (state.get("generation_summary") or "") + (
-            "[finalize] debug/refactor/test fixes pushed to 'dev'" + ("" if ok else " (PUSH FAILED)") + "\n"
+            f"[publish] debug/test {action} FAILED: {exc}\n"
         )
-        state["workflow_status"] = "completed" if ok else "push_failed"
+    return state
+
+
+def documentation_node(state: WorkflowState) -> WorkflowState:
+    """Pure LLM: generate project documentation from the final generated source."""
+    _stage("Documentation", "writing a README from the final generated source")
+    return _documentation_agent.execute(state)
+
+
+def security_node(state: WorkflowState) -> WorkflowState:
+    """Clone the repo into an ephemeral sandbox, run Semgrep, write the security report + verdict.
+
+    The run's actual final analysis stage. Needs ``repo_url``; when absent, writes a report noting
+    no repo (same graceful degradation as Code Review) — ``security_verdict`` still gets set (it
+    defaults to "approve" when there's nothing to scan), so routing always has a decision to make.
+    """
+    _stage("Security", f"cloning the repo and running Semgrep (repo_url={state.get('repo_url') or 'none'})")
+    return _security_agent.execute(state)
+
+
+def finalize_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic (never LLM-formed): Security approved, so open (or find) the
+    `dev -> main` pull request. Never merges — a human approves the merge on GitHub; this keeps a
+    shared remote safe. Reached only on ``security_verdict == "approve"`` (see
+    ``router.route_after_security``) — a ``changes_requested`` verdict escalates directly instead.
+    """
+    _stage("Finalize", "opening (or finding) the dev -> main pull request")
+    run_id = state.get("run_id") or "-"
+    repo_url = (state.get("repo_url") or "").strip()
+    head = (state.get("branch") or "dev").strip()
+
+    if not repo_url or not is_allowed_repo_url(repo_url):
+        logger.info("[finalize] run=%s | no repo_url / not an allowed GitHub URL - skipping PR", run_id)
+        state["finalize_status"] = "skipped"
         return state
 
-    message = f"IMP-001 {state.get('run_id', 'run')}: debug/refactor/test fixes"
-    try:
-        result = executor.git_commit(project_dir, message)
-    except Exception as exc:  # noqa: BLE001 - a commit failure must never crash the run
-        logger.exception("finalize: git_commit failed for run %s", state.get("run_id"))
-        state["generation_summary"] = (state.get("generation_summary") or "") + f"[finalize] commit FAILED: {exc}\n"
-        state["workflow_status"] = "commit_failed"
+    match = _OWNER_REPO_RE.match(repo_url)
+    if not match:
+        logger.warning("[finalize] run=%s | could not parse owner/repo from repo_url: %s", run_id, repo_url)
+        state["finalize_status"] = "skipped"
         return state
-    note = result.sha if result.committed else "no-op, nothing to commit"
-    state["generation_summary"] = (
-        state.get("generation_summary") or ""
-    ) + f"[finalize] committed debug/refactor/test fixes ({note})\n"
+    owner, repo = match.group(1), match.group(2)
+
+    title = f"Security-approved: merge {head} into main"
+    body = (state.get("security_report") or "Security scan passed.")[:60000]
+    logger.info("[finalize] run=%s | opening PR %s -> main for %s/%s ...", run_id, head, owner, repo)
+    result = get_github_client().create_or_update_pull_request(owner, repo, head, "main", title, body)
+    if result.ok:
+        state["pr_url"] = result.url
+        state["finalize_status"] = "pr_created"
+        logger.info("[finalize] run=%s | PR ready: %s", run_id, result.url)
+    else:
+        state["finalize_status"] = "pr_failed"
+        logger.warning("[finalize] run=%s | PR failed: %s", run_id, result.error)
+    return state
+
+
+def package_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic: build the run's downloadable output — a zip of the generated project
+    plus its README/review/security reports. Runs after ``finalize`` regardless of whether the PR
+    call itself succeeded (a GitHub API hiccup shouldn't withhold the tangible zip output) — but
+    only on the approve path (``finalize`` is only reached when Security approved); a
+    ``changes_requested`` verdict escalates instead and never reaches packaging.
+
+    Sets the run's true terminal ``workflow_status = "completed"`` — ``unit_test_run_node``'s
+    earlier "completed" stamp is just an intermediate marker superseded here.
+    """
+    _stage("Package", "zipping the generated project + documentation for download")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    try:
+        path = build_project_zip(
+            executor=executor,
+            project_dir=project_dir,
+            generated_code=state.get("generated_code", []),
+            documentation=state.get("documentation", ""),
+            review_report=state.get("review_report", ""),
+            security_report=state.get("security_report", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - a packaging failure must not crash a finished run
+        logger.exception("packaging failed for run %s", state.get("run_id"))
+        state["generation_summary"] = (state.get("generation_summary") or "") + f"[package] FAILED: {exc}\n"
+        state["workflow_status"] = "completed"
+        return state
+    state["package_path"] = path
     state["workflow_status"] = "completed"
+    logger.info("[package] run=%s | zip ready: %s", state.get("run_id") or "-", path)
     return state
 
 

@@ -577,6 +577,16 @@ class MCPExecutor(Executor):
             exit_code=int(d.get("exit_code", -1)),
         )
 
+    # NOTE — deliberately NO publish_scaffold / publish_feature / publish_sweep here (unlike
+    # LocalDiskExecutor). Those push to a git remote (github.com), and the exec-sandbox has no
+    # route there BY DESIGN: its egress is locked to the PyPI + npm registries only
+    # (tools/exec-sandbox/squid.conf), with no path to git hosts. Publishing/pushing is a
+    # host-side concern. The publish-capable graph nodes (commit_node, feature_publish_node,
+    # refactoring_publish_node, debug_publish_node) all gate on ``hasattr(executor, "publish_*")``
+    # precisely so the sandbox path skips the push cleanly and falls back to a local git_commit —
+    # it is NOT an oversight that these methods are absent. See debug_publish_node's docstring for
+    # the operator-facing consequence + workaround.
+
     def _repair_run_command(self, cmd: list[str], cwd: str = ".", timeout: float | None = None) -> dict[str, Any]:
         """Scoped run_command exposed to the LLM (rejects git writes, then delegates)."""
         run = self._scoped_run_command(cmd, cwd, timeout)

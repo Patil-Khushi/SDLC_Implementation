@@ -33,7 +33,10 @@ def _resolve(rel: str) -> Path:
     """Resolve ``rel`` under the workspace root; refuse a path that escapes it."""
     target = (WORKSPACE_ROOT / str(rel)).resolve()
     if target != WORKSPACE_ROOT and WORKSPACE_ROOT not in target.parents:
-        raise ValueError(f"path escapes the sandbox workspace: {rel!r}")
+        raise ValueError(
+            f"path escapes the sandbox workspace: {rel!r}; "
+            f"resolved to {target}, outside {WORKSPACE_ROOT}"
+        )
     return target
 
 
@@ -106,13 +109,17 @@ def install_package(name: str, manager: str = "pip", cwd: str = ".") -> dict[str
     workdir.mkdir(parents=True, exist_ok=True)
     if manager == "npm":
         cmd = ["npm", "install", "--no-audit", "--no-fund", name]
+        # npm resolves whole dependency trees (transitively) and can pull native builds — a cold
+        # install of a large frontend easily exceeds pip's timeout, so give it double.
+        timeout = 600
     else:
         cmd = ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", name]
+        timeout = 300
     try:
-        proc = subprocess.run(cmd, cwd=str(workdir), capture_output=True, text=True, timeout=300, env=_child_env(workdir))
+        proc = subprocess.run(cmd, cwd=str(workdir), capture_output=True, text=True, timeout=timeout, env=_child_env(workdir))
         return {"stdout": proc.stdout, "stderr": proc.stderr, "exit_code": proc.returncode, "timed_out": False}
     except subprocess.TimeoutExpired:
-        return {"stdout": "", "stderr": "[timed out]", "exit_code": 124, "timed_out": True}
+        return {"stdout": "", "stderr": f"[timed out after {timeout}s]", "exit_code": 124, "timed_out": True}
 
 
 @mcp.tool()
@@ -122,8 +129,13 @@ def git_commit(project_dir: str, message: str) -> dict[str, Any]:
     root = _resolve(project_dir)
     root.mkdir(parents=True, exist_ok=True)
 
+    # Inline identity via `-c` so a commit never fails with "your identity is not configured" even
+    # if the container's global git config is somehow missing (the Dockerfile sets it globally too;
+    # this is belt-and-suspenders). No human operates this container directly.
+    _ident = ["-c", "user.email=sandbox@sdlc.local", "-c", "user.name=sdlc-exec-sandbox"]
+
     def _git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True)
+        return subprocess.run(["git", *_ident, *args], cwd=str(root), capture_output=True, text=True)
 
     if not (root / ".git").is_dir():
         _git("init")

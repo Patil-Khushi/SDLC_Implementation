@@ -19,12 +19,16 @@ agents run automatically in sequence.
 scaffold ─(push main early)─→ select ─┬─ code_generator → gate ─┬─ pass → feature_publish → select (loop)
                                        │                         ├─ fail & repair<3 → repair → gate
                                        │                         └─ fail & repair≥3 → escalate → END
-                                       └─ plan done → commit ──→ code_review → refactoring → debug_check
-                                                                                                   │
-                                          debug_check ─┬─ pass → unit_test_generate → unit_test_run ─┬─ pass → finalize → END ("completed")
-                                                       ├─ fail & debug<3 → debugging → debug_check   ├─ fail & debug<3 → debugging → debug_check
-                                                       └─ fail & debug≥3 → escalate → END             └─ fail & debug≥3 → escalate → END
+                                       └─ plan done → commit → code_review → refactoring → refactoring_publish → debug_check
+                                                                                                                       │
+   debug_check ─┬─ pass → unit_test_generate → unit_test_run ─┬─ pass → debug_publish → documentation → security ─┬─ approve → finalize(PR) → package → END ("completed")
+                │                                             │                                                    ├─ changes & loop<3 → refactoring → refactoring_publish → security
+                ├─ fail & debug<3 → debugging → debug_check   ├─ fail & debug<3 → debugging → debug_check          └─ changes & loop≥3 → escalate → END
+                └─ fail & debug≥3 → escalate → END            └─ fail & debug≥3 → escalate → END
 ```
+
+`finalize` opens (never auto-merges) a `dev → main` PR once Security approves; a human merges it on
+GitHub. `package` then zips the project + reports as the run's downloadable output.
 
 ### The agents
 
@@ -33,10 +37,15 @@ scaffold ─(push main early)─→ select ─┬─ code_generator → gate ─
 | 0 | **Scaffold** (no LLM) | renders boilerplate; in publish mode creates the repo + pushes `main` early | `generated_code`, `repo_url` |
 | 1 | **Code Generator** | generates source files per work item (real Claude); `gate` checks files exist, `repair` fixes gaps (≤3) | `generated_code` |
 | 2 | **Code Reviewer** | clones the pushed repo in a Docker sandbox, runs ruff + eslint + sonar-scanner, LLM writes the report | `review_report_path`, `review_findings_path` |
-| 3 | **Refactoring** | agentic edit loop — reads/edits the flagged files directly to apply the review's findings | `refactored_code` (+ edits files) |
+| 3 | **Refactoring** | agentic edit loop — reads/edits the flagged files directly to apply the review's findings; writes a report | `refactored_code`, `refactored_files`, `refactoring_report(_path)` |
+| — | **Refactoring Publish** (no LLM) | FIXED: commits the edited files and pushes `dev` (no-op if nothing was edited) | `generation_summary` |
 | 4 | **Debugging** | compile/build check; LLM fixes failures and re-checks (≤3) | `debug_result`, `debug_attempt` |
 | 5 | **Unit Testing** | generates + runs unit tests | `unit_tests`, `test_result` |
-| 6 | **Finalize** (no LLM) | a pass ends the run: commits (+ pushes, if live-publish is on) whatever Code Review/Refactoring/Debugging/Unit Testing changed | `workflow_status` |
+| — | **Debug Publish** (no LLM) | FIXED: on a passing test run, commits the debug fixes + generated tests and pushes `dev` (no-op if the loop produced nothing), so Security's re-scan + the PR carry the tests | `generation_summary` |
+| 6 | **Documentation** | writes a README from the final generated source | `documentation` |
+| 7 | **Security** | clones the repo again, runs Semgrep, writes a report + verdict; `changes_requested` loops back to Refactoring (≤3) | `security_report(_path)`, `security_verdict` |
+| — | **Finalize** (no LLM) | on Security approve, opens (never merges) a `dev → main` PR | `pr_url`, `finalize_status` |
+| — | **Package** (no LLM) | zips the project + README/review/security reports as the run's downloadable output; sets terminal `workflow_status` | `package_path`, `workflow_status` |
 
 Each feature is committed + pushed to `dev` **as it is generated** (live incremental publish), so
 the GitHub repo fills in feature-by-feature during the run.
@@ -155,14 +164,18 @@ pre-existing failures (missing fixtures), unrelated to the pipeline.
 
 - **No human-in-the-loop inside the graph** — a completed plan auto-commits; the only approval is
   the CLI plan gate. A repair/debug-cap failure ends the run flagged `needs_human_review`.
-- **Refactoring/Debugging/Unit Testing edit the working copy directly** (no commit of their own —
-  the repair-path rule is that the LLM never commits); **Finalize** is what actually persists those
-  changes, once Unit Testing passes. With live incremental publish (the default demo CLI mode),
-  Finalize sweeps + pushes to `dev`; otherwise it's a local, best-effort commit.
+- **The LLM agents edit the working copy directly; fixed "publish" nodes persist it** — Refactoring
+  and the Debugging/Unit-Test agents never commit (the repair-path rule: the LLM proposes content,
+  it never runs git). Two fixed nodes do the git work: `refactoring_publish` commits exactly the
+  files Refactoring edited and pushes `dev` (also writing a Markdown refactoring report next to the
+  Code Review report, `reports/<project>-<run>/refactoring-report.md`), and `debug_publish` — on a
+  passing test run — commits the debug fixes + generated unit tests and pushes `dev`, so Security's
+  re-scan and the `dev → main` PR carry the tested code and the tests. Both are no-ops when there
+  was nothing to persist, and both log (never crash) on a push failure.
 - **The exec-sandbox path doesn't push anywhere yet** — `MCPExecutor` has no publish/push
   capability (by design: the sandbox's egress is locked to PyPI/npm only, no `github.com`), and
   `SANDBOX_ENABLED=true` / `run_fixture.py --sandbox` / the real `POST /implementation/start` API
-  never set `push_enabled`. Unit tests still get committed, but only into the sandbox container's
-  own local git history — they don't reach a repo the Testing team can see. Getting them out needs
-  a host-side "export the finished workspace, then push with real git credentials" step that
-  doesn't exist yet.
+  never set `push_enabled`. So in the sandbox path `debug_publish` only commits into the sandbox
+  container's own local git — the tests don't reach a repo the Testing team can see. **Workaround:**
+  the demo CLI's default `--real` mode (LocalDiskExecutor) pushes to `dev` normally. A proper fix
+  (host-side "export the finished workspace, then push with real git credentials") is deferred.

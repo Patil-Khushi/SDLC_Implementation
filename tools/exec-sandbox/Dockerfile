@@ -26,6 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # even before a generated project's own devDependencies are installed.
 RUN npm install -g typescript@^5.6.0
 
+# Fail the build LOUDLY if either runtime is missing — an npm/python-less image would only surface
+# as mysterious "command not found" at check time, deep inside a run. Both must be on PATH here.
+RUN node --version && npm --version && python --version && git --version
+
 # git identity for the fixed-path git_commit tool — no human operates this container directly.
 RUN git config --global user.email "sandbox@sdlc.local" \
     && git config --global user.name "sdlc-exec-sandbox" \

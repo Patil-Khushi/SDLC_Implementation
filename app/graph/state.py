@@ -4,9 +4,11 @@ Each agent receives this state, updates ONLY the fields it owns, and returns it.
 both the guide's linear-pipeline fields (``review_report`` … one per downstream agent) and the
 Code Generation agent's IMP-001 fields (``work_items``, ``gate_result``, ``repair_attempt`` …).
 
-Two counters live here and must NOT be conflated (CLAUDE.md rule 3): ``repair_attempt`` is the
-LOCAL per-work-item counter (reset to 0 on each new work item); ``attempt`` is the
-ORCHESTRATOR's number, echoed back unchanged (this service never increments it).
+Three LOCAL counters live here and must NOT be conflated with each other or with ``attempt``
+(CLAUDE.md rule 3): ``repair_attempt`` (reset per work item), ``debug_attempt`` (reset once,
+post-commit debug/test loop), and ``security_loop_attempt`` (reset once, the Security<->
+Refactoring loop, capped by ``router.SECURITY_LOOP_CAP``). ``attempt`` is the ORCHESTRATOR's
+number, echoed back unchanged (this service never increments it).
 """
 
 from typing import Any, TypedDict
@@ -63,7 +65,11 @@ class WorkflowState(TypedDict, total=False):
     # --- Git push (opt-in; mandatory workflow rules 4 & 8) ---
     # When push_enabled AND git_remote are set, the commit step pushes 'main' after the scaffold
     # commit and 'dev' immediately after EACH feature commit, stopping the run if a push fails
-    # (the next feature commits only after the previous push succeeds). git_remote is a GitHub
+    # (the next feature commits only after the previous push succeeds). The fixed
+    # refactoring_publish node reuses these SAME two flags to push one more 'dev' commit after
+    # Refactoring, when it edited files — unlike the two pushes above, a failure there is only
+    # logged/noted (generation_summary) and never stops the run, since the debug/test loop can
+    # still verify the refactored code from the shared sandbox workspace. git_remote is a GitHub
     # "owner/name" slug OR any git remote URL/path; git_token (optional) authenticates the push.
     push_enabled: bool
     git_remote: str
@@ -83,9 +89,27 @@ class WorkflowState(TypedDict, total=False):
     review_report_path: str     # Code Review: where the report .md was saved (reports/…)
     review_findings_path: str   # Code Review: normalized verified-findings JSON (for Refactoring)
     refactored_code: str
+    # Refactoring: workspace-relative (project-prefixed) paths the agent EDITED this run — the
+    # input to the fixed refactoring_publish node (commit + push to 'dev'); empty when nothing
+    # was edited (clean review / early exit), which makes the publish step a no-op.
+    refactored_files: list[str]
+    refactoring_report: str        # Refactoring: the Markdown report content
+    refactoring_report_path: str   # Refactoring: where the report .md was saved (reports/…)
     unit_tests: list[str]                  # workspace-relative paths of test files written
     documentation: str
     security_report: str
+    security_report_path: str   # Security: where the report .md was saved (reports/…)
+    security_verdict: str       # Security: "approve" | "changes_requested" — routing signal
+    security_findings_path: str # Security: normalized Semgrep findings JSON (for Refactoring)
+
+    # --- Security <-> Refactoring loop + finalize (dev -> main) + packaging ---
+    # LOCAL counter (like repair_attempt/debug_attempt): incremented by Refactoring only when
+    # re-entered from this loop (never on its original, one-shot post-Code-Review call — see
+    # RefactoringAgent.execute). Capped by router.SECURITY_LOOP_CAP.
+    security_loop_attempt: int
+    pr_url: str                  # finalize: URL of the created/updated dev->main PR
+    finalize_status: str         # finalize: "pr_created" | "pr_failed" | "skipped"
+    package_path: str            # package: local path of the zipped project + docs (the run's output)
 
     # --- Lifecycle ---
     workflow_status: str
@@ -109,7 +133,8 @@ def new_state(
 
     Push is OFF by default (``push_enabled=False``): the commit step commits ``main``/``dev``
     locally but pushes nothing. Set ``push_enabled=True`` + ``git_remote`` (and optionally
-    ``git_token``) to push ``main`` after the scaffold and ``dev`` after each feature.
+    ``git_token``) to push ``main`` after the scaffold, ``dev`` after each feature, and ``dev``
+    once more after Refactoring when it edited files (that last push is non-fatal on failure).
 
     Fails fast on a malformed ``work_items`` (must be a list) rather than crashing deep in the
     graph loop.
@@ -135,5 +160,6 @@ def new_state(
         "push_enabled": push_enabled,
         "git_remote": git_remote,
         "git_token": git_token,
+        "security_loop_attempt": 0,
         "workflow_status": "pending",
     }
