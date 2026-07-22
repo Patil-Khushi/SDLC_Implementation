@@ -14,6 +14,7 @@ import re
 from app.agents.code_generator import CodeGeneratorAgent
 from app.agents.code_review import CodeReviewAgent
 from app.agents.unit_test import UnitTestAgent
+from app.config.settings import get_settings
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
 from app.services.boilerplate import render_scaffold
@@ -111,6 +112,76 @@ def code_review_node(state: WorkflowState) -> WorkflowState:
     _stage("Code Reviewer", "cloning the pushed repo, running ruff / eslint / sonar-scanner, "
            "aggregating findings, writing the report")
     return _code_review.execute(state)
+
+
+def refactoring_publish_node(state: WorkflowState) -> WorkflowState:
+    """FIXED commit + push of the Refactoring agent's edits to the working branch ('dev').
+
+    Runs right after Refactoring and BEFORE the debug/test loop, so the fixed files land on the
+    remote 'dev' branch as soon as they exist in the sandbox — the Debugging agent (and anything
+    else downstream) can then fetch the refactored code from GitHub instead of relying only on
+    the shared sandbox workspace. Never formed by the LLM (CLAUDE.md rule 2) — the agent records
+    WHAT it edited (``refactored_files``); this deterministic node does the git work.
+
+    Three shapes, mirroring ``feature_publish_node`` / ``commit_node``:
+    * Nothing edited (clean review / early exit) → pass through, no commit (keeps the graph
+      acceptance tests' "committed exactly once" invariant on runs where refactoring is a no-op).
+    * Push enabled AND the executor supports incremental publish (``publish_feature``, the
+      local-disk executor) → ONE ``refactor(...)`` commit of exactly the edited paths on the
+      working branch, pushed to the remote.
+    * Otherwise (sandbox/test path) → a plain fixed-path ``git_commit`` so the refactor is at
+      least recorded in the workspace repo; no push is available there.
+
+    A publish/commit failure is logged + noted in ``generation_summary`` — never crashes the run
+    (the debug/test loop still verifies the refactored code from the shared workspace).
+    """
+    touched = [p for p in (state.get("refactored_files") or []) if p]
+    if not touched:
+        return state  # nothing refactored -> nothing to publish
+
+    _stage("Refactoring Publish", "committing the refactored files and pushing 'dev' so the "
+           "Debugging agent can pull them from the remote")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    branch = (state.get("branch") or get_settings().working_branch or "").strip() or "dev"
+    message = f"refactor({state.get('run_id') or 'run'}): apply code review fixes to {len(touched)} file(s)"
+    # refactored_files are project-prefixed (like generated_code); publish_feature stages paths
+    # relative to project_dir, so strip the prefix.
+    rel_paths = [p[len(project_dir) + 1:] if p.startswith(f"{project_dir}/") else p for p in touched]
+    push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
+
+    try:
+        if push and hasattr(executor, "publish_feature"):
+            res = executor.publish_feature(
+                project_dir, message, rel_paths,
+                feature_branch=branch, token=state.get("git_token") or None,
+            )
+            ok = getattr(res, "exit_code", 1) == 0
+            logger.info("[publish] refactoring fixes pushed to '%s': %s (%s)",
+                        branch, message, "ok" if ok else "PUSH FAILED")
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                f"[publish] {message} pushed to '{branch}'" + ("" if ok else " (PUSH FAILED)") + "\n"
+            )
+        else:
+            res = executor.git_commit(project_dir, message)  # LLM never forms/executes this (rule 2)
+            ok = bool(getattr(res, "committed", False))
+            if not ok:
+                logger.warning(
+                    "[publish] refactoring local commit FAILED for run %s: %s",
+                    state.get("run_id"),
+                    (getattr(res, "stderr", "") or getattr(res, "stdout", "")).strip()[:200],
+                )
+            state["generation_summary"] = (state.get("generation_summary") or "") + (
+                f"[publish] {message} committed locally (push not available)"
+                + ("" if ok else " (COMMIT FAILED)") + "\n"
+            )
+    except Exception as exc:  # noqa: BLE001 - a publish failure must never crash the run
+        action = "push" if (push and hasattr(executor, "publish_feature")) else "local commit"
+        logger.exception("refactoring %s failed for run %s", action, state.get("run_id"))
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            f"[publish] refactoring {action} FAILED: {exc}\n"
+        )
+    return state
 
 
 def select_work_item_node(state: WorkflowState) -> WorkflowState:

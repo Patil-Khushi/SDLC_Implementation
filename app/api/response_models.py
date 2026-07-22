@@ -15,3 +15,7 @@ class StartResponse(BaseModel):
     # Empty when the run escalated to human review before the final review stage ran.
     review_report: str = ""
     review_report_path: str = ""
+    # The Refactoring agent's Markdown report, and where it was saved
+    # (reports/<project>-<run>/refactoring-report.md). Empty when refactoring never ran.
+    refactoring_report: str = ""
+    refactoring_report_path: str = ""

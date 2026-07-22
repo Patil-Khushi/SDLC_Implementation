@@ -4,8 +4,11 @@ The agent reads the review's structured findings (``review_findings_path`` JSON)
 false positives, then runs an AGENTIC edit loop: the model is given ``read_file`` / ``write_file``
 tools scoped to ``<project_dir>/`` and edits the flagged files directly (like a coding agent),
 landing the fixes under the SAME prefix the code generator / repair path use — so the downstream
-Debugging agent reads them where it expects. It never commits or runs a gate. A missing/unreadable
-findings file is surfaced as ``needs_human_review``, not silently treated as "nothing to do".
+Debugging agent reads them where it expects. It records what it edited (``refactored_files``) and
+persists a Markdown report, but never commits or runs a gate itself — the fixed
+``refactoring_publish`` node does the git work (see test_refactoring_publish.py). A
+missing/unreadable findings file is surfaced as ``needs_human_review``, not silently treated as
+"nothing to do".
 """
 
 from __future__ import annotations
@@ -73,6 +76,7 @@ def test_applies_fix_from_findings_json(tmp_path: Path) -> None:
 
     assert executor.files["proj/src/foo.py"] == "print(1)\n"      # written where the next agent looks
     assert "proj/src/foo.py" in state["generated_code"]           # recorded for the downstream read
+    assert state["refactored_files"] == ["proj/src/foo.py"]       # the publish node commits these
     assert state["workflow_status"] == "refactored"
 
 
@@ -179,6 +183,51 @@ def test_bad_llm_reply_writes_nothing(tmp_path: Path) -> None:
     assert executor.files["proj/src/foo.py"] == "print(0)\n"       # unchanged, no partial garbage
     assert executor.writes == []
     assert state["workflow_status"] == "refactored"
+
+
+def test_writes_a_refactoring_report(tmp_path: Path) -> None:
+    # Every run persists a Markdown report next to the Code Review report
+    # (reports/<project>-<run>/refactoring-report.md) and records its path + content in state.
+    executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/foo.py")]))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    report_path = Path(state["refactoring_report_path"])
+    assert report_path.name == "refactoring-report.md"
+    assert report_path.parent.name == "proj-r1"                    # same run folder as code review
+    report = report_path.read_text(encoding="utf-8")
+    assert report == state["refactoring_report"]
+    assert "# Refactoring Report" in report
+    assert "src/foo.py" in report                                  # the edited file is listed
+    assert "| Run ID | r1 |" in report
+
+
+def test_report_written_even_when_findings_unavailable() -> None:
+    # The early-exit paths still leave a report explaining WHY nothing was refactored.
+    executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
+    state = _state()  # no review_findings_path
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    assert state["refactored_files"] == []                         # publish step will be a no-op
+    report = Path(state["refactoring_report_path"]).read_text(encoding="utf-8")
+    assert "findings unavailable" in report
+    assert "(no files were edited)" in report
+
+
+def test_report_folder_matches_code_review_when_project_id_is_empty(tmp_path: Path) -> None:
+    # CodeReviewAgent falls back to run_id when project_id is falsy (code_review.py's
+    # `project_id or run_id or "project"`, applied BEFORE slugging) — the refactoring report must
+    # land in the SAME run folder, not a different "run-<id>" folder from a bare `_slug("")`.
+    executor = FakeExecutor(files={"abc123/src/foo.py": "print(0)\n"})
+    state = _state(project_id="", run_id="abc123",
+                    review_findings_path=_findings_file(tmp_path, [_open("src/foo.py")]))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    report_path = Path(state["refactoring_report_path"])
+    assert report_path.parent.name == "abc123-abc123"       # matches CodeReviewAgent._finish's folder
 
 
 def test_defers_files_over_the_fan_out_cap(tmp_path: Path) -> None:
