@@ -216,6 +216,20 @@ def test_report_written_even_when_findings_unavailable() -> None:
     assert "(no files were edited)" in report
 
 
+def test_report_folder_matches_code_review_when_project_id_is_empty(tmp_path: Path) -> None:
+    # CodeReviewAgent falls back to run_id when project_id is falsy (code_review.py's
+    # `project_id or run_id or "project"`, applied BEFORE slugging) — the refactoring report must
+    # land in the SAME run folder, not a different "run-<id>" folder from a bare `_slug("")`.
+    executor = FakeExecutor(files={"abc123/src/foo.py": "print(0)\n"})
+    state = _state(project_id="", run_id="abc123",
+                    review_findings_path=_findings_file(tmp_path, [_open("src/foo.py")]))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    report_path = Path(state["refactoring_report_path"])
+    assert report_path.parent.name == "abc123-abc123"       # matches CodeReviewAgent._finish's folder
+
+
 def test_defers_files_over_the_fan_out_cap(tmp_path: Path) -> None:
     # More findings-bearing files than the cap: the first MAX_FILES_PER_RUN are fixed, the rest are
     # REPORTED as deferred (not silently dropped or processed). Zero-padded names keep sort order.

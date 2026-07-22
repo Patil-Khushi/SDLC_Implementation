@@ -163,14 +163,23 @@ def refactoring_publish_node(state: WorkflowState) -> WorkflowState:
                 f"[publish] {message} pushed to '{branch}'" + ("" if ok else " (PUSH FAILED)") + "\n"
             )
         else:
-            executor.git_commit(project_dir, message)  # LLM never forms/executes this call (rule 2)
+            res = executor.git_commit(project_dir, message)  # LLM never forms/executes this (rule 2)
+            ok = bool(getattr(res, "committed", False))
+            if not ok:
+                logger.warning(
+                    "[publish] refactoring local commit FAILED for run %s: %s",
+                    state.get("run_id"),
+                    (getattr(res, "stderr", "") or getattr(res, "stdout", "")).strip()[:200],
+                )
             state["generation_summary"] = (state.get("generation_summary") or "") + (
-                f"[publish] {message} committed locally (push not available)\n"
+                f"[publish] {message} committed locally (push not available)"
+                + ("" if ok else " (COMMIT FAILED)") + "\n"
             )
     except Exception as exc:  # noqa: BLE001 - a publish failure must never crash the run
-        logger.exception("refactoring publish failed for run %s", state.get("run_id"))
+        action = "push" if (push and hasattr(executor, "publish_feature")) else "local commit"
+        logger.exception("refactoring %s failed for run %s", action, state.get("run_id"))
         state["generation_summary"] = (state.get("generation_summary") or "") + (
-            f"[publish] refactoring push FAILED: {exc}\n"
+            f"[publish] refactoring {action} FAILED: {exc}\n"
         )
     return state
 

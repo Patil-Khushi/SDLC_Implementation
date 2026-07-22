@@ -10,7 +10,7 @@ commit at all — the graph acceptance tests' "committed exactly once" invariant
 from typing import Any
 
 from app.graph.nodes import refactoring_publish_node
-from app.integrations.executor import FakeExecutor, RunResult, set_executor
+from app.integrations.executor import CommitResult, FakeExecutor, RunResult, set_executor
 
 
 class _PublishingExecutor(FakeExecutor):
@@ -96,6 +96,34 @@ def test_push_disabled_falls_back_to_fixed_path_commit() -> None:
     assert executor.published == []
     assert executor.commits == [("proj", "refactor(r1): apply code review fixes to 2 file(s)")]
     assert "committed locally" in state["generation_summary"]
+
+
+def test_failed_local_commit_is_noted_not_reported_as_success() -> None:
+    # git_commit does not raise on failure — it returns CommitResult(committed=False, ...). The
+    # fallback branch must inspect that result, not blindly report "committed locally".
+    class _FailingCommitExecutor(FakeExecutor):
+        def git_commit(self, project_dir, message) -> CommitResult:
+            self.commits.append((str(project_dir), message))
+            return CommitResult(committed=False, stderr="fatal: bad identity", exit_code=1)
+
+    executor = _FailingCommitExecutor()
+    state = _run(executor, _state())  # push disabled -> fixed-path git_commit fallback
+
+    assert "(COMMIT FAILED)" in state["generation_summary"]
+
+
+def test_exception_on_fallback_commit_is_labeled_local_commit_not_push() -> None:
+    # The single except block must distinguish which action failed — a local-commit exception on
+    # the non-push fallback path must not be mislabeled "push FAILED" (misdirects triage).
+    class _ExplodingCommitExecutor(FakeExecutor):
+        def git_commit(self, project_dir, message) -> CommitResult:
+            raise RuntimeError("workspace repo missing")
+
+    executor = _ExplodingCommitExecutor()
+    state = _run(executor, _state())  # push disabled -> fixed-path git_commit fallback
+
+    assert "refactoring local commit FAILED: workspace repo missing" in state["generation_summary"]
+    assert "push FAILED" not in state["generation_summary"]
 
 
 def test_executor_without_publish_capability_commits_even_when_push_enabled() -> None:

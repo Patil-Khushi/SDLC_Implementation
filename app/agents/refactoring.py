@@ -303,9 +303,13 @@ class RefactoringAgent(BaseAgent):
         )
         state["refactoring_report"] = report
         try:
+            # Same fallback chain as CodeReviewAgent.execute (code_review.py) before slugging, so
+            # an empty/missing project_id resolves to run_id here exactly as it does there — both
+            # reports of a run always land in the SAME folder, never "run-<id>" vs "<id>-<id>".
+            project_id = state.get("project_id") or state.get("run_id") or "project"
             run_dir = (
                 Path(get_settings().reports_dir)
-                / f"{_slug(state.get('project_id') or '')}-{_slug(state.get('run_id') or 'run')}"
+                / f"{_slug(project_id)}-{_slug(state.get('run_id') or 'run')}"
             )
             run_dir.mkdir(parents=True, exist_ok=True)
             md_path = run_dir / "refactoring-report.md"
