@@ -29,6 +29,7 @@ the ``docker`` argv themselves.
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess  # nosec B404 - used only to drive the `docker` CLI with fixed, non-shell argv
 import uuid
@@ -40,6 +41,19 @@ from app.integrations.executor import RunResult
 
 # Where the repo is cloned inside the sandbox container.
 _REPO_DIR = "/work/repo"
+
+# The sandbox has network egress (see DockerReviewSandbox's docstring), so a repo_url reaching
+# `git clone` with no scheme/host check is a clone-anything primitive (internal hosts,
+# cloud-metadata-adjacent addresses, etc.) - SSRF-shaped. Restrict to public GitHub HTTPS URLs,
+# the only source any agent in this pipeline actually expects. Shared by every agent that clones
+# a repo (Code Review, Security, ...) so the allowlist can't drift between independent copies.
+_ALLOWED_REPO_RE = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+(?:\.git)?/?$")
+
+
+def is_allowed_repo_url(url: str) -> bool:
+    """True if `url` is a clone-able public GitHub HTTPS URL - the only kind any agent here
+    should ever pass to `ReviewSandbox.clone()`."""
+    return bool(_ALLOWED_REPO_RE.match(url or ""))
 
 
 class ReviewSandbox(ABC):

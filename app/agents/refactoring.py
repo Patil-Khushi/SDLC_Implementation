@@ -1,13 +1,25 @@
-"""Refactoring Agent (LLM + tools) — applies the fixes the code review named.
+"""Refactoring Agent (LLM + tools) — applies the fixes a review named, working like a coding agent.
 
-Runs AFTER Code Review (its producer). It reads the structured findings the review recorded
-(``review_findings_path`` — a JSON list), skips suppressed false positives, and then works like a
-coding agent: it runs ONE agentic tool loop — THROUGH ``self.llm.complete_with_tools`` (so this
-module imports no provider SDK) — where the model is given the findings plus ``read_file`` /
-``write_file`` tools scoped to ``<project_dir>/`` and EDITS the flagged files directly, iterating
-across them. The write tool records every touched path; edits land under the SAME
-``<project_dir>/`` prefix the code generator / repair path use, so the next agent (Debugging) sees
-the fixes on the shared exec-sandbox.
+Shared by TWO callers (see ``app/graph/router.py::route_after_refactoring`` for how the graph
+tells them apart):
+
+1. **Code Review's one-shot call** — right after Code Review, on the way to the debug/test loop.
+   Reads ``review_findings_path`` (a bare JSON list, ``finding_aggregator``-normalized).
+2. **The Security<->Refactoring loop** — after Security, capped at
+   ``router.SECURITY_LOOP_CAP`` attempts (``security_loop_attempt``, incremented here — see
+   ``execute``). Reads ``security_findings_path`` instead (a WRAPPED payload,
+   ``{"findings": [...]}`` — Semgrep's shape, with ``rule`` instead of ``rule_id`` and no
+   ``status``/``category``). ``security_verdict`` being present on state is exactly the signal
+   that distinguishes this call from the first: Security only ever runs after Code Review's call
+   has already happened once.
+
+Either way it reads the findings, skips suppressed false positives (Code Review's only — Security
+findings carry no suppression concept), and then runs ONE agentic tool loop — THROUGH
+``self.llm.complete_with_tools`` (so this module imports no provider SDK) — where the model is
+given the findings plus ``read_file`` / ``write_file`` tools scoped to ``<project_dir>/`` and
+EDITS the flagged files directly, iterating across them. The write tool records every touched
+path; edits land under the SAME ``<project_dir>/`` prefix the code generator / repair path use, so
+the next agent (Debugging, or Security re-scanning) sees the fixes on the shared exec-sandbox.
 
 Unlike the old one-shot-per-file rewrite, the model drives: it reads each file, applies only the
 fixes the findings call for, and moves on — no fixed JSON output contract. The agent itself never
@@ -16,12 +28,14 @@ commits the edited files and pushes them to the working branch (``dev``), so the
 can also fetch the refactored code from the remote, and the debug/test loop verifies it.
 
 It also persists a Markdown REPORT of the run (what was fixed / skipped / deferred / unreached)
-next to the Code Review report — ``reports/<project>-<run>/refactoring-report.md``.
+next to the Code Review report — ``reports/<project>-<run>/refactoring-report.md`` — regardless
+of which caller triggered the run.
 
 Owns: ``refactored_code`` (summary string), ``refactored_files`` (the edited paths — the publish
-node's input), ``refactoring_report`` / ``refactoring_report_path``, and its ``workflow_status``
-stamp. Reads ``review_findings_path`` (the review's structured findings JSON) and the code via
-the executor.
+node's input), ``refactoring_report`` / ``refactoring_report_path``, its ``workflow_status``
+stamp, and — only on a security-loop re-entry — the ``security_loop_attempt`` counter. Reads
+``review_findings_path`` OR ``security_findings_path`` (whichever caller triggered this run,
+see ``execute``) and the code via the executor.
 """
 
 from __future__ import annotations
@@ -64,17 +78,22 @@ class RefactoringAgent(BaseAgent):
         return self._executor if self._executor is not None else get_executor()
 
     def execute(self, state: WorkflowState) -> WorkflowState:
-        findings, load_error = self._load_findings(state)
+        in_security_loop = "security_verdict" in state
+        if in_security_loop:
+            # LOCAL counter for the Security<->Refactoring loop; never touches `attempt`,
+            # `repair_attempt`, or `debug_attempt`. NOT incremented on Code Review's one-shot call
+            # (in_security_loop is False there — security_verdict isn't set yet).
+            state["security_loop_attempt"] = int(state.get("security_loop_attempt", 0)) + 1
+
+        findings, load_error = self._load_findings(state, in_security_loop)
         if load_error is not None:
-            # The review's structured findings could not be loaded. Surface it as a real failure
-            # instead of a silent "nothing to do": refactoring was skipped because its input was
-            # missing/unreadable, NOT because the code was clean — a human needs to know.
-            state["refactored_code"] = (
-                f"Refactoring skipped — Code Review findings unavailable: {load_error}. No fixes applied."
-            )
+            # The findings could not be loaded. Surface it as a real failure instead of a silent
+            # "nothing to do": refactoring was skipped because its input was missing/unreadable,
+            # NOT because the code was clean — a human needs to know.
+            state["refactored_code"] = f"Refactoring skipped — findings unavailable: {load_error}. No fixes applied."
             state["refactored_files"] = []
             state["workflow_status"] = "needs_human_review"
-            self._write_report(state)
+            self._write_report(state, load_error=load_error)
             logger.error(
                 "refactoring: findings unavailable (%s) for run %s", load_error, state.get("run_id")
             )
@@ -83,7 +102,9 @@ class RefactoringAgent(BaseAgent):
         # Only OPEN findings are actionable. Skip Code Review's auto-suppressed false positives
         # (idiomatic test asserts via S101, known-safe auth constants, ...) — mirrors
         # code_review._split(). "Fixing" a suppressed finding would undo the review's own
-        # false-positive filtering and can break legitimate code (test files especially).
+        # false-positive filtering and can break legitimate code (test files especially). Security
+        # findings carry no "status" field at all, so this check is a no-op for them (never
+        # Suppressed) — every Semgrep finding is actionable.
         actionable = [
             f for f in findings
             if str(f.get("file", "")).strip() and f.get("status") != "Suppressed"
@@ -223,25 +244,42 @@ class RefactoringAgent(BaseAgent):
 
     # -- findings ------------------------------------------------------------
 
-    def _load_findings(self, state: WorkflowState) -> tuple[list[dict[str, Any]], str | None]:
-        """Load the review's structured findings from ``review_findings_path`` (the JSON list
-        written by ``CodeReviewAgent._finish``).
+    def _load_findings(
+        self, state: WorkflowState, in_security_loop: bool
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Load the structured findings to act on — the source depends on which caller invoked
+        this run (see the class docstring / ``execute``):
+
+        - Security-loop re-entry: ``security_findings_path`` — a WRAPPED payload
+          (``{"verdict": ..., "findings": [...]}``, written by ``SecurityAgent._finish``); the
+          findings themselves live under the ``"findings"`` key, not a bare list.
+        - Code Review's one-shot call: ``review_findings_path`` — a bare JSON list, already
+          ``finding_aggregator``-normalized, written by ``CodeReviewAgent._finish``.
 
         Returns ``(findings, error)``. On success ``error`` is None and ``findings`` may be empty
-        (a genuinely clean review). On a missing / unreadable / malformed path ``error`` carries a
-        human-readable reason so the caller can surface it rather than silently no-op.
+        (a genuinely clean review/scan). On a missing / unreadable / malformed path ``error``
+        carries a human-readable reason so the caller can surface it rather than silently no-op.
 
-        There is deliberately NO Markdown fallback: the persisted ``review_report`` renders findings
-        as Markdown tables (sections 4.1/4.2), not a parseable JSON block, so a "parse the report"
-        path would be dead code that masks a real upstream failure.
+        There is deliberately NO Markdown fallback: the persisted reports render findings as
+        Markdown (tables / prose), not a parseable JSON block, so a "parse the report" path would
+        be dead code that masks a real upstream failure.
         """
-        path = (state.get("review_findings_path") or "").strip()
+        if in_security_loop:
+            path = (state.get("security_findings_path") or "").strip()
+            source = "Security"
+        else:
+            path = (state.get("review_findings_path") or "").strip()
+            source = "Code Review"
         if not path:
-            return [], "no review_findings_path on state (Code Review did not record findings)"
+            return [], f"no findings path on state ({source} did not record findings)"
         try:
             raw = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             return [], f"could not read findings JSON at {path} ({type(exc).__name__})"
+        if in_security_loop and isinstance(raw, dict):
+            raw = raw.get("findings")
+            if raw is None:
+                return [], f'security findings payload at {path} is missing the "findings" key'
         if not isinstance(raw, list):
             return [], f"findings JSON at {path} is not a list"
         return [f for f in raw if isinstance(f, dict)], None
@@ -258,11 +296,12 @@ class RefactoringAgent(BaseAgent):
             blocks.append(f"File: {rel}\n{lines}")
         joined = "\n\n".join(blocks)
         return (
-            "The code review flagged the issues below. Fix them by EDITING the files directly with "
-            "the tools: call read_file to see a file's current content, then write_file to save the "
-            "corrected FULL file. Work through every file listed. Apply ONLY the fixes the findings "
-            "call for — do not rewrite unrelated code, restyle, or change behavior. Paths are "
-            "repo-relative; pass them exactly as shown (do not add any prefix).\n\n"
+            "The findings below were flagged (Code Review or Security, depending on which stage "
+            "called you). Fix them by EDITING the files directly with the tools: call read_file to "
+            "see a file's current content, then write_file to save the corrected FULL file. Work "
+            "through every file listed. Apply ONLY the fixes the findings call for — do not rewrite "
+            "unrelated code, restyle, or change behavior. Paths are repo-relative; pass them exactly "
+            "as shown (do not add any prefix).\n\n"
             f"{joined}\n\n"
             "When every fix has been written, reply with a one-line summary of what you changed."
         )
@@ -281,6 +320,7 @@ class RefactoringAgent(BaseAgent):
         deferred: list[str] | None = None,
         unreached: list[str] | None = None,
         notes: str = "",
+        load_error: str | None = None,
     ) -> None:
         """Render + persist the refactoring report, alongside the Code Review report.
 
@@ -300,6 +340,7 @@ class RefactoringAgent(BaseAgent):
             deferred=deferred or [],
             unreached=unreached or [],
             notes=notes,
+            load_error=load_error,
         )
         state["refactoring_report"] = report
         try:
@@ -333,6 +374,7 @@ def _render_report(
     deferred: list[str],
     unreached: list[str],
     notes: str,
+    load_error: str | None = None,
 ) -> str:
     """The Markdown refactoring report (sectioned like the Code Review report, but simpler)."""
     branch = (state.get("branch") or get_settings().working_branch or "").strip() or "-"
@@ -351,7 +393,14 @@ def _render_report(
     a(f"| Branch | {branch} |")
     a(f"| Refactored By | Refactoring Agent (automated) |")
     a(f"| Date | {date} |")
-    a(f"| Findings source | {state.get('review_findings_path') or '-'} |")
+    # security_findings_path only exists once Security has run (security-loop re-entry) — see
+    # execute()'s in_security_loop signal; falls back to Code Review's path otherwise. On a load
+    # error the path alone would misleadingly read as "no findings" — surface the error instead.
+    if load_error:
+        findings_path = f"<error: {load_error}>"
+    else:
+        findings_path = state.get("security_findings_path") or state.get("review_findings_path") or "-"
+    a(f"| Findings source | {findings_path} |")
     a(f"| Findings loaded | {findings_total} |")
     a(f"| Actionable (Open) | {actionable_count} |")
     a(f"| Suppressed (skipped) | {max(suppressed, 0)} |\n")
@@ -398,7 +447,9 @@ def _finding_line(f: dict[str, Any]) -> str:
     severity = f.get("severity") or "?"
     line = f.get("line")
     loc = f" line {line}" if line not in (None, 0, "") else ""
-    tag = " ".join(str(x) for x in (f.get("category"), f.get("rule_id")) if x).strip()
+    # rule_id: Code Review's finding_aggregator shape. rule: Security's raw Semgrep shape. Fall
+    # back to whichever is present so both sources render a useful tag.
+    tag = " ".join(str(x) for x in (f.get("category"), f.get("rule_id") or f.get("rule")) if x).strip()
     tag = f" ({tag})" if tag else ""
     msg = f.get("message") or f.get("tool_message") or ""
     return f"- [{severity}]{loc}{tag}: {msg}".rstrip()
@@ -436,6 +487,10 @@ _refactoring_agent = RefactoringAgent()
 
 def refactoring_node(state: WorkflowState) -> WorkflowState:
     logger.info("================ AGENT: Refactoring ================")
-    logger.info("   -> applying the code review's findings to the generated files "
-                "+ writing the refactoring report")
+    if "security_verdict" in state:
+        logger.info("   -> applying Security's findings (security-loop attempt %d) + writing the refactoring report",
+                    int(state.get("security_loop_attempt", 1)))
+    else:
+        logger.info("   -> applying the code review's findings to the generated files "
+                    "+ writing the refactoring report")
     return _refactoring_agent.execute(state)

@@ -1,0 +1,151 @@
+{
+  "$schema": "https://design-tokens.org/schema.json",
+  "name": "tic-tac-toe-design-tokens",
+  "version": "1.0.0",
+  "description": "Design tokens for the Tic-Tac-Toe application. Consumed by the implementation agent to drive CSS variables and component styling.",
+  "color": {
+    "background": {
+      "app": "#0f172a",
+      "surface": "#1e293b",
+      "board": "#111827",
+      "cell": "#1f2937",
+      "cellHover": "#374151"
+    },
+    "text": {
+      "primary": "#f8fafc",
+      "secondary": "#94a3b8",
+      "muted": "#64748b",
+      "onAccent": "#ffffff"
+    },
+    "marker": {
+      "x": "#38bdf8",
+      "o": "#fb7185"
+    },
+    "accent": {
+      "primary": "#6366f1",
+      "primaryHover": "#4f46e5",
+      "focusRing": "#818cf8"
+    },
+    "state": {
+      "win": "#22c55e",
+      "winBackground": "#14532d",
+      "draw": "#eab308"
+    },
+    "border": {
+      "default": "#334155",
+      "strong": "#475569"
+    }
+  },
+  "typography": {
+    "fontFamily": {
+      "base": "'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif",
+      "mono": "'JetBrains Mono', 'Courier New', monospace"
+    },
+    "fontSize": {
+      "xs": "0.75rem",
+      "sm": "0.875rem",
+      "base": "1rem",
+      "lg": "1.25rem",
+      "xl": "1.5rem",
+      "2xl": "2rem",
+      "marker": "3rem",
+      "title": "2.5rem"
+    },
+    "fontWeight": {
+      "regular": 400,
+      "medium": 500,
+      "semibold": 600,
+      "bold": 700
+    },
+    "lineHeight": {
+      "tight": 1.1,
+      "normal": 1.5
+    },
+    "letterSpacing": {
+      "tight": "-0.02em",
+      "wide": "0.05em"
+    }
+  },
+  "spacing": {
+    "none": "0",
+    "xs": "0.25rem",
+    "sm": "0.5rem",
+    "md": "1rem",
+    "lg": "1.5rem",
+    "xl": "2rem",
+    "2xl": "3rem",
+    "gridGap": "0.5rem"
+  },
+  "borderRadius": {
+    "none": "0",
+    "sm": "0.25rem",
+    "md": "0.5rem",
+    "lg": "0.75rem",
+    "xl": "1rem",
+    "full": "9999px",
+    "cell": "0.5rem",
+    "board": "1rem",
+    "button": "0.5rem"
+  },
+  "board": {
+    "size": "min(90vw, 420px)",
+    "columns": 3,
+    "rows": 3,
+    "gap": "0.5rem",
+    "padding": "0.5rem",
+    "background": "#111827"
+  },
+  "cell": {
+    "size": "min(28vw, 128px)",
+    "aspectRatio": "1 / 1",
+    "fontSize": "3rem",
+    "background": "#1f2937",
+    "backgroundHover": "#374151",
+    "borderRadius": "0.5rem"
+  },
+  "button": {
+    "primary": {
+      "background": "#6366f1",
+      "backgroundHover": "#4f46e5",
+      "color": "#ffffff",
+      "paddingX": "1.5rem",
+      "paddingY": "0.75rem",
+      "borderRadius": "0.5rem",
+      "fontSize": "1rem",
+      "fontWeight": 600
+    },
+    "secondary": {
+      "background": "transparent",
+      "backgroundHover": "#1e293b",
+      "color": "#f8fafc",
+      "border": "1px solid #334155",
+      "paddingX": "1.25rem",
+      "paddingY": "0.625rem",
+      "borderRadius": "0.5rem",
+      "fontSize": "1rem",
+      "fontWeight": 500
+    }
+  },
+  "shadow": {
+    "none": "none",
+    "sm": "0 1px 2px rgba(0, 0, 0, 0.3)",
+    "md": "0 4px 12px rgba(0, 0, 0, 0.35)",
+    "lg": "0 12px 32px rgba(0, 0, 0, 0.45)",
+    "board": "0 12px 32px rgba(0, 0, 0, 0.45)",
+    "focus": "0 0 0 3px rgba(129, 140, 248, 0.6)"
+  },
+  "transition": {
+    "fast": "120ms ease-out",
+    "base": "180ms ease-out",
+    "slow": "300ms ease-in-out",
+    "property": {
+      "cell": "background-color 120ms ease-out, transform 120ms ease-out",
+      "button": "background-color 180ms ease-out, box-shadow 180ms ease-out"
+    }
+  },
+  "breakpoint": {
+    "mobile": "480px",
+    "tablet": "768px",
+    "desktop": "1024px"
+  }
+}

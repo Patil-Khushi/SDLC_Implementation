@@ -1,0 +1,9 @@
+{
+  "artifact": "backend-structure.json",
+  "version": "1.0.0",
+  "note": "Tic-Tac-Toe is FRONTEND-ONLY. No controllers, services, entities, or database (see backend-project-structure.md). The tree is intentionally empty, so the planner produces no backend work items.",
+  "stack": {
+    "runtime": "none (static single-page app; optional health-only Node/Express server is out of scope for generation)"
+  },
+  "tree": {}
+}

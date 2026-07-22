@@ -17,6 +17,12 @@ REPAIR_CAP = 3
 #: code-generation loop and is already spent by the time this phase runs.
 DEBUG_CAP = 3
 
+#: Local cap for the Security<->Refactoring loop, at the very end of the run. Separate counter
+#: (``security_loop_attempt``) and separate cap from REPAIR_CAP/DEBUG_CAP above — this loop starts
+#: only after Code Gen, Debugging, and Unit Test have already finished, and reuses the SAME
+#: Refactoring agent/node Code Review's one-shot call uses (see ``route_after_refactoring``).
+SECURITY_LOOP_CAP = 3
+
 
 def route_after_select(state: WorkflowState) -> str:
     """After selecting: generate the next item, or auto-commit when the plan is exhausted.
@@ -68,12 +74,32 @@ def route_after_test_generate(state: WorkflowState) -> str:
 
 
 def route_after_test_run(state: WorkflowState) -> str:
-    """The test-run decision: all-pass → done (the graph maps this string to the real END
-    sentinel, not a node name); fail under cap → debugging; fail at cap → escalate
-    (needs_human_review)."""
+    """The test-run decision: all-pass → done (the graph maps this to ``documentation``, not the
+    real END sentinel — Documentation/Security/finalize still run); fail under cap → debugging;
+    fail at cap → escalate (needs_human_review)."""
     test_result = state.get("test_result")
     if test_result and test_result.get("passed"):
         return "done"
     if int(state.get("debug_attempt", 0)) < DEBUG_CAP:
         return "debugging"
     return "escalate"
+
+
+def route_after_security(state: WorkflowState) -> str:
+    """The run's decision after a scan: approved → finalize (open the dev -> main PR, then package
+    the zip output); changes_requested under the loop cap → refactoring (fixes Security's findings,
+    then loops back here to re-scan); changes_requested at the cap → escalate (needs_human_review,
+    no PR/zip) — the same terminal path a repair/debug cap-out uses."""
+    if state.get("security_verdict") == "approve":
+        return "finalize"
+    if int(state.get("security_loop_attempt", 0)) < SECURITY_LOOP_CAP:
+        return "refactoring"
+    return "escalate"
+
+
+def route_after_refactoring(state: WorkflowState) -> str:
+    """Refactoring is shared by two callers: Code Review's one-shot call (on the way to the
+    debug/test loop) and the Security<->Refactoring loop (repeated, capped). ``security_verdict``
+    is written only once Security has actually run — its presence on state is exactly the signal
+    that this call is a security-loop re-entry, not the original code-review-triggered one."""
+    return "security" if "security_verdict" in state else "debug_check"
