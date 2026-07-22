@@ -1,9 +1,10 @@
 """Refactoring agent: apply the fixes the code review named, written where the next agent looks.
 
 The agent reads the review's structured findings (``review_findings_path`` JSON), skips suppressed
-false positives, asks the LLM for corrected file content per file, and writes it back under the
-SAME ``<project_dir>/`` prefix the code generator / repair path use — so the downstream Debugging
-agent reads the fix where it expects it. It never commits or runs a gate. A missing/unreadable
+false positives, then runs an AGENTIC edit loop: the model is given ``read_file`` / ``write_file``
+tools scoped to ``<project_dir>/`` and edits the flagged files directly (like a coding agent),
+landing the fixes under the SAME prefix the code generator / repair path use — so the downstream
+Debugging agent reads them where it expects. It never commits or runs a gate. A missing/unreadable
 findings file is surfaced as ``needs_human_review``, not silently treated as "nothing to do".
 """
 
@@ -19,10 +20,10 @@ from app.integrations.executor import FakeExecutor
 
 
 class _StubLLM:
-    """Minimal gateway stand-in: returns a fix for whichever file the prompt is about.
-
-    By default it echoes the ``File: <path>`` line from the prompt (so a multi-file run fixes each
-    file distinctly); pass ``path=`` to force a specific returned path (e.g. the double-prefix case).
+    """Agentic gateway stand-in: parses the flagged files from the prompt and APPLIES a fix to each
+    by driving the ``write_file`` tool (reading first), mimicking how the real model edits files in
+    the tool loop. Only writes files it can read, so a not-found file is left untouched — as the
+    real model would. Pass ``path=`` to force the exact path written (the double-prefix case).
     """
 
     def __init__(self, content: str = "print(1)\n", path: str | None = None) -> None:
@@ -33,11 +34,15 @@ class _StubLLM:
     def complete_with_tools(self, prompt: str, *, system: str | None = None,
                             tools: list | None = None, max_iters: int = 4) -> str:
         self.prompts.append(prompt)
-        path = self._path
-        if path is None:
-            m = re.search(r"^File: (.+)$", prompt, re.MULTILINE)
-            path = m.group(1).strip() if m else "unknown"
-        return json.dumps({"files": [{"path": path, "content": self._content}], "notes": "x"})
+        by_name = {t.name: t for t in (tools or [])}
+        read, write = by_name.get("read_file"), by_name.get("write_file")
+        targets = [self._path] if self._path is not None else re.findall(r"^File: (.+)$", prompt, re.MULTILINE)
+        for f in targets:
+            if read is not None and str(read.handler(path=f)).startswith("ERROR"):
+                continue  # couldn't read it -> don't write (mirrors the real model)
+            if write is not None:
+                write.handler(path=f, content=self._content)
+        return "done"
 
 
 def _findings_file(tmp_path: Path, findings: list[dict[str, Any]]) -> str:

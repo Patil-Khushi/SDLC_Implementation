@@ -292,6 +292,90 @@ class LocalDiskExecutor(Executor):
             stdout=f"{commits} commit(s) on {base_branch}/{feature_branch}{note}", exit_code=0,
         )
 
+    # -- incremental live publish (repo appears early + per-feature pushes) --------------------
+
+    def _git(self, project_dir: StrPath, *args: str, env: dict[str, str] | None = None) -> RunResult:
+        """git with the configured commit identity, in ``project_dir``."""
+        return self.run_command(["git", *self._identity, *args], cwd=project_dir, env=env)
+
+    def _pat_env(self, token: str | None) -> dict[str, str] | None:
+        """Child env carrying the PAT (so gh/git push authenticate as it); None when no token."""
+        return {**os.environ, "GH_TOKEN": token, "GITHUB_TOKEN": token} if token else None
+
+    def _has_staged(self, project_dir: StrPath) -> bool:
+        return self.run_command(["git", "diff", "--cached", "--quiet"], cwd=project_dir).exit_code != 0
+
+    def publish_scaffold(
+        self, project_dir: StrPath, scaffold_files: Sequence[str], *,
+        base_branch: str = "main", remote: str, token: str | None = None,
+    ) -> RunResult:
+        """EARLY publish: commit the scaffold on ``base_branch``, create the GitHub repo, and push
+        ``base_branch`` — so the repo appears on GitHub BEFORE any feature is generated. ``remote``
+        is a GitHub ``owner/name`` slug (created via ``gh`` if absent) or a URL/path used directly.
+        Returns the push RunResult (exit_code 0 = pushed)."""
+        root = self._resolve(project_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        if not (root / ".git").is_dir():
+            self.run_command(["git", "init"], cwd=project_dir)
+        env = self._pat_env(token)
+        self._git(project_dir, "checkout", "-B", base_branch)
+        existing = [p for p in scaffold_files if (root / p).exists()]
+        if existing:
+            self._git(project_dir, "add", "--", *existing)
+        if self._has_staged(project_dir):
+            self._git(project_dir, "commit", "-m", "chore: initial project scaffold")
+        self.run_command(["git", "remote", "remove", "origin"], cwd=project_dir)  # ignore if absent
+        if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", remote or ""):  # owner/name slug
+            self.run_command(["gh", "auth", "setup-git"], cwd=project_dir, env=env)
+            vis = "--private" if self._private else "--public"
+            self.run_command(
+                ["gh", "repo", "create", remote, vis, "--source", ".", "--remote", "origin"],
+                cwd=project_dir, env=env,
+            )
+            self.run_command(["git", "remote", "remove", "origin"], cwd=project_dir)  # normalize
+            self.run_command(
+                ["git", "remote", "add", "origin", f"https://github.com/{remote}.git"], cwd=project_dir
+            )
+        else:  # a URL or local path (e.g. a bare repo in tests) — use directly
+            self.run_command(["git", "remote", "add", "origin", remote], cwd=project_dir)
+        return self.run_command(["git", "push", "-u", "origin", base_branch], cwd=project_dir, env=env)
+
+    def publish_feature(
+        self, project_dir: StrPath, message: str, paths: Sequence[str], *,
+        feature_branch: str = "dev", base_branch: str = "main", token: str | None = None,
+    ) -> RunResult:
+        """Commit ``paths`` as ONE feature commit on ``feature_branch`` and push it — called per work
+        item as it completes, so features stream to GitHub live. Assumes ``publish_scaffold`` already
+        created the repo + origin. Returns the push RunResult."""
+        env = self._pat_env(token)
+        exists = self.run_command(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{feature_branch}"], cwd=project_dir
+        ).exit_code == 0
+        if exists:
+            self._git(project_dir, "checkout", feature_branch)
+        else:  # first feature — branch dev off the scaffold on main
+            self._git(project_dir, "checkout", "-B", feature_branch)
+        root = self._resolve(project_dir)
+        existing = [p for p in paths if (root / p).exists()]
+        if existing:
+            self._git(project_dir, "add", "--", *existing)
+        if self._has_staged(project_dir):
+            self._git(project_dir, "commit", "-m", message)
+        return self.run_command(["git", "push", "-u", "origin", feature_branch], cwd=project_dir, env=env)
+
+    def publish_sweep(
+        self, project_dir: StrPath, *, feature_branch: str = "dev", token: str | None = None,
+    ) -> RunResult:
+        """Final catch-all: commit + push any files written but not captured by a per-feature push
+        (extras the model produced). No-op if the tree is clean. Returns the push (or no-op) result."""
+        env = self._pat_env(token)
+        self._git(project_dir, "checkout", feature_branch)
+        self._git(project_dir, "add", "-A")
+        if not self._has_staged(project_dir):
+            return RunResult(stdout="nothing to sweep", stderr="", exit_code=0)
+        self._git(project_dir, "commit", "-m", "chore: remaining generated files")
+        return self.run_command(["git", "push", "-u", "origin", feature_branch], cwd=project_dir, env=env)
+
     def publish(
         self, project_dir: StrPath, repo: str, *, private: bool = True, token: str | None = None
     ) -> RunResult:

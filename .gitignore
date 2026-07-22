@@ -42,3 +42,6 @@ app/workspace/*
 
 # === Demo --real mode output (real generated projects + their own git repos) ===
 generated/
+
+# === Code Review agent output (generated report.md + findings.json per run) ===
+reports/

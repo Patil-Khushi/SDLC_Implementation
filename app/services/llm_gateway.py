@@ -202,13 +202,23 @@ class LLMGateway:
 
     @staticmethod
     def _run_tool(tool: Any, tool_input: Any) -> Any:
-        """Dispatch a model tool-call to the underlying tool implementation."""
+        """Dispatch a model tool-call to the underlying tool implementation.
+
+        A tool that raises (e.g. ``read_file`` on a path that doesn't exist, or a failed
+        ``run_command``) must NOT crash the run: the tool loop is the model INSPECTING the
+        workspace, so a failure is ordinary feedback. Return the error as the tool_result content
+        so the model can recover — mirroring how a shell reports an error back to a human — instead
+        of letting the exception propagate up and abort the whole graph.
+        """
         if tool is None:
             return "unknown tool"
-        if hasattr(tool, "handler"):
-            return tool.handler(**tool_input) if isinstance(tool_input, dict) else tool.handler(tool_input)
-        if hasattr(tool, "invoke"):
-            return tool.invoke(tool_input)
+        try:
+            if hasattr(tool, "handler"):
+                return tool.handler(**tool_input) if isinstance(tool_input, dict) else tool.handler(tool_input)
+            if hasattr(tool, "invoke"):
+                return tool.invoke(tool_input)
+        except Exception as exc:  # noqa: BLE001 - surface as tool feedback, never crash the tool loop
+            return f"Error running tool {getattr(tool, 'name', '?')!r}: {type(exc).__name__}: {exc}"
         return "tool is not callable"
 
 
