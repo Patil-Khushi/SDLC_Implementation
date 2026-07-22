@@ -52,4 +52,6 @@ def start(request: StartRequest) -> StartResponse:
         unit_tests=final.get("unit_tests") or [],
         review_report=final.get("review_report") or "",
         review_report_path=final.get("review_report_path") or "",
+        refactoring_report=final.get("refactoring_report") or "",
+        refactoring_report_path=final.get("refactoring_report_path") or "",
     )

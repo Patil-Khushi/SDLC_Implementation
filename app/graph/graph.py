@@ -5,11 +5,12 @@ gate (files_complete ONLY — did it write every target file? no compile/build) 
 (no per-item commit) | repair→gate | escalate (failure). Once the plan is exhausted, the run
 auto-commits (one run-level commit), then the post-commit pipeline runs in this order: Code
 Review (clone the committed repo, run static analysis, write the report) → Refactoring (apply the
-fixes the review named, writing corrected files back to the shared exec-sandbox) → a
-Debugging<->Unit-Test loop (compile/build check → generate/run unit tests on the refactored code,
-with an LLM debugging repair path on failure). The run ends once the tests pass. NO human approval
-step anywhere. The fixed gate/check nodes are the router source; the local repair/debug caps live
-in router.py.
+fixes the review named, writing corrected files back to the shared exec-sandbox + a refactoring
+report) → Refactoring Publish (FIXED commit + push of the edited files to 'dev', so the Debugging
+agent can also pull the refactored code from the remote) → a Debugging<->Unit-Test loop
+(compile/build check → generate/run unit tests on the refactored code, with an LLM debugging
+repair path on failure). The run ends once the tests pass. NO human approval step anywhere. The
+fixed gate/check nodes are the router source; the local repair/debug caps live in router.py.
 
     scaffold → select → code_generator → gate ─┬─ pass ──────────────→ select (loop)
                   ▲                             ├─ fail, repair<CAP ─→ repair → gate
@@ -18,8 +19,8 @@ in router.py.
                   └── select: nothing left → commit
                                                   │
                                                   ▼
-                                             code_review → refactoring → debug_check
-                                                                              │
+                            code_review → refactoring → refactoring_publish → debug_check
+                                                                                   │
                                              debug_check ─┬─ pass, no tests yet ─→ unit_test_generate
                                                            ├─ pass, tests exist ──→ unit_test_run
                                                            ├─ fail, debug<CAP ────→ debugging → debug_check
@@ -32,9 +33,11 @@ in router.py.
 
 Code Review + Refactoring run ONCE, right after the run-level commit and BEFORE the debug/test
 loop, so the loop verifies the refactored code. Every escalate branch in the code-generation loop
-above bypasses the whole post-commit pipeline. Refactoring does not commit, push, or re-run any
-gate — downstream verification is the debug/test loop's job. Unit Testing is the final stage; a
-passing test run ends the run (workflow_status = "completed").
+above bypasses the whole post-commit pipeline. The Refactoring AGENT never forms a git call
+(rule 2) and runs no gate — the fixed refactoring_publish node right after it commits the edited
+files and pushes 'dev' (a no-op when nothing was edited); downstream verification is the
+debug/test loop's job. Unit Testing is the final stage; a passing test run ends the run
+(workflow_status = "completed").
 
 Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
 rework loop) is gone — a completed plan commits automatically. The escalation path still flags
@@ -83,6 +86,7 @@ def build_graph():
     graph.add_node("unit_test_run", nodes.unit_test_run_node)
     graph.add_node("code_review", nodes.code_review_node)
     graph.add_node("refactoring", refactoring_node)
+    graph.add_node("refactoring_publish", nodes.refactoring_publish_node)
 
     graph.add_edge(START, "scaffold")
     graph.add_edge("scaffold", "select")
@@ -126,7 +130,10 @@ def build_graph():
     )
     graph.add_edge("debugging", "debug_check")    # debugging → back to the fixed debug/build check
     graph.add_edge("code_review", "refactoring")  # review written → apply the fixes it named
-    graph.add_edge("refactoring", "debug_check")  # fixes applied → debug/test the refactored code
+    # fixes applied → FIXED commit+push of the edited files to 'dev' (rule 2; no-op when nothing
+    # was edited) → debug/test the refactored code
+    graph.add_edge("refactoring", "refactoring_publish")
+    graph.add_edge("refactoring_publish", "debug_check")
 
     # Checkpointer kept only so get_state(config) can read a finished run; there are no interrupts.
     return graph.compile(checkpointer=MemorySaver())

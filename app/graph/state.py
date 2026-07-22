@@ -83,6 +83,12 @@ class WorkflowState(TypedDict, total=False):
     review_report_path: str     # Code Review: where the report .md was saved (reports/…)
     review_findings_path: str   # Code Review: normalized verified-findings JSON (for Refactoring)
     refactored_code: str
+    # Refactoring: workspace-relative (project-prefixed) paths the agent EDITED this run — the
+    # input to the fixed refactoring_publish node (commit + push to 'dev'); empty when nothing
+    # was edited (clean review / early exit), which makes the publish step a no-op.
+    refactored_files: list[str]
+    refactoring_report: str        # Refactoring: the Markdown report content
+    refactoring_report_path: str   # Refactoring: where the report .md was saved (reports/…)
     unit_tests: list[str]                  # workspace-relative paths of test files written
     documentation: str
     security_report: str
