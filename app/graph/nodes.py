@@ -13,16 +13,26 @@ import re
 
 from app.agents.code_generator import CodeGeneratorAgent
 from app.agents.code_review import CodeReviewAgent
+from app.agents.documentation import DocumentationAgent
+from app.agents.security import SecurityAgent
 from app.agents.unit_test import UnitTestAgent
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
+from app.integrations.github import get_github_client
+from app.integrations.review_sandbox import is_allowed_repo_url
 from app.services.boilerplate import render_scaffold
+from app.services.packaging import build_project_zip
 
 logger = logging.getLogger(__name__)
 
 _code_generator = CodeGeneratorAgent()
 _code_review = CodeReviewAgent()
 _unit_test_agent = UnitTestAgent()
+_documentation_agent = DocumentationAgent()
+_security_agent = SecurityAgent()
+
+# owner/repo out of the same https://github.com/<owner>/<repo> form `is_allowed_repo_url` accepts.
+_OWNER_REPO_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
 
 def _stage(agent: str, doing: str) -> None:
@@ -236,11 +246,13 @@ def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
 def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic check for the Unit Test phase: ``test`` ONLY.
 
-    Unit Testing is the final stage of the post-commit pipeline (Code Review and Refactoring
-    already ran, before the debug/test loop). A pass here routes straight to END and stamps the
-    run's terminal ``workflow_status = "completed"``. An executor error is treated as a failing
-    check — recorded, not raised — mirroring ``gate_node``/``debug_check_node``. ``workflow_status``
-    is only set on the passing branch, mirroring how ``gate_node`` never sets it at all.
+    A pass here routes on to ``documentation`` (then ``security``, the run's actual final stage),
+    which stamp their own status; the "completed" set on the passing branch here is an
+    intermediate marker, immediately superseded later — kept mainly so a crash between nodes
+    still leaves a meaningful status rather than none at all. An executor error is treated as a
+    failing check — recorded, not raised — mirroring ``gate_node``/``debug_check_node``.
+    ``workflow_status`` is only set on the passing branch, mirroring how ``gate_node`` never sets
+    it at all.
     """
     _stage("Unit Testing", "running the generated test suite")
     executor = get_executor()
@@ -256,6 +268,93 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     state["test_result"] = {"passed": check["passed"], "checks": [check]}
     if check["passed"]:
         state["workflow_status"] = "completed"
+    return state
+
+
+def documentation_node(state: WorkflowState) -> WorkflowState:
+    """Pure LLM: generate project documentation from the final generated source."""
+    _stage("Documentation", "writing a README from the final generated source")
+    return _documentation_agent.execute(state)
+
+
+def security_node(state: WorkflowState) -> WorkflowState:
+    """Clone the repo into an ephemeral sandbox, run Semgrep, write the security report + verdict.
+
+    The run's actual final analysis stage. Needs ``repo_url``; when absent, writes a report noting
+    no repo (same graceful degradation as Code Review) — ``security_verdict`` still gets set (it
+    defaults to "approve" when there's nothing to scan), so routing always has a decision to make.
+    """
+    _stage("Security", f"cloning the repo and running Semgrep (repo_url={state.get('repo_url') or 'none'})")
+    return _security_agent.execute(state)
+
+
+def finalize_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic (never LLM-formed): Security approved, so open (or find) the
+    `dev -> main` pull request. Never merges — a human approves the merge on GitHub; this keeps a
+    shared remote safe. Reached only on ``security_verdict == "approve"`` (see
+    ``router.route_after_security``) — a ``changes_requested`` verdict escalates directly instead.
+    """
+    _stage("Finalize", "opening (or finding) the dev -> main pull request")
+    run_id = state.get("run_id") or "-"
+    repo_url = (state.get("repo_url") or "").strip()
+    head = (state.get("branch") or "dev").strip()
+
+    if not repo_url or not is_allowed_repo_url(repo_url):
+        logger.info("[finalize] run=%s | no repo_url / not an allowed GitHub URL - skipping PR", run_id)
+        state["finalize_status"] = "skipped"
+        return state
+
+    match = _OWNER_REPO_RE.match(repo_url)
+    if not match:
+        logger.warning("[finalize] run=%s | could not parse owner/repo from repo_url: %s", run_id, repo_url)
+        state["finalize_status"] = "skipped"
+        return state
+    owner, repo = match.group(1), match.group(2)
+
+    title = f"Security-approved: merge {head} into main"
+    body = (state.get("security_report") or "Security scan passed.")[:60000]
+    logger.info("[finalize] run=%s | opening PR %s -> main for %s/%s ...", run_id, head, owner, repo)
+    result = get_github_client().create_or_update_pull_request(owner, repo, head, "main", title, body)
+    if result.ok:
+        state["pr_url"] = result.url
+        state["finalize_status"] = "pr_created"
+        logger.info("[finalize] run=%s | PR ready: %s", run_id, result.url)
+    else:
+        state["finalize_status"] = "pr_failed"
+        logger.warning("[finalize] run=%s | PR failed: %s", run_id, result.error)
+    return state
+
+
+def package_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic: build the run's downloadable output — a zip of the generated project
+    plus its README/review/security reports. Runs after ``finalize`` regardless of whether the PR
+    call itself succeeded (a GitHub API hiccup shouldn't withhold the tangible zip output) — but
+    only on the approve path (``finalize`` is only reached when Security approved); a
+    ``changes_requested`` verdict escalates instead and never reaches packaging.
+
+    Sets the run's true terminal ``workflow_status = "completed"`` — ``unit_test_run_node``'s
+    earlier "completed" stamp is just an intermediate marker superseded here.
+    """
+    _stage("Package", "zipping the generated project + documentation for download")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    try:
+        path = build_project_zip(
+            executor=executor,
+            project_dir=project_dir,
+            generated_code=state.get("generated_code", []),
+            documentation=state.get("documentation", ""),
+            review_report=state.get("review_report", ""),
+            security_report=state.get("security_report", ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - a packaging failure must not crash a finished run
+        logger.exception("packaging failed for run %s", state.get("run_id"))
+        state["generation_summary"] = (state.get("generation_summary") or "") + f"[package] FAILED: {exc}\n"
+        state["workflow_status"] = "completed"
+        return state
+    state["package_path"] = path
+    state["workflow_status"] = "completed"
+    logger.info("[package] run=%s | zip ready: %s", state.get("run_id") or "-", path)
     return state
 
 

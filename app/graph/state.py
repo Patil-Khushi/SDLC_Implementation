@@ -91,6 +91,13 @@ class WorkflowState(TypedDict, total=False):
     security_verdict: str       # Security: "approve" | "changes_requested" — routing signal
     security_findings_path: str # Security: normalized Semgrep findings JSON (audit trail)
 
+    # --- finalize (dev -> main) + packaging ---
+    # Reached only on security_verdict == "approve" (see router.route_after_security);
+    # changes_requested escalates directly (needs_human_review) instead - no automated fix-it loop.
+    pr_url: str                  # finalize: URL of the created/updated dev->main PR
+    finalize_status: str         # finalize: "pr_created" | "pr_failed" | "skipped"
+    package_path: str            # package: local path of the zipped project + docs (the run's output)
+
     # --- Lifecycle ---
     workflow_status: str
 

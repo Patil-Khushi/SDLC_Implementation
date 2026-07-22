@@ -9,13 +9,18 @@ repair-cap failure ends the run flagged ``needs_human_review`` (no interrupt/pau
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
+import app.agents.security as security_module
+import app.graph.nodes as nodes_module
 from app.graph.graph import workflow
 from app.graph.router import REPAIR_CAP
 from app.graph.state import new_state
 from app.integrations.executor import FakeExecutor, set_executor
+from app.integrations.github import FakeGitHubClient
+from app.integrations.review_sandbox import FakeReviewSandbox
 from app.models import WorkItem
 from app.services import llm_gateway
 
@@ -70,11 +75,13 @@ def _stub_llm(monkeypatch):
     set_executor(None)
 
 
-def _invoke(executor: FakeExecutor, work_items: list[WorkItem], thread_id: str) -> dict:
+def _invoke(executor: FakeExecutor, work_items: list[WorkItem], thread_id: str, *, repo_url: str = "") -> dict:
     """Fresh invoke; runs to completion (no HITL pause) and returns the final state."""
     set_executor(executor)
     initial = new_state(run_id="run-1", attempt=7, project_id="p1")
     initial["work_items"] = work_items
+    if repo_url:
+        initial["repo_url"] = repo_url
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
     workflow.invoke(initial, config)
     return dict(workflow.get_state(config).values)
@@ -154,3 +161,67 @@ def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
     # scaffold logs, then the per-item plan, then the item's own outcome — in that order
     summary = final["generation_summary"]
     assert summary.index("[scaffold]") < summary.index("[plan]") < summary.index("[code_generator]")
+
+
+def test_documentation_and_security_run_after_code_review_on_the_happy_path() -> None:
+    # No repo_url is set (push disabled), so Code Review and Security both take their graceful
+    # "no repository" no-op path - but Documentation, Security, finalize, and package still ALL
+    # run, and the run's true terminal status ("completed") is set by package, not unit_test_run.
+    executor = FakeExecutor()
+    final = _invoke(executor, [LOGIN_ITEM], "t-full-pipeline")
+
+    assert final["workflow_status"] == "completed"
+    assert final["documentation"]  # Documentation ran and produced something (the stubbed LLM reply)
+    assert "No repository URL" in final["security_report"]
+    assert final["security_report_path"]
+    assert final["security_verdict"] == "approve"       # nothing to scan -> defaults to approve
+    assert final["finalize_status"] == "skipped"         # no repo_url -> finalize skips the PR
+    assert "pr_url" not in final
+    assert final["package_path"]                          # the zip was still built
+    assert Path(final["package_path"]).exists()
+
+
+def test_security_approve_opens_pr_and_builds_package(monkeypatch) -> None:
+    # A real, allowed repo_url + a clean Semgrep scan (no findings) -> Security approves ->
+    # finalize opens a PR via a FakeGitHubClient -> package zips the project. No Docker/network:
+    # Security's sandbox and the GitHub client are both faked for this run only.
+    def dispatch_complete(prompt, *, system=None, **kwargs):
+        if system and "Security step" in system:
+            return json.dumps({"executive_summary": "Clean scan, no issues.", "verdict": "approve"})
+        return CODEGEN_JSON
+
+    monkeypatch.setattr(llm_gateway.llm_gateway, "complete", dispatch_complete)
+    monkeypatch.setattr(
+        security_module, "get_review_sandbox",
+        lambda: FakeReviewSandbox(files={"main.py": "x = 1\n"}),  # semgrep finds nothing by default
+    )
+    fake_github = FakeGitHubClient()
+    monkeypatch.setattr(nodes_module, "get_github_client", lambda: fake_github)
+
+    executor = FakeExecutor()
+    final = _invoke(executor, [LOGIN_ITEM], "t-approve-finalize", repo_url="https://github.com/acme/generated-app")
+
+    assert final["workflow_status"] == "completed"
+    assert final["security_verdict"] == "approve"
+    assert final["finalize_status"] == "pr_created"
+    assert final["pr_url"] == "https://github.com/acme/generated-app/pull/1000"
+    assert fake_github.calls == [
+        {"owner": "acme", "repo": "generated-app", "head": "dev", "base": "main",
+         "title": "Security-approved: merge dev into main"}
+    ]
+    assert Path(final["package_path"]).exists()
+
+
+def test_security_changes_requested_escalates_no_pr_no_package() -> None:
+    # A disallowed repo_url makes Security take its deterministic "changes_requested" no-clone
+    # path — no Docker/sandbox needed. changes_requested routes straight to escalate: no PR, no
+    # zip. Refactoring already ran once, earlier, driven by Code Review's findings - Security's
+    # findings are advisory-only past that point (no automated fix-it loop back from here).
+    executor = FakeExecutor()
+    final = _invoke(executor, [LOGIN_ITEM], "t-security-escalate", repo_url="https://evil.com/acme/repo")
+
+    assert final["workflow_status"] == "needs_human_review"
+    assert final["security_verdict"] == "changes_requested"
+    assert "finalize_status" not in final
+    assert "pr_url" not in final
+    assert "package_path" not in final

@@ -7,9 +7,18 @@ auto-commits (one run-level commit), then the post-commit pipeline runs in this 
 Review (clone the committed repo, run static analysis, write the report) → Refactoring (apply the
 fixes the review named, writing corrected files back to the shared exec-sandbox) → a
 Debugging<->Unit-Test loop (compile/build check → generate/run unit tests on the refactored code,
-with an LLM debugging repair path on failure). The run ends once the tests pass. NO human approval
-step anywhere. The fixed gate/check nodes are the router source; the local repair/debug caps live
-in router.py.
+with an LLM debugging repair path on failure) → Documentation (writes a README from the final
+source) → Security (clones the repo again, runs Semgrep, writes a verdict). NO human approval
+step anywhere. The fixed gate/check nodes (and Security's verdict) are the router source; the
+local repair/debug caps live in router.py.
+
+Security's verdict drives the run's actual ending (``route_after_security``): ``approve`` →
+``finalize`` opens (or finds) a `dev -> main` pull request — it never auto-merges, a human
+approves that on GitHub — then ``package`` zips the generated project + README/review/security
+reports into one downloadable artifact. ``changes_requested`` → ``escalate``
+(``needs_human_review``, no PR/zip) — the same terminal path a repair/debug cap-out already uses.
+There is no automated fix-it loop back from Security: Refactoring already ran once, earlier,
+driven by Code Review's findings — Security's findings are advisory-only past that point.
 
     scaffold → select → code_generator → gate ─┬─ pass ──────────────→ select (loop)
                   ▲                             ├─ fail, repair<CAP ─→ repair → gate
@@ -26,15 +35,21 @@ in router.py.
                                                            └─ fail, debug>=CAP ───→ escalate → END
                                              unit_test_generate ─┬─ ok ──→ unit_test_run
                                                                  └─ fail → escalate → END
-                                             unit_test_run ─┬─ pass ─────────────→ END (completed)
+                                             unit_test_run ─┬─ pass ──→ documentation → security
                                                              ├─ fail, debug<CAP ─→ debugging → debug_check
                                                              └─ fail, debug>=CAP → escalate → END
+                                             security ─┬─ verdict=approve ──────→ finalize → package → END
+                                                        └─ changes_requested ───→ escalate → END
 
 Code Review + Refactoring run ONCE, right after the run-level commit and BEFORE the debug/test
 loop, so the loop verifies the refactored code. Every escalate branch in the code-generation loop
 above bypasses the whole post-commit pipeline. Refactoring does not commit, push, or re-run any
-gate — downstream verification is the debug/test loop's job. Unit Testing is the final stage; a
-passing test run ends the run (workflow_status = "completed").
+gate — downstream verification is the debug/test loop's job. Documentation/Security/finalize all
+degrade gracefully on a missing ``repo_url`` or a GitHub API hiccup rather than crashing the run;
+``package`` runs even if ``finalize``'s PR call failed, so a GitHub hiccup never withholds the
+tangible zip output. The run's true terminal ``workflow_status`` is set by ``package`` (approve
+path) or ``escalate`` (changes_requested path) — Unit Testing's earlier "completed" stamp is just
+an intermediate marker.
 
 Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
 rework loop) is gone — a completed plan commits automatically. The escalation path still flags
@@ -58,6 +73,7 @@ from app.graph.router import (
     route_after_codegen,
     route_after_debug_check,
     route_after_gate,
+    route_after_security,
     route_after_select,
     route_after_test_generate,
     route_after_test_run,
@@ -83,6 +99,10 @@ def build_graph():
     graph.add_node("unit_test_run", nodes.unit_test_run_node)
     graph.add_node("code_review", nodes.code_review_node)
     graph.add_node("refactoring", refactoring_node)
+    graph.add_node("documentation", nodes.documentation_node)
+    graph.add_node("security", nodes.security_node)
+    graph.add_node("finalize", nodes.finalize_node)
+    graph.add_node("package", nodes.package_node)
 
     graph.add_edge(START, "scaffold")
     graph.add_edge("scaffold", "select")
@@ -122,11 +142,18 @@ def build_graph():
     graph.add_conditional_edges(
         "unit_test_run",
         route_after_test_run,
-        {"done": END, "debugging": "debugging", "escalate": "escalate"},
+        {"done": "documentation", "debugging": "debugging", "escalate": "escalate"},
     )
     graph.add_edge("debugging", "debug_check")    # debugging → back to the fixed debug/build check
     graph.add_edge("code_review", "refactoring")  # review written → apply the fixes it named
     graph.add_edge("refactoring", "debug_check")  # fixes applied → debug/test the refactored code
+    graph.add_edge("documentation", "security")
+    graph.add_conditional_edges(
+        "security", route_after_security,
+        {"finalize": "finalize", "escalate": "escalate"},
+    )
+    graph.add_edge("finalize", "package")  # PR opened (or skipped/failed) → build the zip output
+    graph.add_edge("package", END)         # zip ready (or failed) → done
 
     # Checkpointer kept only so get_state(config) can read a finished run; there are no interrupts.
     return graph.compile(checkpointer=MemorySaver())

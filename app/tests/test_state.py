@@ -11,7 +11,7 @@ ALL_FIELDS = {
     "push_enabled", "git_remote", "git_token",
     "review_report", "review_report_path", "review_findings_path", "refactored_code", "unit_tests",
     "documentation", "security_report", "security_report_path", "security_verdict",
-    "security_findings_path",
+    "security_findings_path", "pr_url", "finalize_status", "package_path",
     "workflow_status",
 }
 
@@ -58,7 +58,7 @@ def test_new_state_leaves_downstream_outputs_unset() -> None:
     state = new_state(run_id="r", attempt=0)
     for field in ("review_report", "refactored_code", "unit_tests", "documentation", "security_report",
                   "security_report_path", "security_verdict", "security_findings_path",
-                  "tests_ok", "test_result"):
+                  "pr_url", "finalize_status", "package_path", "tests_ok", "test_result"):
         assert field not in state
 
 
