@@ -163,8 +163,12 @@ class Executor(ABC):
         """Read-only ``git diff`` output for ``project_dir``."""
 
     @abstractmethod
-    def install_package(self, project_dir: StrPath, package: str) -> RunResult:
-        """Install a dependency from a package registry (workspace-scoped in the real sandbox)."""
+    def install_package(self, project_dir: StrPath, package: str, manager: str = "pip") -> RunResult:
+        """Install a dependency from a package registry (workspace-scoped in the real sandbox).
+
+        ``manager`` is ``"pip"`` (default) or ``"npm"`` — a MERN/Node work item's repair path
+        needs npm installs too; defaulting to "pip" keeps every existing (2-arg) call site working.
+        """
 
     # -- fixed-path checks ---------------------------------------------------
 
@@ -234,11 +238,15 @@ class Executor(ABC):
         return [
             RepairTool(
                 name="install_package",
-                description="Install a dependency from a package registry.",
+                description="Install a dependency from a package registry (pip or npm).",
                 handler=self.install_package,
                 input_schema={
                     "type": "object",
-                    "properties": {**project_arg, "package": {"type": "string"}},
+                    "properties": {
+                        **project_arg,
+                        "package": {"type": "string"},
+                        "manager": {"type": "string", "enum": ["pip", "npm"], "default": "pip"},
+                    },
                     "required": ["project_dir", "package"],
                 },
             ),
@@ -316,7 +324,7 @@ class FakeExecutor(Executor):
         self._run_result = run_result or RunResult(stdout="", stderr="", exit_code=0)
         self._install_result = install_result or RunResult(stdout="", stderr="", exit_code=0)
         self.commands: list[list[str]] = []
-        self.installs: list[tuple[str, str]] = []
+        self.installs: list[tuple[str, str, str]] = []
         self.commits: list[tuple[str, str]] = []
         self.writes: list[str] = []
         self._commit_seq = 0
@@ -355,8 +363,8 @@ class FakeExecutor(Executor):
     def git_diff(self, project_dir: StrPath) -> str:
         return self._diff_text
 
-    def install_package(self, project_dir: StrPath, package: str) -> RunResult:
-        self.installs.append((str(project_dir), package))
+    def install_package(self, project_dir: StrPath, package: str, manager: str = "pip") -> RunResult:
+        self.installs.append((str(project_dir), package, manager))
         return self._install_result
 
     def files_complete(self, project_dir: StrPath, target_files: Sequence[str]) -> CheckResult:
@@ -491,8 +499,8 @@ class MCPExecutor(Executor):
     def git_diff(self, project_dir: StrPath) -> str:
         return _as_text(self._invoke("git_diff", {"project_dir": str(project_dir)}))
 
-    def install_package(self, project_dir: StrPath, package: str) -> RunResult:
-        d = _as_dict(self._invoke("install_package", {"name": package, "manager": "pip", "cwd": str(project_dir)}))
+    def install_package(self, project_dir: StrPath, package: str, manager: str = "pip") -> RunResult:
+        d = _as_dict(self._invoke("install_package", {"name": package, "manager": manager, "cwd": str(project_dir)}))
         return RunResult(
             stdout=str(d.get("stdout", "")),
             stderr=str(d.get("stderr", "")),
@@ -520,9 +528,15 @@ class MCPExecutor(Executor):
             return CheckResult(name="files_complete", passed=False, stderr=f"missing required files: {', '.join(missing)}")
         return CheckResult(name="files_complete", passed=True)
 
+    def _npm_install(self, project_dir: StrPath) -> RunResult:
+        return self.run_command(["npm", "install", "--no-audit", "--no-fund"], cwd=project_dir)
+
     def compile(self, project_dir: StrPath) -> CheckResult:
         results = [("py", self.run_command(["python", "-m", "compileall", "-q", "."], cwd=project_dir))]
         if self._exists(project_dir, "tsconfig.json"):  # frontend
+            # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all — unlike
+            # compileall (syntax-only, no import resolution), so node_modules must exist first.
+            results.append(("npm-install", self._npm_install(project_dir)))
             results.append(("tsc", self.run_command(["npx", "tsc", "--noEmit"], cwd=project_dir)))
         return self._aggregate("compile", results)
 
@@ -534,6 +548,10 @@ class MCPExecutor(Executor):
                 cwd=project_dir,
             )))
         if self._exists(project_dir, "package.json"):
+            # Mirrors the pip branch above: install before building. Without this, `npm run
+            # build` always fails on a fresh checkout (no node_modules) — a repro found by
+            # running the real fixed checks against a real generated project (fixture-run-dev).
+            results.append(("npm-install", self._npm_install(project_dir)))
             results.append(("npm", self.run_command(["npm", "run", "build", "--if-present"], cwd=project_dir)))
         return self._aggregate("build", results) if results else CheckResult(name="build", passed=True)
 

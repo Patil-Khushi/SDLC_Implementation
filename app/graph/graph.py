@@ -7,9 +7,10 @@ auto-commits (one run-level commit), then the post-commit pipeline runs in this 
 Review (clone the committed repo, run static analysis, write the report) → Refactoring (apply the
 fixes the review named, writing corrected files back to the shared exec-sandbox) → a
 Debugging<->Unit-Test loop (compile/build check → generate/run unit tests on the refactored code,
-with an LLM debugging repair path on failure). The run ends once the tests pass. NO human approval
-step anywhere. The fixed gate/check nodes are the router source; the local repair/debug caps live
-in router.py.
+with an LLM debugging repair path on failure) → Finalize (commit + push whatever Code
+Review/Refactoring/Debugging/Unit Testing changed, since none of them commit on their own). The
+run ends once Finalize completes. NO human approval step anywhere. The fixed gate/check nodes are
+the router source; the local repair/debug caps live in router.py.
 
     scaffold → select → code_generator → gate ─┬─ pass ──────────────→ select (loop)
                   ▲                             ├─ fail, repair<CAP ─→ repair → gate
@@ -26,15 +27,17 @@ in router.py.
                                                            └─ fail, debug>=CAP ───→ escalate → END
                                              unit_test_generate ─┬─ ok ──→ unit_test_run
                                                                  └─ fail → escalate → END
-                                             unit_test_run ─┬─ pass ─────────────→ END (completed)
+                                             unit_test_run ─┬─ pass ─────────────→ finalize → END (completed)
                                                              ├─ fail, debug<CAP ─→ debugging → debug_check
                                                              └─ fail, debug>=CAP → escalate → END
 
 Code Review + Refactoring run ONCE, right after the run-level commit and BEFORE the debug/test
 loop, so the loop verifies the refactored code. Every escalate branch in the code-generation loop
-above bypasses the whole post-commit pipeline. Refactoring does not commit, push, or re-run any
-gate — downstream verification is the debug/test loop's job. Unit Testing is the final stage; a
-passing test run ends the run (workflow_status = "completed").
+above bypasses the whole post-commit pipeline. Refactoring does not commit or re-run any gate —
+downstream verification is the debug/test loop's job, and Finalize is what actually persists its
+(and Debugging's and Unit Testing's) changes. Finalize is the terminal stage; it stamps
+workflow_status = "completed" (or "push_failed"/"commit_failed" if persisting the already-passing
+result fails).
 
 Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
 rework loop) is gone — a completed plan commits automatically. The escalation path still flags
@@ -81,6 +84,7 @@ def build_graph():
     graph.add_node("debugging", debugging_node)
     graph.add_node("unit_test_generate", nodes.unit_test_generate_node)
     graph.add_node("unit_test_run", nodes.unit_test_run_node)
+    graph.add_node("finalize", nodes.finalize_node)
     graph.add_node("code_review", nodes.code_review_node)
     graph.add_node("refactoring", refactoring_node)
 
@@ -122,8 +126,9 @@ def build_graph():
     graph.add_conditional_edges(
         "unit_test_run",
         route_after_test_run,
-        {"done": END, "debugging": "debugging", "escalate": "escalate"},
+        {"done": "finalize", "debugging": "debugging", "escalate": "escalate"},
     )
+    graph.add_edge("finalize", END)               # persist the passing result → done
     graph.add_edge("debugging", "debug_check")    # debugging → back to the fixed debug/build check
     graph.add_edge("code_review", "refactoring")  # review written → apply the fixes it named
     graph.add_edge("refactoring", "debug_check")  # fixes applied → debug/test the refactored code

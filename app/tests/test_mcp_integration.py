@@ -42,3 +42,19 @@ def test_run_command_and_compile_against_sandbox() -> None:
     # 3. repair tools never expose git_commit (rule 2)
     names = {getattr(t, "name", None) for t in executor.get_repair_tools()}
     assert "git_commit" not in names
+
+
+def test_build_installs_npm_deps_before_running_the_build_script() -> None:
+    """Regression: build() used to run `npm run build` with no `npm install` first, so it always
+    failed on a fresh checkout (no node_modules) — found by running the real fixed checks against
+    a real generated project (fixture-run-dev) rather than FakeExecutor's scripted scenarios."""
+    try:
+        executor = _connect()
+    except Exception as exc:
+        pytest.skip(f"exec-sandbox not reachable: {exc}")
+
+    executor.write_file("npmproj/package.json", '{"name":"npmproj","version":"1.0.0",'
+                         '"scripts":{"build":"node -e \\"require(\'left-pad\')\\""},'
+                         '"dependencies":{"left-pad":"^1.3.0"}}\n')
+    check = executor.build("npmproj")
+    assert check.passed, check.stderr

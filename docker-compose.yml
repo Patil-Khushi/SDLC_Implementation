@@ -1,18 +1,23 @@
-# Implementation service — local static-analysis stack for the Code Review agent.
-#
-# This compose file is SCOPED TO THIS MICROSERVICE (like its own .env). The repo-root
-# docker-compose.yml owns the shared exec-sandbox infra; SonarQube is a dependency of this
-# service's review stage only, so it lives here.
+# Implementation service — local static-analysis stack for the Code Review agent, PLUS the
+# exec-sandbox the Debugging/Unit-Test loop runs against.
 #
 # What it runs:
-#   * sonarqube  — SonarQube Community Build (free, no LOC limit). Web UI + API on :9000.
-#   * sonar-db   — a DEDICATED PostgreSQL for SonarQube (never the H2 dev DB, which does not
-#                  persist). Isolated from the app's own database on purpose.
+#   * sonarqube     — SonarQube Community Build (free, no LOC limit). Web UI + API on :9000.
+#   * sonar-db      — a DEDICATED PostgreSQL for SonarQube (never the H2 dev DB, which does not
+#                     persist). Isolated from the app's own database on purpose.
+#   * egress-proxy  — Squid proxy; the ONLY route exec-sandbox has to the internet (PyPI/npm only,
+#                     see tools/exec-sandbox/squid.conf). No path to git remotes/GitHub.
+#   * exec-sandbox  — the container app/integrations/executor.py::MCPExecutor talks to over MCP
+#                     (SANDBOX_MCP_URL, default http://localhost:8080/mcp). Runs the fixed-path
+#                     compile/build/test checks + the repair-path tools (install_package,
+#                     run_command, read_file, git_status/diff) for the Debugging<->Unit-Test loop.
 #
 # Usage (from services/implementation/):
 #   docker compose up -d
-#   # first boot takes ~1-2 min; then open http://localhost:9000 (admin / admin, change it)
-#   # create a project + generate a user token, then set SONARQUBE_* in .env (see .env.example)
+#   # SonarQube: first boot takes ~1-2 min; open http://localhost:9000 (admin/admin, change it),
+#   # create a project + generate a user token, then set SONARQUBE_* in .env (see .env.example).
+#   # exec-sandbox: set SANDBOX_ENABLED=true in .env once it's up; verify with
+#   #   SANDBOX_MCP_URL=http://localhost:8080/mcp pytest app/tests/test_mcp_integration.py
 #
 # NOTE (Linux hosts / Docker Desktop WSL2): SonarQube embeds Elasticsearch, which needs
 #   vm.max_map_count >= 262144. If sonarqube exits on boot, run on the host:
@@ -53,9 +58,57 @@ services:
     networks:
       - sonar
 
+  # Squid proxy — the only member of BOTH networks below, so it's the sole path exec-sandbox has
+  # to the outside world. squid.conf allowlists PyPI + npm only (no github.com — push is host-side).
+  egress-proxy:
+    image: ubuntu/squid:latest
+    container_name: impl-egress-proxy
+    volumes:
+      - ./tools/exec-sandbox/squid.conf:/etc/squid/squid.conf:ro
+    networks:
+      - sandbox-internal
+      - sandbox-egress
+
+  exec-sandbox:
+    build:
+      context: ./tools/exec-sandbox
+    container_name: impl-exec-sandbox
+    depends_on:
+      - egress-proxy
+    environment:
+      HTTP_PROXY: http://egress-proxy:3128
+      HTTPS_PROXY: http://egress-proxy:3128
+      NO_PROXY: localhost,127.0.0.1
+    networks:
+      - sandbox-internal   # `internal: true` — no direct route out AND no publishable host port
+                            # (Docker disables port-publishing on internal networks entirely); see
+                            # sandbox-gateway below for host reachability.
+
+  # `internal: true` (above) means exec-sandbox itself can't publish a host port — Docker refuses
+  # to set up the DNAT rule for a container with no non-internal network. This is a dumb TCP relay
+  # (no code execution, no untrusted input) so it being reachable from the internet is not a
+  # meaningful egress-lockdown concern: it's on sandbox-internal (to reach exec-sandbox) AND
+  # sandbox-egress (non-internal, so its published port actually works).
+  sandbox-gateway:
+    image: alpine/socat:latest
+    container_name: impl-sandbox-gateway
+    command: ["tcp-listen:8080,fork,reuseaddr", "tcp:exec-sandbox:8080"]
+    depends_on:
+      - exec-sandbox
+    ports:
+      - "8080:8080"
+    networks:
+      - sandbox-internal
+      - sandbox-egress
+
 networks:
   sonar:
     driver: bridge
+  sandbox-egress:
+    driver: bridge
+  sandbox-internal:
+    driver: bridge
+    internal: true
 
 volumes:
   sonarqube_data:

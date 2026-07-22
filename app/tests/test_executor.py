@@ -97,7 +97,7 @@ def test_repair_tools_read_and_inspect() -> None:
     assert tools["git_status"].handler("proj") == "clean"
     assert tools["git_diff"].handler("proj") == "+1 -0"
     assert tools["install_package"].handler("proj", "requests").ok is True
-    assert executor.installs == [("proj", "requests")]
+    assert executor.installs == [("proj", "requests", "pip")]
 
 
 def test_repair_tools_have_input_schemas() -> None:

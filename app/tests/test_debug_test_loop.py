@@ -15,11 +15,12 @@ never does), and separately counts ``complete_with_tools`` calls (the Debugging 
 entry point — see app/agents/debugging.py) so a test can assert "debugging ran exactly once"
 independent of "unit-test generation ran exactly once".
 
-The post-commit order is: commit -> code_review -> refactoring -> Debugging<->Unit-Test loop
-(see app/graph/graph.py). Code Review + Refactoring run first (no-op here: no ``repo_url`` to
-clone, so review writes a graceful "no repository URL" report and empty findings, and refactoring
-finds nothing to apply), THEN the debug/test loop verifies the (unchanged) code. A passing
-unit_test_run is the terminal stage and stamps ``workflow_status = "completed"``.
+The post-commit order is: commit -> code_review -> refactoring -> Debugging<->Unit-Test loop ->
+finalize (see app/graph/graph.py). Code Review + Refactoring run first (no-op here: no
+``repo_url`` to clone, so review writes a graceful "no repository URL" report and empty findings,
+and refactoring finds nothing to apply), THEN the debug/test loop verifies the (unchanged) code. A
+passing unit_test_run routes to finalize, which commits the loop's own changes (a second
+``git_commit`` beyond ``commit_node``'s run-level one) and stamps ``workflow_status = "completed"``.
 
 Covers (CLAUDE.md / app/graph/router.py's ``DEBUG_CAP = 3``):
 1. Happy path: compile/build + tests all pass first try -> terminal "completed".
@@ -111,15 +112,15 @@ def test_happy_path_compile_build_and_tests_pass_first_try(stub_llm) -> None:
     executor = FakeExecutor()
     final = _invoke(executor, "t-happy")
 
-    # commit -> code_review (no-op, no repo_url) -> refactoring (no-op) -> debug/test loop passes;
-    # unit_test_run is the terminal stage and stamps "completed" — see graph.py.
+    # commit -> code_review (no-op, no repo_url) -> refactoring (no-op) -> debug/test loop passes
+    # -> finalize; finalize is the terminal stage and stamps "completed" — see graph.py.
     assert final["workflow_status"] == "completed"
     assert final["debug_result"]["passed"] is True
     assert final["test_result"]["passed"] is True
     assert final["unit_tests"]                                   # non-empty
     assert stub_llm.debug_calls == 0                              # never entered the debugging path
     assert final.get("debug_attempt", 0) == 0
-    assert len(executor.commits) == 1                             # single run-level commit
+    assert len(executor.commits) == 2                             # commit_node's + finalize_node's
 
 
 def test_compile_build_fails_once_then_passes(stub_llm) -> None:

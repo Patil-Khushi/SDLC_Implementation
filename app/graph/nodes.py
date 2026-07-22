@@ -236,11 +236,11 @@ def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
 def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic check for the Unit Test phase: ``test`` ONLY.
 
-    Unit Testing is the final stage of the post-commit pipeline (Code Review and Refactoring
-    already ran, before the debug/test loop). A pass here routes straight to END and stamps the
-    run's terminal ``workflow_status = "completed"``. An executor error is treated as a failing
-    check — recorded, not raised — mirroring ``gate_node``/``debug_check_node``. ``workflow_status``
-    is only set on the passing branch, mirroring how ``gate_node`` never sets it at all.
+    Unit Testing is the final CHECK of the post-commit pipeline (Code Review and Refactoring
+    already ran, before the debug/test loop). A pass here routes to ``finalize_node``, which owns
+    the terminal ``workflow_status``; a fail routes to ``debugging``/``escalate`` same as
+    ``debug_check_node``. An executor error is treated as a failing check — recorded, not raised —
+    mirroring ``gate_node``/``debug_check_node``.
     """
     _stage("Unit Testing", "running the generated test suite")
     executor = get_executor()
@@ -254,8 +254,73 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
         check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1}
 
     state["test_result"] = {"passed": check["passed"], "checks": [check]}
-    if check["passed"]:
-        state["workflow_status"] = "completed"
+    return state
+
+
+def finalize_node(state: WorkflowState) -> WorkflowState:
+    """FIXED commit step for the debug/test loop's pass edge (never formed by the LLM — rule 2).
+
+    Reached ONLY once ``unit_test_run`` passes. Code Review / Refactoring / Debugging / Unit
+    Testing all write directly to the workspace without committing (the repair-path rule: the LLM
+    proposes content, it never commits) — ``commit_node`` ran BEFORE any of them, so until this
+    node existed, every fix Debugging made and every test file Unit Testing wrote landed in the
+    workspace/sandbox but never in git and never on the pushed remote. This is the single place
+    that captures those changes, mirroring ``commit_node``'s own push-capability detection:
+
+    * If incremental live-publish is active (``push_enabled`` + a remote + the executor supports
+      ``publish_sweep``), sweep + push any changes made since ``commit_node``'s own sweep.
+    * Otherwise, a plain ``executor.git_commit`` — a local, best-effort commit (nothing to commit
+      is not an error; it just means Debugging/Refactoring/Unit Testing produced no net diff).
+
+    KNOWN GAP: ``MCPExecutor`` (the exec-sandbox path — ``SANDBOX_ENABLED=true`` / the real
+    ``POST /implementation/start`` API / ``run_fixture.py --sandbox``) has no publish/push method
+    at all, and that whole path never sets ``push_enabled``/``git_remote`` to begin with. So in
+    that path this always falls to the plain-commit branch: the unit tests DO get committed, but
+    only into the sandbox container's own local git history — nothing reaches the pushed GitHub
+    repo, so the Testing team won't see them. Only the demo CLI's default `--real` (LocalDiskExecutor)
+    mode actually pushes today. Fixing this needs either a host-side "export the finished workspace
+    out of the sandbox, then push with real git credentials" step, or opening the egress-proxy up to
+    github.com from inside the sandbox (the latter weakens the PyPI/npm-only lockdown on purpose —
+    avoid). Flagged, not fixed, as of 2026-07-22.
+
+    Stamps the run's terminal ``workflow_status``: ``"completed"`` on success, ``"push_failed"``/
+    ``"commit_failed"`` if the finalize step itself fails (an executor exception or a failed push)
+    — a failure HERE does not re-enter the debug/test loop; the checks already passed, this is
+    only about persisting that already-good result.
+    """
+    _stage("Finalize", "committing debug/refactor/test fixes and pushing if enabled")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
+
+    if push and hasattr(executor, "publish_sweep"):
+        try:
+            res = executor.publish_sweep(project_dir, token=state.get("git_token") or None)
+        except Exception as exc:  # noqa: BLE001 - a push failure must never crash the run
+            logger.exception("finalize: publish_sweep failed for run %s", state.get("run_id"))
+            state["generation_summary"] = (state.get("generation_summary") or "") + f"[finalize] push FAILED: {exc}\n"
+            state["workflow_status"] = "push_failed"
+            return state
+        ok = getattr(res, "exit_code", 1) == 0
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            "[finalize] debug/refactor/test fixes pushed to 'dev'" + ("" if ok else " (PUSH FAILED)") + "\n"
+        )
+        state["workflow_status"] = "completed" if ok else "push_failed"
+        return state
+
+    message = f"IMP-001 {state.get('run_id', 'run')}: debug/refactor/test fixes"
+    try:
+        result = executor.git_commit(project_dir, message)
+    except Exception as exc:  # noqa: BLE001 - a commit failure must never crash the run
+        logger.exception("finalize: git_commit failed for run %s", state.get("run_id"))
+        state["generation_summary"] = (state.get("generation_summary") or "") + f"[finalize] commit FAILED: {exc}\n"
+        state["workflow_status"] = "commit_failed"
+        return state
+    note = result.sha if result.committed else "no-op, nothing to commit"
+    state["generation_summary"] = (
+        state.get("generation_summary") or ""
+    ) + f"[finalize] committed debug/refactor/test fixes ({note})\n"
+    state["workflow_status"] = "completed"
     return state
 
 

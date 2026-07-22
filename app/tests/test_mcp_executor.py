@@ -15,8 +15,10 @@ class _FakeTool:
     def __init__(self, name: str, result: object = None) -> None:
         self.name = name
         self._result = result
+        self.calls: list[dict] = []
 
     async def ainvoke(self, args: dict) -> object:
+        self.calls.append(args)
         return self._result
 
 
@@ -51,6 +53,19 @@ def test_repair_tools_exclude_git_commit_and_write_file() -> None:
     assert repair_names == {"install_package", "read_file", "git_status", "git_diff", "run_command"}
     assert "git_commit" not in repair_names   # rule 2: LLM can never commit
     assert "write_file" not in repair_names   # repair proposes content; fixed code writes it
+
+
+def test_install_package_passes_through_the_requested_manager() -> None:
+    # Regression: install_package used to hardcode manager="pip" regardless of the caller's
+    # request, silently breaking npm installs for a MERN/Node work item's repair path.
+    tool = _FakeTool("install_package", {"stdout": "", "stderr": "", "exit_code": 0, "timed_out": False})
+    executor = MCPExecutor(client=None, tools=[tool])
+
+    executor.install_package("proj", "requests")
+    assert tool.calls[-1]["manager"] == "pip"  # default unchanged
+
+    executor.install_package("proj", "left-pad", manager="npm")
+    assert tool.calls[-1] == {"name": "left-pad", "manager": "npm", "cwd": "proj"}
 
 
 def test_repair_run_command_is_scoped_against_git_writes() -> None:

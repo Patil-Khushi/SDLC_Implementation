@@ -21,9 +21,9 @@ scaffold ─(push main early)─→ select ─┬─ code_generator → gate ─
                                        │                         └─ fail & repair≥3 → escalate → END
                                        └─ plan done → commit ──→ code_review → refactoring → debug_check
                                                                                                    │
-                                          debug_check ─┬─ pass → unit_test_generate → unit_test_run → END ("completed")
-                                                       ├─ fail & debug<3 → debugging → debug_check
-                                                       └─ fail & debug≥3 → escalate → END
+                                          debug_check ─┬─ pass → unit_test_generate → unit_test_run ─┬─ pass → finalize → END ("completed")
+                                                       ├─ fail & debug<3 → debugging → debug_check   ├─ fail & debug<3 → debugging → debug_check
+                                                       └─ fail & debug≥3 → escalate → END             └─ fail & debug≥3 → escalate → END
 ```
 
 ### The agents
@@ -35,7 +35,8 @@ scaffold ─(push main early)─→ select ─┬─ code_generator → gate ─
 | 2 | **Code Reviewer** | clones the pushed repo in a Docker sandbox, runs ruff + eslint + sonar-scanner, LLM writes the report | `review_report_path`, `review_findings_path` |
 | 3 | **Refactoring** | agentic edit loop — reads/edits the flagged files directly to apply the review's findings | `refactored_code` (+ edits files) |
 | 4 | **Debugging** | compile/build check; LLM fixes failures and re-checks (≤3) | `debug_result`, `debug_attempt` |
-| 5 | **Unit Testing** | generates + runs unit tests; a pass ends the run | `unit_tests`, `test_result`, `workflow_status` |
+| 5 | **Unit Testing** | generates + runs unit tests | `unit_tests`, `test_result` |
+| 6 | **Finalize** (no LLM) | a pass ends the run: commits (+ pushes, if live-publish is on) whatever Code Review/Refactoring/Debugging/Unit Testing changed | `workflow_status` |
 
 Each feature is committed + pushed to `dev` **as it is generated** (live incremental publish), so
 the GitHub repo fills in feature-by-feature during the run.
@@ -81,13 +82,22 @@ fields it wrote, live.
 1. **Python 3.12+** and the venv: `python -m venv .venv` then `./.venv/Scripts/python.exe -m pip install -r requirements.txt`
 2. **`.env`** (copy from `.env.example`): `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_BASE_URL`, `LLM_MODEL`; `GITHUB_PAT` + `GITHUB_OWNER` for publishing; `SONARQUBE_*` (optional, for Sonar findings).
 3. **Authenticated `gh` CLI** (`gh auth status`) — used to create + push the repo.
-4. **Docker / Rancher Desktop running** (dockerd/moby engine) — the Code Review sandbox runs in a container. Two one-time setup steps:
+4. **Docker / Rancher Desktop running** (dockerd/moby engine) — the Code Review sandbox runs in a container, and so does the exec-sandbox the Debugging/Unit-Test loop runs against.
    ```powershell
    # build the review sandbox image (git + ruff + eslint + sonar-scanner)
    docker build -t sdlc-review-sandbox:latest tools/review-sandbox
 
    # start SonarQube (Community) + its Postgres
-   docker compose up -d
+   docker compose up -d sonarqube sonar-db
+
+   # start the exec-sandbox (compile/build/test + repair tools) + its egress-locked network:
+   #   egress-proxy    — Squid; the ONLY route exec-sandbox has out (PyPI/npm only, no git remotes)
+   #   exec-sandbox    — runs the MCP server MCPExecutor connects to
+   #   sandbox-gateway — dumb TCP relay so the sandbox is reachable on localhost:8080 despite
+   #                     having no direct route out (see tools/exec-sandbox/ + docker-compose.yml)
+   docker compose up -d egress-proxy exec-sandbox sandbox-gateway
+   # then set SANDBOX_ENABLED=true in .env and verify with:
+   SANDBOX_MCP_URL=http://localhost:8080/mcp pytest app/tests/test_mcp_integration.py
    ```
    On WSL2 (incl. Rancher), SonarQube's Elasticsearch needs a raised map count, else the
    `impl-sonarqube` container exits on boot:
@@ -120,7 +130,8 @@ app/
   integrations/ executor.py (fixed/repair tools) · review_sandbox.py (Docker) · sonarqube.py
   tests/        pytest suites
 scripts/        run_fixture.py · run_pipeline.py · local_executor.py · demo_server.py
-tools/          review-sandbox/ (Dockerfile + eslint config for the Code Review container)
+tools/          review-sandbox/ (Code Review container) · exec-sandbox/ (MCP server the
+                Debugging/Unit-Test loop's MCPExecutor runs against; squid.conf egress allowlist)
 reports/        generated review reports (<project>-<run>/report.md + findings.json)
 ```
 
@@ -144,5 +155,14 @@ pre-existing failures (missing fixtures), unrelated to the pipeline.
 
 - **No human-in-the-loop inside the graph** — a completed plan auto-commits; the only approval is
   the CLI plan gate. A repair/debug-cap failure ends the run flagged `needs_human_review`.
-- **Refactoring edits are local** — Refactoring applies fixes to the working copy but does **not**
-  commit/push them, so the published repo currently holds the pre-review code.
+- **Refactoring/Debugging/Unit Testing edit the working copy directly** (no commit of their own —
+  the repair-path rule is that the LLM never commits); **Finalize** is what actually persists those
+  changes, once Unit Testing passes. With live incremental publish (the default demo CLI mode),
+  Finalize sweeps + pushes to `dev`; otherwise it's a local, best-effort commit.
+- **The exec-sandbox path doesn't push anywhere yet** — `MCPExecutor` has no publish/push
+  capability (by design: the sandbox's egress is locked to PyPI/npm only, no `github.com`), and
+  `SANDBOX_ENABLED=true` / `run_fixture.py --sandbox` / the real `POST /implementation/start` API
+  never set `push_enabled`. Unit tests still get committed, but only into the sandbox container's
+  own local git history — they don't reach a repo the Testing team can see. Getting them out needs
+  a host-side "export the finished workspace, then push with real git credentials" step that
+  doesn't exist yet.
