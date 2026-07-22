@@ -9,7 +9,8 @@ ALL_FIELDS = {
     "codegen_ok", "gate_result", "repair_attempt", "debug_attempt", "debug_result", "tests_ok",
     "test_result", "generation_summary", "generation_metrics",
     "push_enabled", "git_remote", "git_token",
-    "review_report", "review_report_path", "review_findings_path", "refactored_code", "unit_tests",
+    "review_report", "review_report_path", "review_findings_path", "refactored_code",
+    "refactored_files", "refactoring_report", "refactoring_report_path", "unit_tests",
     "documentation", "security_report", "security_report_path", "security_verdict",
     "security_findings_path", "security_loop_attempt", "pr_url", "finalize_status", "package_path",
     "workflow_status",
@@ -57,7 +58,8 @@ def test_new_state_accepts_push_config() -> None:
 
 def test_new_state_leaves_downstream_outputs_unset() -> None:
     state = new_state(run_id="r", attempt=0)
-    for field in ("review_report", "refactored_code", "unit_tests", "documentation", "security_report",
+    for field in ("review_report", "refactored_code", "refactored_files", "refactoring_report",
+                  "refactoring_report_path", "unit_tests", "documentation", "security_report",
                   "security_report_path", "security_verdict", "security_findings_path",
                   "pr_url", "finalize_status", "package_path", "tests_ok", "test_result"):
         assert field not in state

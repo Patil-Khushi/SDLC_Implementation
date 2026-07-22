@@ -50,7 +50,11 @@ def _load_pack(pack_dir: Path) -> dict[str, Any]:
     for path in sorted(pack_dir.iterdir()):
         if not path.is_file():
             continue
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, ValueError):
+            # Binary artifacts (e.g. .docx/.pdf) carry no text role the resolver uses — skip them.
+            continue
         if path.suffix == ".json":
             try:
                 package[path.name] = json.loads(text)

@@ -19,8 +19,8 @@ agents run automatically in sequence.
 scaffold ─(push main early)─→ select ─┬─ code_generator → gate ─┬─ pass → feature_publish → select (loop)
                                        │                         ├─ fail & repair<3 → repair → gate
                                        │                         └─ fail & repair≥3 → escalate → END
-                                       └─ plan done → commit ──→ code_review → refactoring → debug_check
-                                                                                                   │
+                                       └─ plan done → commit ──→ code_review → refactoring → refactoring_publish → debug_check
+                                                                                                                        │
                                           debug_check ─┬─ pass → unit_test_generate → unit_test_run → END ("completed")
                                                        ├─ fail & debug<3 → debugging → debug_check
                                                        └─ fail & debug≥3 → escalate → END
@@ -33,7 +33,8 @@ scaffold ─(push main early)─→ select ─┬─ code_generator → gate ─
 | 0 | **Scaffold** (no LLM) | renders boilerplate; in publish mode creates the repo + pushes `main` early | `generated_code`, `repo_url` |
 | 1 | **Code Generator** | generates source files per work item (real Claude); `gate` checks files exist, `repair` fixes gaps (≤3) | `generated_code` |
 | 2 | **Code Reviewer** | clones the pushed repo in a Docker sandbox, runs ruff + eslint + sonar-scanner, LLM writes the report | `review_report_path`, `review_findings_path` |
-| 3 | **Refactoring** | agentic edit loop — reads/edits the flagged files directly to apply the review's findings | `refactored_code` (+ edits files) |
+| 3 | **Refactoring** | agentic edit loop — reads/edits the flagged files directly to apply the review's findings; writes a report | `refactored_code`, `refactored_files`, `refactoring_report(_path)` |
+| — | **Refactoring Publish** (no LLM) | FIXED: commits the edited files and pushes `dev` (no-op if nothing was edited) | `generation_summary` |
 | 4 | **Debugging** | compile/build check; LLM fixes failures and re-checks (≤3) | `debug_result`, `debug_attempt` |
 | 5 | **Unit Testing** | generates + runs unit tests; a pass ends the run | `unit_tests`, `test_result`, `workflow_status` |
 
@@ -144,5 +145,8 @@ pre-existing failures (missing fixtures), unrelated to the pipeline.
 
 - **No human-in-the-loop inside the graph** — a completed plan auto-commits; the only approval is
   the CLI plan gate. A repair/debug-cap failure ends the run flagged `needs_human_review`.
-- **Refactoring edits are local** — Refactoring applies fixes to the working copy but does **not**
-  commit/push them, so the published repo currently holds the pre-review code.
+- **Refactoring edits are published** — after Refactoring edits the flagged files, a fixed
+  `refactoring_publish` step commits exactly those files and pushes them to `dev` (a no-op when
+  nothing was edited; a push failure is logged and never crashes the run), so the remote repo
+  holds the reviewed + refactored code before the debug/test loop runs. It also writes a Markdown
+  refactoring report next to the Code Review report (`reports/<project>-<run>/refactoring-report.md`).

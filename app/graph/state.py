@@ -65,7 +65,11 @@ class WorkflowState(TypedDict, total=False):
     # --- Git push (opt-in; mandatory workflow rules 4 & 8) ---
     # When push_enabled AND git_remote are set, the commit step pushes 'main' after the scaffold
     # commit and 'dev' immediately after EACH feature commit, stopping the run if a push fails
-    # (the next feature commits only after the previous push succeeds). git_remote is a GitHub
+    # (the next feature commits only after the previous push succeeds). The fixed
+    # refactoring_publish node reuses these SAME two flags to push one more 'dev' commit after
+    # Refactoring, when it edited files — unlike the two pushes above, a failure there is only
+    # logged/noted (generation_summary) and never stops the run, since the debug/test loop can
+    # still verify the refactored code from the shared sandbox workspace. git_remote is a GitHub
     # "owner/name" slug OR any git remote URL/path; git_token (optional) authenticates the push.
     push_enabled: bool
     git_remote: str
@@ -84,7 +88,13 @@ class WorkflowState(TypedDict, total=False):
     review_report: str          # Code Review: the Markdown report content
     review_report_path: str     # Code Review: where the report .md was saved (reports/…)
     review_findings_path: str   # Code Review: normalized verified-findings JSON (for Refactoring)
-    refactored_code: str         # Refactoring: summary of files changed + LLM notes
+    refactored_code: str
+    # Refactoring: workspace-relative (project-prefixed) paths the agent EDITED this run — the
+    # input to the fixed refactoring_publish node (commit + push to 'dev'); empty when nothing
+    # was edited (clean review / early exit), which makes the publish step a no-op.
+    refactored_files: list[str]
+    refactoring_report: str        # Refactoring: the Markdown report content
+    refactoring_report_path: str   # Refactoring: where the report .md was saved (reports/…)
     unit_tests: list[str]                  # workspace-relative paths of test files written
     documentation: str
     security_report: str
@@ -123,7 +133,8 @@ def new_state(
 
     Push is OFF by default (``push_enabled=False``): the commit step commits ``main``/``dev``
     locally but pushes nothing. Set ``push_enabled=True`` + ``git_remote`` (and optionally
-    ``git_token``) to push ``main`` after the scaffold and ``dev`` after each feature.
+    ``git_token``) to push ``main`` after the scaffold, ``dev`` after each feature, and ``dev``
+    once more after Refactoring when it edited files (that last push is non-fatal on failure).
 
     Fails fast on a malformed ``work_items`` (must be a list) rather than crashing deep in the
     graph loop.

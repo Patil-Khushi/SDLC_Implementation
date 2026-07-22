@@ -22,24 +22,34 @@ path; edits land under the SAME ``<project_dir>/`` prefix the code generator / r
 the next agent (Debugging, or Security re-scanning) sees the fixes on the shared exec-sandbox.
 
 Unlike the old one-shot-per-file rewrite, the model drives: it reads each file, applies only the
-fixes the findings call for, and moves on — no fixed JSON output contract. Per the team decision
-it does NOT commit, push, or run any gate — verification belongs to the downstream agents.
+fixes the findings call for, and moves on — no fixed JSON output contract. The agent itself never
+forms a git call (rule 2) and runs no gate — the FIXED ``refactoring_publish`` node right after it
+commits the edited files and pushes them to the working branch (``dev``), so the Debugging agent
+can also fetch the refactored code from the remote, and the debug/test loop verifies it.
 
-Owns: ``refactored_code`` (+ its ``workflow_status`` stamp), and — only on a security-loop
-re-entry — the ``security_loop_attempt`` counter. Reads ``review_report``/``review_findings_path``
-OR ``security_report``/``security_findings_path`` (whichever caller triggered this run) and the
-code via the executor.
+It also persists a Markdown REPORT of the run (what was fixed / skipped / deferred / unreached)
+next to the Code Review report — ``reports/<project>-<run>/refactoring-report.md`` — regardless
+of which caller triggered the run.
+
+Owns: ``refactored_code`` (summary string), ``refactored_files`` (the edited paths — the publish
+node's input), ``refactoring_report`` / ``refactoring_report_path``, its ``workflow_status``
+stamp, and — only on a security-loop re-entry — the ``security_loop_attempt`` counter. Reads
+``review_findings_path`` OR ``security_findings_path`` (whichever caller triggered this run,
+see ``execute``) and the code via the executor.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.agents.base import BaseAgent
 from app.agents.code_generator import _project_dir, _project_path
+from app.config.settings import get_settings
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, RepairTool, get_executor
 from app.services.llm_gateway import LLMGateway
@@ -81,7 +91,9 @@ class RefactoringAgent(BaseAgent):
             # "nothing to do": refactoring was skipped because its input was missing/unreadable,
             # NOT because the code was clean — a human needs to know.
             state["refactored_code"] = f"Refactoring skipped — findings unavailable: {load_error}. No fixes applied."
+            state["refactored_files"] = []
             state["workflow_status"] = "needs_human_review"
+            self._write_report(state)
             logger.error(
                 "refactoring: findings unavailable (%s) for run %s", load_error, state.get("run_id")
             )
@@ -100,7 +112,9 @@ class RefactoringAgent(BaseAgent):
         if not actionable:
             # Clean review (or only suppressed / project-level notes) — nothing file-scoped to fix.
             state["refactored_code"] = "No actionable (Open) review findings to apply; nothing refactored."
+            state["refactored_files"] = []
             state["workflow_status"] = "refactored"
+            self._write_report(state, findings_total=len(findings))
             logger.info("refactoring: no actionable findings for run %s", state.get("run_id"))
             return state
 
@@ -127,7 +141,12 @@ class RefactoringAgent(BaseAgent):
         if not present:
             state["generated_code"] = list(state.get("generated_code", []))
             state["refactored_code"] = _summary([], 0, skipped, deferred)
+            state["refactored_files"] = []
             state["workflow_status"] = "refactored"
+            self._write_report(
+                state, findings_total=len(findings), actionable_count=len(actionable),
+                skipped=skipped, deferred=deferred,
+            )
             logger.info(
                 "refactoring: no present files to fix (skipped %d) for run %s",
                 len(skipped), state.get("run_id"),
@@ -159,9 +178,16 @@ class RefactoringAgent(BaseAgent):
         unreached = [rel for rel in present if _project_path(project_dir, rel) not in touched_set]
 
         applied = sum(len(by_file[rel]) for rel in present if _project_path(project_dir, rel) in touched_set)
+        edited = [(rel, len(by_file[rel])) for rel in present if _project_path(project_dir, rel) in touched_set]
         state["generated_code"] = generated
         state["refactored_code"] = _summary(sorted(touched), applied, skipped, deferred, unreached)
+        state["refactored_files"] = sorted(touched)  # the publish node commits+pushes exactly these
         state["workflow_status"] = "refactored"
+        self._write_report(
+            state, findings_total=len(findings), actionable_count=len(actionable),
+            edited=edited, applied=applied, skipped=skipped, deferred=deferred,
+            unreached=unreached, notes=(notes or "").strip(),
+        )
         log = logger.warning if unreached else logger.info
         log(
             "refactoring: edited %d/%d present file(s), applied ~%d finding(s), skipped %d, "
@@ -278,6 +304,135 @@ class RefactoringAgent(BaseAgent):
             "When every fix has been written, reply with a one-line summary of what you changed."
         )
 
+    # -- persistence -----------------------------------------------------------
+
+    def _write_report(
+        self,
+        state: WorkflowState,
+        *,
+        findings_total: int = 0,
+        actionable_count: int = 0,
+        edited: list[tuple[str, int]] | None = None,
+        applied: int = 0,
+        skipped: list[str] | None = None,
+        deferred: list[str] | None = None,
+        unreached: list[str] | None = None,
+        notes: str = "",
+    ) -> None:
+        """Render + persist the refactoring report, alongside the Code Review report.
+
+        Same folder convention as ``CodeReviewAgent._finish`` — one folder per run,
+        ``reports/<project>-<run>/`` — so both reports of a run live together; this one is
+        ``refactoring-report.md``. Sets ``refactoring_report`` / ``refactoring_report_path``.
+        Best-effort: a disk failure is logged, never crashes the agent (the state summary and
+        the edits themselves are already in place; the report is an artifact, not a gate).
+        """
+        report = _render_report(
+            state,
+            findings_total=findings_total,
+            actionable_count=actionable_count,
+            edited=edited or [],
+            applied=applied,
+            skipped=skipped or [],
+            deferred=deferred or [],
+            unreached=unreached or [],
+            notes=notes,
+        )
+        state["refactoring_report"] = report
+        try:
+            # Same fallback chain as CodeReviewAgent.execute (code_review.py) before slugging, so
+            # an empty/missing project_id resolves to run_id here exactly as it does there — both
+            # reports of a run always land in the SAME folder, never "run-<id>" vs "<id>-<id>".
+            project_id = state.get("project_id") or state.get("run_id") or "project"
+            run_dir = (
+                Path(get_settings().reports_dir)
+                / f"{_slug(project_id)}-{_slug(state.get('run_id') or 'run')}"
+            )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            md_path = run_dir / "refactoring-report.md"
+            md_path.write_text(report, encoding="utf-8")
+            state["refactoring_report_path"] = str(md_path)
+            logger.info("refactoring: report saved to %s", md_path)
+        except OSError:
+            logger.exception(
+                "refactoring: could not persist the report for run %s", state.get("run_id")
+            )
+
+
+def _render_report(
+    state: WorkflowState,
+    *,
+    findings_total: int,
+    actionable_count: int,
+    edited: list[tuple[str, int]],
+    applied: int,
+    skipped: list[str],
+    deferred: list[str],
+    unreached: list[str],
+    notes: str,
+) -> str:
+    """The Markdown refactoring report (sectioned like the Code Review report, but simpler)."""
+    branch = (state.get("branch") or get_settings().working_branch or "").strip() or "-"
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    suppressed = findings_total - actionable_count
+
+    L: list[str] = []
+    a = L.append
+    a("# Refactoring Report\n")
+
+    a("## Section 1: Metadata\n")
+    a("| Field | Value |")
+    a("| --- | --- |")
+    a(f"| Project | {state.get('project_id') or '-'} |")
+    a(f"| Run ID | {state.get('run_id') or '-'} |")
+    a(f"| Branch | {branch} |")
+    a(f"| Refactored By | Refactoring Agent (automated) |")
+    a(f"| Date | {date} |")
+    # security_findings_path only exists once Security has run (security-loop re-entry) — see
+    # execute()'s in_security_loop signal; falls back to Code Review's path otherwise.
+    findings_path = state.get("security_findings_path") or state.get("review_findings_path") or "-"
+    a(f"| Findings source | {findings_path} |")
+    a(f"| Findings loaded | {findings_total} |")
+    a(f"| Actionable (Open) | {actionable_count} |")
+    a(f"| Suppressed (skipped) | {max(suppressed, 0)} |\n")
+
+    a("## Section 2: Outcome\n")
+    a((state.get("refactored_code") or "(no summary)").strip() + "\n")
+
+    a("## Section 3: Files Edited\n")
+    if edited:
+        a("| File | Findings applied |")
+        a("| --- | --- |")
+        for rel, count in edited:
+            a(f"| {rel} | {count} |")
+        a(f"\nTotal: {len(edited)} file(s), ~{applied} finding(s) applied.\n")
+    else:
+        a("(no files were edited)\n")
+
+    a("## Section 4: Not Edited\n")
+    if skipped or deferred or unreached:
+        for label, items in (
+            ("Skipped (not found in workspace)", skipped),
+            ("Not modified (no change needed OR edit budget exhausted)", unreached),
+            (f"Deferred (over the {MAX_FILES_PER_RUN}-file cap)", deferred),
+        ):
+            if items:
+                a(f"**{label}:**")
+                for item in items:
+                    a(f"- {item}")
+                a("")
+    else:
+        a("(none)\n")
+
+    a("## Section 5: Model Notes\n")
+    a((notes or "(none)") + "\n")
+    return "\n".join(L)
+
+
+def _slug(value: str) -> str:
+    """Filesystem-safe slug — mirrors ``code_review._slug`` so both reports share a run folder."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value) or "run"
+
 
 def _finding_line(f: dict[str, Any]) -> str:
     severity = f.get("severity") or "?"
@@ -324,8 +479,9 @@ _refactoring_agent = RefactoringAgent()
 def refactoring_node(state: WorkflowState) -> WorkflowState:
     logger.info("================ AGENT: Refactoring ================")
     if "security_verdict" in state:
-        logger.info("   -> applying Security's findings (security-loop attempt %d)",
+        logger.info("   -> applying Security's findings (security-loop attempt %d) + writing the refactoring report",
                     int(state.get("security_loop_attempt", 0)) + 1)
     else:
-        logger.info("   -> applying the code review's findings to the generated files")
+        logger.info("   -> applying the code review's findings to the generated files "
+                    "+ writing the refactoring report")
     return _refactoring_agent.execute(state)

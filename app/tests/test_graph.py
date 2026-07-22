@@ -9,6 +9,7 @@ repair-cap failure ends the run flagged ``needs_human_review`` (no interrupt/pau
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,50 @@ def _stub_llm(monkeypatch):
     set_executor(None)
 
 
+def _stub_code_review_with_one_finding(findings_path: Path, target_file: str):
+    """Replace the module-level Code Review agent's ``execute`` with a stub that records ONE Open
+    finding for ``target_file`` — so Refactoring has something actionable to fix. Patching the
+    singleton instance (not just the node function) reaches the compiled graph."""
+    findings = [{
+        "file": target_file, "line": 1, "severity": "High",
+        "category": "Bug", "rule_id": "B001", "message": "wrong literal", "status": "Open",
+    }]
+    findings_path.write_text(json.dumps(findings), encoding="utf-8")
+
+    def _execute(state):
+        state["review_findings_path"] = str(findings_path)
+        state["workflow_status"] = "code_reviewed"
+        return state
+
+    return _execute
+
+
+def _complete_dispatch(prompt: str, *, system: str | None = None) -> str:
+    """``complete()`` is also used by Unit Test generation (after debug_check passes), which
+    would otherwise reuse CODEGEN_JSON and silently overwrite ``app/api/login.py`` back to its
+    pre-refactor content. Route unit-test prompts (marked by ``_build_prompt``'s own text) to a
+    distinct test file path instead, so the refactored source is left alone."""
+    if "Source file(s) to test:" in prompt:
+        return json.dumps({"files": [{"path": "tests/test_login.py", "content": "def test_ok(): pass\n"}]})
+    return CODEGEN_JSON
+
+
+def _complete_with_tools_dispatch(prompt: str, *, system: str | None = None,
+                                   tools: list | None = None, max_iters: int = 4) -> str:
+    """Route the single ``complete_with_tools`` stub by which tools it was called with:
+    Refactoring passes ``[read_file, write_file]`` and drives them itself (agentic edit loop);
+    Repair/Debugging pass the repair-tool set (no ``write_file``) and parse REPAIR_JSON text
+    themselves. Mirrors ``_StubLLM`` in test_refactoring.py for the write_file-driving half."""
+    by_name = {getattr(t, "name", ""): t for t in (tools or [])}
+    if "write_file" in by_name:
+        read, write = by_name["read_file"], by_name["write_file"]
+        for f in re.findall(r"^File: (.+)$", prompt, re.MULTILINE):
+            if not str(read.handler(path=f)).startswith("ERROR"):
+                write.handler(path=f, content="# refactored\n")
+        return "applied the review's fix"
+    return REPAIR_JSON
+
+
 def _invoke(executor: FakeExecutor, work_items: list[WorkItem], thread_id: str, *, repo_url: str = "") -> dict:
     """Fresh invoke; runs to completion (no HITL pause) and returns the final state."""
     set_executor(executor)
@@ -94,7 +139,9 @@ def test_incomplete_then_completed_repairs_once_then_auto_commits() -> None:
     final = _invoke(executor, [TWO_FILE_ITEM], "t-happy")
 
     assert final["repair_attempt"] == 1                  # exactly one repair
-    assert final["workflow_status"] == "completed"       # gate-passed -> commit -> review -> refactoring -> debug/test (terminal)
+    # gate-passed -> commit -> review -> refactoring -> refactoring_publish (no-op: nothing
+    # refactored, empty findings) -> debug/test (terminal)
+    assert final["workflow_status"] == "completed"
     assert len(executor.commits) == 1                    # committed exactly once, run-level
     assert executor.commits[0][0] == "p1"
     assert final["attempt"] == 7                         # orchestrator's counter echoed unchanged
@@ -153,7 +200,8 @@ def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
     executor = FakeExecutor()
     final = _invoke(executor, [LOGIN_ITEM], "t-scaffold")
 
-    assert final["workflow_status"] == "completed"        # single item passed -> commit -> review -> refactoring -> debug/test (terminal)
+    # single item passed -> commit -> review -> refactoring -> refactoring_publish (no-op) -> debug/test (terminal)
+    assert final["workflow_status"] == "completed"
     scaffold_files = [f for f in final["generated_code"] if not f.endswith("login.py")]
     assert len(scaffold_files) == SCAFFOLD_FILE_COUNT
     assert final["generated_code"][0] == "p1/Dockerfile"      # scaffold wrote first, in template order
@@ -270,3 +318,28 @@ def test_security_loop_exits_via_finalize_once_a_rescan_approves(monkeypatch) ->
     assert final["finalize_status"] == "pr_created"
     assert final["package_path"]
     assert calls["n"] == 2                                # scanned twice: initial + one re-scan
+
+
+def test_refactoring_publish_commits_the_edited_file_after_review(monkeypatch, tmp_path: Path) -> None:
+    """Pins the ACTIVE refactoring_publish path end-to-end (unlike every other test in this file,
+    where Code Review's empty findings make Refactoring — and therefore Refactoring Publish — a
+    pure no-op). Proves: (1) refactoring_publish is actually wired between refactoring and
+    debug_check, not dropped or reordered — a SECOND commit lands with the refactor(...) message;
+    (2) debug_check runs on the FILE CONTENT refactoring wrote, not the pre-refactor content."""
+    monkeypatch.setattr(
+        nodes_module._code_review, "execute",
+        _stub_code_review_with_one_finding(tmp_path / "findings.json", "app/api/login.py"),
+    )
+    monkeypatch.setattr(llm_gateway.llm_gateway, "complete", _complete_dispatch)
+    monkeypatch.setattr(llm_gateway.llm_gateway, "complete_with_tools", _complete_with_tools_dispatch)
+
+    executor = FakeExecutor()
+    final = _invoke(executor, [LOGIN_ITEM], "t-refactor-publish")
+
+    assert final["workflow_status"] == "completed"
+    assert final["refactored_files"] == ["p1/app/api/login.py"]
+    assert executor.files["p1/app/api/login.py"] == "# refactored\n"   # debug_check saw this content
+    # run-level commit, THEN the refactor commit — proves the node is wired and actually ran
+    assert len(executor.commits) == 2
+    assert executor.commits[0][0] == "p1"
+    assert executor.commits[1] == ("p1", "refactor(run-1): apply code review fixes to 1 file(s)")
