@@ -581,9 +581,128 @@ def _dir_item_slug(directory: str) -> str:
     return _slug("-".join(segs)) if segs else "root"
 
 
+# -- design-pack asset synthesis -------------------------------------------
+#
+# Structure trees list bulk asset folders as DIRECTORY leaves with a prose description
+# (e.g. "assets/icons/": "SVG icon files …") instead of enumerating each file. Directory leaves
+# are otherwise dropped, so without this expansion no asset file is ever planned and every
+# generated ``import x from '@/assets/…'`` dangles (Vite build error). We synthesize concrete
+# ``.svg`` targets from the folder description; the code generator fills their content, reusing the
+# inline <svg> icons the mockup already provides. Binary asset targets the text-only generator
+# cannot emit as valid bytes (favicon.ico) are normalized to their SVG equivalent.
+
+#: Curated icon set for an ``assets/icons/`` folder — the common UI affordances a storefront/admin
+#: front-end references (nav, catalogue, cart, account, status). The generator reuses the mockup's
+#: matching inline <svg> where one exists and draws the rest in the same 24×24 stroke style.
+_DEFAULT_ICON_SET = (
+    "menu", "close", "search", "cart", "user", "bell", "heart", "star",
+    "chevron-down", "chevron-left", "chevron-right", "check", "trash", "edit",
+    "plus", "minus", "external-link", "map-pin", "package",
+)
+
+#: Fallback image asset names when a folder description names none.
+_DEFAULT_IMAGE_SET = ("logo", "placeholder", "empty-state")
+
+
+def _is_asset_dir_leaf(path: str) -> bool:
+    """A directory leaf (path ends '/') sitting under an ``assets/`` segment."""
+    return _is_dir_leaf(path) and "assets" in path.lower().split("/")
+
+
+def _nouns_from_desc(desc: str) -> list[str]:
+    """Comma-separated asset names from a folder description, or ``[]`` if it names none.
+
+    A parenthetical list is the name source when present; otherwise a top-level comma list of 2+
+    items. A single descriptive phrase ("Static image assets") is NOT a filename list -> [].
+
+    "Static image assets (logo, placeholder product image, empty-state illustrations)"
+        -> ["logo", "placeholder product image", "empty-state illustrations"]
+    "Static image assets" -> []
+    """
+    m = re.search(r"\(([^)]*)\)", desc)
+    if m:
+        return [part.strip() for part in m.group(1).split(",") if part.strip()]
+    parts = [part.strip() for part in desc.split(",") if part.strip()]
+    return parts if len(parts) >= 2 else []
+
+
+def _expand_asset_leaf(path: str, desc: str) -> list[tuple[str, str]]:
+    """Expand an ``assets/…/`` directory leaf into concrete ``.svg`` (path, spec) leaves."""
+    base = path if path.endswith("/") else path + "/"
+    if "icon" in _basename(path):
+        return [
+            (
+                f"{base}{icon}.svg",
+                f"Standalone SVG icon '{icon}' (24×24 viewBox, currentColor stroke matching the "
+                f"design tokens). Reuse the matching inline <svg> from the mockup if one exists.",
+            )
+            for icon in _DEFAULT_ICON_SET
+        ]
+    nouns = _nouns_from_desc(desc)
+    leaves: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for noun in nouns:
+        cleaned = re.sub(r"\b(image|images|illustration|illustrations|asset|assets)\b", "", noun, flags=re.I).strip()
+        slug = _slug(cleaned or noun)
+        if slug in seen:
+            continue
+        seen.add(slug)
+        leaves.append((f"{base}{slug}.svg", f"SVG asset for '{noun}' (self-contained, uses design-token colours)."))
+    if not leaves:
+        leaves = [(f"{base}{name}.svg", f"SVG {name} asset (self-contained, uses design-token colours).") for name in _DEFAULT_IMAGE_SET]
+    return leaves
+
+
+def _asset_leaves(tree: dict) -> list[tuple[str, str]]:
+    """Concrete ``.svg`` leaves synthesized from every ``assets/…/`` directory leaf in ``tree``."""
+    out: list[tuple[str, str]] = []
+    for path, desc in _walk(tree):
+        if _is_asset_dir_leaf(path):
+            out.extend(_expand_asset_leaf(path, str(desc)))
+    return out
+
+
+def _normalize_binary_assets(leaves: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    """Rewrite asset targets the text-only code generator can't emit as valid binary.
+
+    ``favicon.ico`` -> ``favicon.svg`` (SVG is text). When a favicon becomes SVG, the ``index.html``
+    spec is augmented so the generated markup links it as ``image/svg+xml``.
+    """
+    has_svg_favicon = False
+    rewritten: list[tuple[str, Any]] = []
+    for path, desc in leaves:
+        low = path.lower()
+        if low.endswith("favicon.ico"):
+            path = path[: -len("favicon.ico")] + "favicon.svg"
+            desc = "Site favicon as SVG (image/svg+xml)."
+            has_svg_favicon = True
+        elif low.endswith("favicon.svg"):
+            has_svg_favicon = True
+        rewritten.append((path, desc))
+    if not has_svg_favicon:
+        return rewritten
+    out: list[tuple[str, Any]] = []
+    for path, desc in rewritten:
+        if _basename(path) == "index.html":
+            desc = str(desc).rstrip() + ' Link the favicon with <link rel="icon" type="image/svg+xml" href="/favicon.svg"> in <head>.'
+        out.append((path, desc))
+    return out
+
+
 def _source_leaves(tree: dict) -> list[tuple[str, Any]]:
-    """File leaves of a structure tree, excluding directory entries and test files."""
-    return [(p, d) for p, d in _walk(tree) if not _is_dir_leaf(p) and not _is_test_path(p)]
+    """File leaves to generate for a structure tree.
+
+    Excludes test files and directory entries — EXCEPT bulk ``assets/…/`` folders, which are
+    expanded into concrete ``.svg`` targets (see :func:`_asset_leaves`) so the assets they stand
+    for are actually generated. Binary targets the generator can't emit are normalized to SVG
+    (see :func:`_normalize_binary_assets`). Centralizing both here keeps the builders,
+    ``_reconcile_uncovered`` and ``_missing_after_reconcile`` in agreement.
+    """
+    leaves: list[tuple[str, Any]] = [
+        (p, d) for p, d in _walk(tree) if not _is_dir_leaf(p) and not _is_test_path(p)
+    ]
+    leaves += _asset_leaves(tree)
+    return _normalize_binary_assets(leaves)
 
 
 def _items_from_groups(
