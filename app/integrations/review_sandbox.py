@@ -13,6 +13,7 @@ Lifecycle (a context manager):
         sb.run(["ruff", "check", "--output-format=json", "."])
         files = sb.list_files()     # tracked paths, for language detection + reading
         text  = sb.read_text(path)  # read a file's content (BEFORE the sandbox closes)
+        sb.write_text(path, new_text)  # read-write use only (Refactoring) - overwrite a file
     # __exit__ tears the container down
 
 Implementations:
@@ -29,6 +30,7 @@ the ``docker`` argv themselves.
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess  # nosec B404 - used only to drive the `docker` CLI with fixed, non-shell argv
 import uuid
@@ -40,6 +42,19 @@ from app.integrations.executor import RunResult
 
 # Where the repo is cloned inside the sandbox container.
 _REPO_DIR = "/work/repo"
+
+# The sandbox has network egress (see DockerReviewSandbox's docstring), so a repo_url reaching
+# `git clone` with no scheme/host check is a clone-anything primitive (internal hosts,
+# cloud-metadata-adjacent addresses, etc.) - SSRF-shaped. Restrict to public GitHub HTTPS URLs,
+# the only source any agent in this pipeline actually expects. Shared by every agent that clones
+# a repo (Code Review, Security, ...) so the allowlist can't drift between independent copies.
+_ALLOWED_REPO_RE = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+(?:\.git)?/?$")
+
+
+def is_allowed_repo_url(url: str) -> bool:
+    """True if `url` is a clone-able public GitHub HTTPS URL - the only kind any agent here
+    should ever pass to `ReviewSandbox.clone()`."""
+    return bool(_ALLOWED_REPO_RE.match(url or ""))
 
 
 class ReviewSandbox(ABC):
@@ -72,6 +87,14 @@ class ReviewSandbox(ABC):
         """Read a repo-relative file's text (raises on missing/unreadable)."""
 
     @abstractmethod
+    def write_text(self, rel_path: str, content: str) -> None:
+        """Write/overwrite a repo-relative file's text inside the cloned working tree.
+
+        Read-write use only (Refactoring) — Code Review/Security never call this, they only
+        ever read. Content is piped in (stdin / in-memory), never interpolated into a shell
+        command, so arbitrarily large or binary-unsafe content can't break the invocation."""
+
+    @abstractmethod
     def list_files(self) -> list[str]:
         """List repo-relative tracked file paths (for language detection + reading)."""
 
@@ -89,7 +112,8 @@ class FakeReviewSandbox(ReviewSandbox):
     ``files`` seeds the cloned tree (repo-relative path -> content). ``responses`` maps a command
     keyword (matched against the argv, e.g. "ruff", "eslint", "sonar-scanner", "git") to the
     :class:`RunResult` to return; anything unmatched returns a clean default. Every call is
-    recorded, and :attr:`closed` flips to True on teardown so tests can assert the lifecycle.
+    recorded (including ``written`` paths from :meth:`write_text`), and :attr:`closed` flips to
+    True on teardown so tests can assert the lifecycle.
     """
 
     def __init__(
@@ -110,6 +134,7 @@ class FakeReviewSandbox(ReviewSandbox):
         self._clone_i = 0
         self.commands: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
+        self.written: list[str] = []
         self.cloned: list[str] = []
         self.clone_refs: list[str | None] = []
         self.opened = False
@@ -144,6 +169,10 @@ class FakeReviewSandbox(ReviewSandbox):
             return self.files[rel_path]
         except KeyError as exc:
             raise FileNotFoundError(rel_path) from exc
+
+    def write_text(self, rel_path: str, content: str) -> None:
+        self.written.append(rel_path)
+        self.files[rel_path] = content
 
     def list_files(self) -> list[str]:
         return sorted(self.files)
@@ -201,6 +230,14 @@ class DockerReviewSandbox(ReviewSandbox):
             raise FileNotFoundError(rel_path)
         return result.stdout or ""
 
+    def write_text(self, rel_path: str, content: str) -> None:
+        # Content is piped over stdin (never interpolated into argv/shell) - safe for arbitrary
+        # size/content. `mkdir -p` the parent first so a new file in a not-yet-existing dir works.
+        script = f'mkdir -p "$(dirname {shlex.quote(rel_path)})" && cat > {shlex.quote(rel_path)}'
+        result = self._exec(["sh", "-c", script], workdir=_REPO_DIR, stdin=content)
+        if not result.ok:
+            raise OSError(f"write_text failed for {rel_path}: {(result.stderr or result.stdout).strip()}")
+
     def list_files(self) -> list[str]:
         result = self._exec(["git", "ls-files"], workdir=_REPO_DIR)
         return [line for line in result.stdout.splitlines() if line.strip()]
@@ -216,21 +253,24 @@ class DockerReviewSandbox(ReviewSandbox):
     # -- docker plumbing ------------------------------------------------------
 
     def _exec(self, cmd: Sequence[str], *, workdir: str, timeout: float | None = None,
-              env: dict[str, str] | None = None) -> RunResult:
+              env: dict[str, str] | None = None, stdin: str | None = None) -> RunResult:
         env_flags: list[str] = []
         for key, value in (env or {}).items():
             env_flags += ["-e", f"{key}={value}"]
-        argv = [self._docker, "exec", *env_flags, "--workdir", workdir, self._name, *cmd]
-        return self._invoke(argv, timeout=timeout or self._timeout)
+        # -i (interactive/stdin-open) only when we actually have stdin to feed - keeps ordinary
+        # commands' exec argv unchanged from before.
+        interactive = ["-i"] if stdin is not None else []
+        argv = [self._docker, "exec", *interactive, *env_flags, "--workdir", workdir, self._name, *cmd]
+        return self._invoke(argv, timeout=timeout or self._timeout, stdin=stdin)
 
     def _docker_cli(self, args: Sequence[str]) -> RunResult:
         return self._invoke([self._docker, *args], timeout=self._timeout)
 
     @staticmethod
-    def _invoke(argv: Sequence[str], *, timeout: float) -> RunResult:
+    def _invoke(argv: Sequence[str], *, timeout: float, stdin: str | None = None) -> RunResult:
         try:
             proc = subprocess.run(  # nosec B603 - fixed argv, shell=False, no user-controlled binary
-                list(argv), capture_output=True, text=True, errors="replace",
+                list(argv), input=stdin, capture_output=True, text=True, errors="replace",
                 timeout=timeout, check=False, shell=False,
             )
         except subprocess.TimeoutExpired as exc:

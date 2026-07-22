@@ -17,6 +17,11 @@ REPAIR_CAP = 3
 #: code-generation loop and is already spent by the time this phase runs.
 DEBUG_CAP = 3
 
+#: Local cap for the Security<->Refactoring loop, at the very end of the run. Separate counter
+#: (``security_loop_attempt``) and separate cap from REPAIR_CAP/DEBUG_CAP above — this loop starts
+#: only after Code Gen, Debugging, and Unit Test have already finished.
+SECURITY_LOOP_CAP = 3
+
 
 def route_after_select(state: WorkflowState) -> str:
     """After selecting: generate the next item, or auto-commit when the plan is exhausted.
@@ -76,4 +81,16 @@ def route_after_test_run(state: WorkflowState) -> str:
         return "done"
     if int(state.get("debug_attempt", 0)) < DEBUG_CAP:
         return "debugging"
+    return "escalate"
+
+
+def route_after_security(state: WorkflowState) -> str:
+    """The run's final decision: Security approved → finalize (open the dev -> main PR); still
+    failing under the loop cap → refactoring (fixes findings, pushes to `dev`, loops back to
+    Security); still failing at the cap → escalate (needs_human_review, same terminal path a
+    repair/debug cap-out uses — no PR is opened)."""
+    if state.get("security_verdict") == "approve":
+        return "finalize"
+    if int(state.get("security_loop_attempt", 0)) < SECURITY_LOOP_CAP:
+        return "refactoring"
     return "escalate"

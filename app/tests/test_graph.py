@@ -87,7 +87,7 @@ def test_incomplete_then_completed_repairs_once_then_auto_commits() -> None:
     final = _invoke(executor, [TWO_FILE_ITEM], "t-happy")
 
     assert final["repair_attempt"] == 1                  # exactly one repair
-    assert final["workflow_status"] == "code_reviewed"   # gate-passed -> auto-commit -> final review
+    assert final["workflow_status"] == "security_reviewed"   # gate-passed -> auto-commit -> full pipeline -> final review
     assert len(executor.commits) == 1                    # committed exactly once, run-level
     assert executor.commits[0][0] == "p1"
     assert final["attempt"] == 7                         # orchestrator's counter echoed unchanged
@@ -142,11 +142,26 @@ def test_missing_target_file_fails_the_completeness_gate(monkeypatch) -> None:
     assert executor.commits == []
 
 
+def test_documentation_and_security_run_after_code_review_on_the_happy_path() -> None:
+    # Full pipeline: gate passes -> commit -> code_review -> debug/unit-test loop -> documentation
+    # -> security -> END. No repo_url is ever set in this test (push disabled), so Code Review and
+    # Security both take their graceful "no repository" no-op path - but they still RUN, and
+    # Documentation (which needs no repo_url) actually generates content.
+    executor = FakeExecutor()
+    final = _invoke(executor, [LOGIN_ITEM], "t-full-pipeline")
+
+    assert final["workflow_status"] == "security_reviewed"
+    assert "No repository URL" in final["review_report"]
+    assert final["documentation"]  # Documentation ran and produced something (the stubbed LLM reply)
+    assert "No repository URL" in final["security_report"]
+    assert final["security_report_path"]
+
+
 def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
     executor = FakeExecutor()
     final = _invoke(executor, [LOGIN_ITEM], "t-scaffold")
 
-    assert final["workflow_status"] == "code_reviewed"    # single item passed -> auto-commit -> review
+    assert final["workflow_status"] == "security_reviewed"    # single item passed -> auto-commit -> full pipeline -> review
     scaffold_files = [f for f in final["generated_code"] if not f.endswith("login.py")]
     assert len(scaffold_files) == SCAFFOLD_FILE_COUNT
     assert final["generated_code"][0] == "p1/Dockerfile"      # scaffold wrote first, in template order

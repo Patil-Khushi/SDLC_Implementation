@@ -1,20 +1,26 @@
 """LangGraph node functions.
 
 Each node wraps one step of the IMP-001 subgraph. Agents are instantiated once at import and
-reused. The executor is resolved at run time via the provider (``get_executor``), so the same
-node code works with the real MCP sandbox (set in the app lifespan) or a FakeExecutor (set in
-tests).
+reused (exception: `refactoring_node` imports/instantiates `RefactoringAgent` lazily — see its
+own docstring). The executor is resolved at run time via the provider (``get_executor``), so the
+same node code works with the real MCP sandbox (set in the app lifespan) or a FakeExecutor (set
+in tests).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 
 from app.agents.code_generator import CodeGeneratorAgent
 from app.agents.code_review import CodeReviewAgent
+from app.agents.documentation import DocumentationAgent
+from app.agents.security import SecurityAgent
 from app.agents.unit_test import UnitTestAgent
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
+from app.integrations.github import get_github_client
+from app.integrations.review_sandbox import is_allowed_repo_url
 from app.services.boilerplate import render_scaffold
 
 logger = logging.getLogger(__name__)
@@ -22,6 +28,34 @@ logger = logging.getLogger(__name__)
 _code_generator = CodeGeneratorAgent()
 _code_review = CodeReviewAgent()
 _unit_test_agent = UnitTestAgent()
+_documentation_agent = DocumentationAgent()
+_security_agent = SecurityAgent()
+
+# owner/repo out of the same https://github.com/<owner>/<repo> form `is_allowed_repo_url` accepts.
+_OWNER_REPO_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+
+# Recognized forms of `git_remote` that resolve to a clone-able GitHub HTTPS URL for Code Review -
+# a bare "owner/repo" slug (same convention commit_feature_history's own remote-detection regex
+# uses), an https://github.com/... URL as-is, or a git@github.com:owner/repo.git SSH remote.
+_GITHUB_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_GITHUB_SSH_RE = re.compile(r"^git@github\.com:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?$")
+_GITHUB_HTTPS_RE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?$")
+
+
+def _derive_repo_url(git_remote: str) -> str:
+    """Best-effort https://github.com/<owner>/<repo> form of a pushed `git_remote`, for Code
+    Review to clone. Any other remote form (a non-GitHub host, a local bare repo path used in
+    tests, etc.) returns "" - repo_url stays unset and Code Review keeps its existing graceful
+    no-op, rather than guessing at an unrecognized remote."""
+    remote = (git_remote or "").strip()
+    if _GITHUB_HTTPS_RE.match(remote):
+        return remote
+    ssh_match = _GITHUB_SSH_RE.match(remote)
+    if ssh_match:
+        return f"https://github.com/{ssh_match.group(1)}"
+    if _GITHUB_SLUG_RE.match(remote):
+        return f"https://github.com/{remote}"
+    return ""
 
 
 def scaffold_node(state: WorkflowState) -> WorkflowState:
@@ -32,6 +66,7 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
     scaffold is INPUT-AWARE: the Design Package's capabilities config decides which files are
     emitted and their contents (absent that config, the legacy FastAPI+React defaults apply).
     """
+    logger.info("[scaffold] run=%s | rendering boilerplate...", state.get("run_id") or "-")
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     files = render_scaffold(project_dir, state.get("design_package"))
@@ -50,6 +85,7 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
     state["generation_summary"] = (
         state.get("generation_summary") or ""
     ) + f"[scaffold] rendered {len(written)} boilerplate file(s): {names}\n"
+    logger.info("[scaffold] run=%s | done - %d file(s): %s", state.get("run_id") or "-", len(written), names)
     return state
 
 
@@ -62,13 +98,99 @@ def code_review_node(state: WorkflowState) -> WorkflowState:
     """Clone the committed repo into an ephemeral sandbox, run static analysis, write the report.
 
     The agent owns the whole sandbox session (clone → ruff/eslint → sonar-scanner → teardown);
-    this node just delegates. Runs ONCE, as the true final stage of the run — after the run-level
-    commit AND after the post-commit Debugging<->Unit-Test loop's tests have passed (every
-    escalate branch bypasses it, same as it bypasses the debug/test loop). Needs ``repo_url`` in
-    state to clone; when absent the agent writes a report noting no repo. Always stamps
-    ``workflow_status = "code_reviewed"`` — the run's actual terminal status.
+    this node just delegates. Runs right after the run-level commit. Needs ``repo_url`` in state
+    to clone; when absent the agent writes a report noting no repo. Stamps ``workflow_status =
+    "code_reviewed"`` - an intermediate marker now, not the run's terminal status (Debug/
+    Unit-Test/Documentation/Security all run after this).
+
+    NOTE: a Refactoring stage (consuming this node's ``findings.json``) exists on another branch
+    and isn't wired in here yet - when it lands, it slots in between this node and ``debug_check``.
     """
-    return _code_review.execute(state)
+    logger.info("[code_review] run=%s | starting (repo_url=%s)", state.get("run_id") or "-", state.get("repo_url") or "none")
+    out = _code_review.execute(state)
+    logger.info("[code_review] run=%s | done - report at %s", state.get("run_id") or "-", out.get("review_report_path") or "(not saved)")
+    return out
+
+
+def documentation_node(state: WorkflowState) -> WorkflowState:
+    """Pure LLM: generate project documentation from the final generated source."""
+    logger.info("[documentation] run=%s | starting...", state.get("run_id") or "-")
+    out = _documentation_agent.execute(state)
+    logger.info("[documentation] run=%s | done - %d char(s) generated", state.get("run_id") or "-", len(out.get("documentation") or ""))
+    return out
+
+
+def security_node(state: WorkflowState) -> WorkflowState:
+    """Clone the repo into an ephemeral sandbox, run Semgrep, write the security report.
+
+    Mirrors ``code_review_node`` exactly (own sandbox session, own report), just later in the
+    pipeline - the true final stage of the run. Needs ``repo_url``; when absent, writes a report
+    noting no repo, same graceful degradation as Code Review.
+    """
+    logger.info("[security] run=%s | starting (repo_url=%s)", state.get("run_id") or "-", state.get("repo_url") or "none")
+    out = _security_agent.execute(state)
+    logger.info("[security] run=%s | done - report at %s", state.get("run_id") or "-", out.get("security_report_path") or "(not saved)")
+    return out
+
+
+def refactoring_node(state: WorkflowState) -> WorkflowState:
+    """LLM: fix exactly the findings Security flagged and push back to `dev`.
+
+    Reached only via the Security<->Refactoring loop (`router.route_after_security`, capped at
+    `SECURITY_LOOP_CAP`) — never on the `approve` path, which goes straight to `finalize`.
+
+    Imports ``RefactoringAgent`` lazily (not at module load, unlike the other agents above): its
+    real implementation lives on `main` and isn't necessarily present on every branch this module
+    is edited from. Keeping the import inside the function means the rest of the graph — which
+    never reaches this node on the `approve` path — still imports and runs on its own; only
+    actually taking the `changes_requested` branch requires `app/agents/refactoring.py` to be
+    the real (merged) implementation.
+    """
+    from app.agents.refactoring import RefactoringAgent
+
+    logger.info("[refactoring] run=%s | starting (repo_url=%s, loop attempt %s)",
+                state.get("run_id") or "-", state.get("repo_url") or "none",
+                int(state.get("security_loop_attempt", 0)) + 1)
+    out = RefactoringAgent().execute(state)
+    logger.info("[refactoring] run=%s | done - status=%s", state.get("run_id") or "-",
+                out.get("workflow_status") or "-")
+    return out
+
+
+def finalize_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic (mirrors `commit_node` — never LLM-formed): Security approved, so open
+    (or find) the `dev -> main` pull request. Never merges — a human approves the merge on GitHub;
+    this keeps a shared remote safe and matches AGENTS_CONTEXT.md §6b ("the Security agent scans,
+    it does not merge" — nor does this step auto-merge on its behalf).
+    """
+    run_id = state.get("run_id") or "-"
+    repo_url = (state.get("repo_url") or "").strip()
+    head = (state.get("branch") or "dev").strip()
+
+    if not repo_url or not is_allowed_repo_url(repo_url):
+        logger.info("[finalize] run=%s | no repo_url / not an allowed GitHub URL - skipping PR", run_id)
+        state["finalize_status"] = "skipped"
+        return state
+
+    match = _OWNER_REPO_RE.match(repo_url)
+    if not match:
+        logger.warning("[finalize] run=%s | could not parse owner/repo from repo_url: %s", run_id, repo_url)
+        state["finalize_status"] = "skipped"
+        return state
+    owner, repo = match.group(1), match.group(2)
+
+    title = f"Security-approved: merge {head} into main"
+    body = (state.get("security_report") or "Security scan passed.")[:60000]
+    logger.info("[finalize] run=%s | opening PR %s -> main for %s/%s ...", run_id, head, owner, repo)
+    result = get_github_client().create_or_update_pull_request(owner, repo, head, "main", title, body)
+    if result.ok:
+        state["pr_url"] = result.url
+        state["finalize_status"] = "pr_created"
+        logger.info("[finalize] run=%s | PR ready: %s", run_id, result.url)
+    else:
+        state["finalize_status"] = "pr_failed"
+        logger.warning("[finalize] run=%s | PR failed: %s", run_id, result.error)
+    return state
 
 
 def select_work_item_node(state: WorkflowState) -> WorkflowState:
@@ -86,8 +208,11 @@ def select_work_item_node(state: WorkflowState) -> WorkflowState:
         state["current_work_item"] = items[index]
         state["work_item_index"] = index + 1
         state["repair_attempt"] = 0  # LOCAL, reset per work item (never touches `attempt`)
+        logger.info("[select] run=%s | work item %d/%d: %s", state.get("run_id") or "-",
+                    index + 1, len(items), items[index].id)
     else:
         state["current_work_item"] = None  # plan exhausted -> auto-commit
+        logger.info("[select] run=%s | plan exhausted (%d item(s)) -> commit", state.get("run_id") or "-", len(items))
     return state
 
 
@@ -119,7 +244,9 @@ def gate_node(state: WorkflowState) -> WorkflowState:
         logger.exception("gate: files_complete raised for run %s", state.get("run_id"))
         checks.append({"name": "files_complete", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1})
 
-    state["gate_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
+    passed = bool(checks) and all(c["passed"] for c in checks)
+    state["gate_result"] = {"passed": passed, "checks": checks}
+    logger.info("[gate] run=%s | files_complete: %s", state.get("run_id") or "-", "PASS" if passed else "FAIL")
     return state
 
 
@@ -143,25 +270,28 @@ def debug_check_node(state: WorkflowState) -> WorkflowState:
             logger.exception("debug_check: %s raised for run %s", name, state.get("run_id"))
             checks.append({"name": name, "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1})
 
-    state["debug_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
+    passed = bool(checks) and all(c["passed"] for c in checks)
+    state["debug_result"] = {"passed": passed, "checks": checks}
+    logger.info("[debug_check] run=%s | compile+build: %s", state.get("run_id") or "-", "PASS" if passed else "FAIL")
     return state
 
 
 def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
     """LLM: write unit tests for the generated project, once (no gate/commit here)."""
+    logger.info("[unit_test_generate] run=%s | starting...", state.get("run_id") or "-")
     return _unit_test_agent.execute(state)
 
 
 def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic check for the Unit Test phase: ``test`` ONLY.
 
-    A pass here routes on to ``code_review`` (the run's actual final stage), which stamps its own
-    terminal ``workflow_status``; the "completed" set on the passing branch here is an
-    intermediate marker, immediately superseded once code_review runs — kept mainly so a crash
-    between the two nodes still leaves a meaningful status rather than none at all. An executor
-    error is treated as a failing check — recorded, not raised — mirroring ``gate_node``/
-    ``debug_check_node``. ``workflow_status`` is only set on the passing branch, mirroring how
-    ``gate_node`` never sets it at all.
+    A pass here routes on to ``documentation`` (then ``security``, the run's actual final stage),
+    which stamp their own status; the "completed" set on the passing branch here is an
+    intermediate marker, immediately superseded later — kept mainly so a crash between nodes
+    still leaves a meaningful status rather than none at all. An executor error is treated as a
+    failing check — recorded, not raised — mirroring ``gate_node``/``debug_check_node``.
+    ``workflow_status`` is only set on the passing branch, mirroring how ``gate_node`` never sets
+    it at all.
     """
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
@@ -176,6 +306,7 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     state["test_result"] = {"passed": check["passed"], "checks": [check]}
     if check["passed"]:
         state["workflow_status"] = "completed"
+    logger.info("[unit_test_run] run=%s | test suite: %s", state.get("run_id") or "-", "PASS" if check["passed"] else "FAIL")
     return state
 
 
@@ -235,6 +366,7 @@ def commit_node(state: WorkflowState) -> WorkflowState:
     * Otherwise (the in-memory/sandbox executor), fall back to a single run-level commit, exactly
       as before — keeps the sandbox/test path and its assertions unchanged.
     """
+    logger.info("[commit] run=%s | committing generated code...", state.get("run_id") or "-")
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     work_items = state.get("work_items", [])
@@ -270,11 +402,22 @@ def commit_node(state: WorkflowState) -> WorkflowState:
             )
             state["workflow_status"] = "push_failed"
             return state
+        if push:
+            # A successful push means the code now lives on a real, clone-able 'dev' branch -
+            # set repo_url so Code Review (and later, Security) can actually clone and analyze
+            # it, instead of silently no-op'ing for lack of a repo URL.
+            repo_url = _derive_repo_url(state.get("git_remote") or "")
+            if repo_url:
+                state["repo_url"] = repo_url
+                state["branch"] = "dev"
         state["generation_summary"] = (state.get("generation_summary") or "") + (
             f"[commit] scaffold on 'main' + {len(feature_commits)} feature commit(s) on 'dev'{pushed}\n"
         )
-        # Not the run's terminal status anymore — the post-commit Debugging<->Unit-Test loop and
-        # then Code Review run next; code_review_node sets the actual terminal status.
+        logger.info("[commit] run=%s | done - %d feature commit(s)%s", state.get("run_id") or "-",
+                    len(feature_commits), pushed)
+        # Not the run's terminal status anymore — Code Review, Refactoring, the post-commit
+        # Debugging<->Unit-Test loop, Documentation, and Security all run next; security_node
+        # sets the actual terminal status.
         state["workflow_status"] = "code_committed"
         return state
 
@@ -286,8 +429,10 @@ def commit_node(state: WorkflowState) -> WorkflowState:
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[commit] FAILED: {exc}\n"
         state["workflow_status"] = "commit_failed"  # else the run reports a mid-run status
         return state
-    # Not the run's terminal status anymore — the post-commit Debugging<->Unit-Test loop and then
-    # Code Review run next; code_review_node sets the actual terminal status.
+    logger.info("[commit] run=%s | done - single run-level commit", state.get("run_id") or "-")
+    # Not the run's terminal status anymore — Code Review, Refactoring, the post-commit
+    # Debugging<->Unit-Test loop, Documentation, and Security all run next; security_node sets
+    # the actual terminal status.
     state["workflow_status"] = "code_committed"
     return state
 
@@ -299,5 +444,6 @@ def escalate_node(state: WorkflowState) -> WorkflowState:
     run. It no longer pauses on an interrupt — that HITL pause had no resume contract and always
     ended the run anyway.
     """
+    logger.warning("[escalate] run=%s | ESCALATED -> needs_human_review", state.get("run_id") or "-")
     state["workflow_status"] = "needs_human_review"
     return state

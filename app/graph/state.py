@@ -4,9 +4,11 @@ Each agent receives this state, updates ONLY the fields it owns, and returns it.
 both the guide's linear-pipeline fields (``review_report`` … one per downstream agent) and the
 Code Generation agent's IMP-001 fields (``work_items``, ``gate_result``, ``repair_attempt`` …).
 
-Two counters live here and must NOT be conflated (CLAUDE.md rule 3): ``repair_attempt`` is the
-LOCAL per-work-item counter (reset to 0 on each new work item); ``attempt`` is the
-ORCHESTRATOR's number, echoed back unchanged (this service never increments it).
+Three LOCAL counters live here and must NOT be conflated with each other or with ``attempt``
+(CLAUDE.md rule 3): ``repair_attempt`` (reset per work item), ``debug_attempt`` (reset once, post-
+commit debug/test loop), and ``security_loop_attempt`` (reset once, the Security<->Refactoring
+loop, capped by ``router.SECURITY_LOOP_CAP``). ``attempt`` is the ORCHESTRATOR's number, echoed
+back unchanged (this service never increments it).
 """
 
 from typing import Any, TypedDict
@@ -82,10 +84,20 @@ class WorkflowState(TypedDict, total=False):
     review_report: str          # Code Review: the Markdown report content
     review_report_path: str     # Code Review: where the report .md was saved (reports/…)
     review_findings_path: str   # Code Review: normalized verified-findings JSON (for Refactoring)
-    refactored_code: str
+    refactored_code: str         # Refactoring: summary of files changed + LLM notes
     unit_tests: list[str]                  # workspace-relative paths of test files written
     documentation: str
     security_report: str
+    security_report_path: str   # Security: where the report .md was saved (reports/…)
+    security_verdict: str       # Security: "approve" | "changes_requested" — routing signal
+    security_findings_path: str # Security: normalized Semgrep findings JSON (for Refactoring)
+
+    # --- Security <-> Refactoring loop + finalize (dev -> main) ---
+    # LOCAL counter (like repair_attempt/debug_attempt): incremented by Refactoring each time it
+    # runs in this loop, reset never (one loop per run). Capped by router.SECURITY_LOOP_CAP.
+    security_loop_attempt: int
+    pr_url: str                  # finalize: URL of the created/updated dev->main PR
+    finalize_status: str         # finalize: "pr_created" | "pr_exists" | "pr_failed" | "skipped"
 
     # --- Lifecycle ---
     workflow_status: str
@@ -135,5 +147,6 @@ def new_state(
         "push_enabled": push_enabled,
         "git_remote": git_remote,
         "git_token": git_token,
+        "security_loop_attempt": 0,
         "workflow_status": "pending",
     }
