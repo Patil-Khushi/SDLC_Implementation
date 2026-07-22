@@ -128,14 +128,25 @@ class RefactoringAgent(BaseAgent):
         for out_path in touched:
             if out_path not in generated:
                 generated.append(out_path)
-        applied = sum(len(by_file[rel]) for rel in present) if touched else 0
+
+        # Findings-bearing files the model never wrote. These are AMBIGUOUS — the model may have
+        # judged no change was needed, OR the tool loop hit REFACTOR_MAX_ITERS before reaching them
+        # (25 files can need 50+ read/write round-trips against a 16-iteration cap). Either way we
+        # REPORT them so a budget-starved run is visible instead of silently reading as "clean" (the
+        # downstream debug/test loop still re-verifies whatever *was* changed).
+        touched_set = set(touched)
+        unreached = [rel for rel in present if _project_path(project_dir, rel) not in touched_set]
+
+        applied = sum(len(by_file[rel]) for rel in present if _project_path(project_dir, rel) in touched_set)
         state["generated_code"] = generated
-        state["refactored_code"] = _summary(sorted(touched), applied, skipped, deferred)
+        state["refactored_code"] = _summary(sorted(touched), applied, skipped, deferred, unreached)
         state["workflow_status"] = "refactored"
-        logger.info(
-            "refactoring: edited %d file(s), applied ~%d finding(s), skipped %d, deferred %d (run %s) | notes: %s",
-            len(touched), applied, len(skipped), len(deferred), state.get("run_id"),
-            (notes or "").strip()[:160],
+        log = logger.warning if unreached else logger.info
+        log(
+            "refactoring: edited %d/%d present file(s), applied ~%d finding(s), skipped %d, "
+            "deferred %d, not-modified %d (run %s) | notes: %s",
+            len(touched), len(present), applied, len(skipped), len(deferred), len(unreached),
+            state.get("run_id"), (notes or "").strip()[:160],
         )
         return state
 
@@ -248,12 +259,19 @@ def _group_by_file(findings: list[dict[str, Any]]) -> dict[str, list[dict[str, A
     return out
 
 
-def _summary(fixed: list[str], applied: int, skipped: list[str], deferred: list[str]) -> str:
+def _summary(
+    fixed: list[str], applied: int, skipped: list[str], deferred: list[str],
+    unreached: list[str] | None = None,
+) -> str:
     parts = [f"Refactored {len(fixed)} file(s), applying {applied} review finding(s)."]
     if fixed:
         parts.append("Fixed: " + ", ".join(fixed))
     if skipped:
         parts.append("Skipped: " + ", ".join(skipped))
+    if unreached:
+        parts.append(
+            "Not modified (no change needed OR edit budget exhausted): " + ", ".join(unreached)
+        )
     if deferred:
         parts.append(f"Deferred (over {MAX_FILES_PER_RUN}-file cap): " + ", ".join(deferred))
     return " ".join(parts)

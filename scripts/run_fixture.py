@@ -107,6 +107,18 @@ def _confirm_plan(work_items: list, *, auto_yes: bool) -> bool:
     return answer in ("y", "yes")
 
 
+#: Substrings that mark a shared-state field as credential-shaped — its value is NEVER printed.
+#: `git_token` (a raw GitHub PAT, set from $GITHUB_PAT) is the one such field today; the substring
+#: match also covers any future token/secret/password/key field so a credential can't leak via the
+#: state dump (into stdout, CI logs, a pasted bug report, ...).
+_SECRET_KEY_MARKERS = ("token", "secret", "password", "passwd", "pat", "api_key", "apikey", "credential")
+
+
+def _is_secret_key(key: str) -> bool:
+    k = key.lower()
+    return any(marker in k for marker in _SECRET_KEY_MARKERS)
+
+
 def _short(val: Any, limit: int = 100) -> str:
     """One-line, truncated repr of a shared-state value for the terminal dump."""
     if isinstance(val, str):
@@ -129,7 +141,8 @@ def _dump_state(state: dict[str, Any]) -> None:
     print("  defined in: app/graph/state.py   |   read via: workflow.get_state(config).values")
     print("=" * 70)
     for key in sorted(state):
-        print(f"  {key:22} = {_short(state[key])}")
+        value = "<redacted>" if _is_secret_key(key) else _short(state[key])
+        print(f"  {key:22} = {value}")
     print("=" * 70)
 
 

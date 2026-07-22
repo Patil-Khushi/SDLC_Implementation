@@ -42,7 +42,7 @@ from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_e
 from app.services.plan_builder import build_plan  # noqa: E402
 from scripts.local_executor import LocalDiskExecutor  # noqa: E402
 from scripts.run_fixture import (  # noqa: E402 (reuse, no duplication)
-    _canned_llm_reply, _confirm_plan, _dump_state, _load_pack, _short,
+    _canned_llm_reply, _confirm_plan, _dump_state, _is_secret_key, _load_pack, _short,
 )
 
 #: Friendly label per graph node so the terminal shows which of the 5 agents is running. The five
@@ -97,7 +97,8 @@ def _stage_marker(node: str, delta: dict) -> None:
     if delta:
         print("   shared-state fields written by this step:")
         for key in sorted(delta):
-            print(f"     {key} = {_short(delta[key])}")
+            value = "<redacted>" if _is_secret_key(key) else _short(delta[key])
+            print(f"     {key} = {value}")
 
 
 def main() -> None:

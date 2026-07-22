@@ -77,10 +77,7 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
             logger.exception("scaffold publish failed for run %s", state.get("run_id"))
             state["generation_summary"] += f"[publish] scaffold push FAILED: {exc}\n"
         else:
-            state["repo_url"] = (
-                f"https://github.com/{remote}"
-                if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", remote) else remote
-            )
+            state["repo_url"] = _repo_url_from_remote(remote)
             ok = getattr(res, "exit_code", 1) == 0
             logger.info(
                 "[publish] repo live + 'main' pushed: %s (%s)",
@@ -138,7 +135,13 @@ def select_work_item_node(state: WorkflowState) -> WorkflowState:
 
 def feature_publish_node(state: WorkflowState) -> WorkflowState:
     """Incremental live publish of the just-gate-passed work item: commit its files to 'dev' and
-    push, so each feature lands on GitHub as it is generated (repo appears feature-by-feature).
+    push, so the repo fills in as it is generated (per-work-item, not batched at the end).
+
+    Commit granularity: this path is **one commit per work item** by design — the deliberate
+    trade-off for live streaming. That diverges from the batch path (``commit_node`` ->
+    ``_group_feature_commits``), which does ONE commit per user-feature (rule 6). A feature that
+    spans several work items therefore lands as several ``dev`` commits here; ``_item_commit_message``
+    keeps them distinct by tagging each with the work-item id.
 
     No-op unless push is enabled AND the executor supports incremental publish (the local-disk
     executor). For the sandbox/test path it passes straight through, and the single end-commit in
@@ -256,6 +259,15 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     return state
 
 
+def _repo_url_from_remote(remote: str) -> str:
+    """A GitHub ``owner/name`` slug -> its https URL; any other remote (URL / local path) is
+    returned as-is. Shared by scaffold_node (early push) and commit_node (feature-history push)."""
+    remote = (remote or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", remote):
+        return f"https://github.com/{remote}"
+    return remote
+
+
 def _feature_commit_message(work_item) -> str:
     """A conventional-commit subject for one work item (its module/feature)."""
     if work_item.screens:
@@ -270,10 +282,18 @@ def _feature_commit_message(work_item) -> str:
 
 
 def _item_commit_message(work_item) -> str:
-    """Per-work-item commit subject for the incremental publish; uses the feature id/title when the
-    item belongs to a user feature, else falls back to the per-work-item subject."""
+    """Commit subject for one incremental (per-work-item) publish.
+
+    NOTE — deliberate divergence from the batch path's "one commit per user-feature" (rule 6 /
+    ``_group_feature_commits``): incremental publish trades that for **one commit per work item**,
+    so each item lands on ``dev`` live as it's generated (the whole point of watch-it-fill-in).
+    To keep those commits distinguishable when a feature spans several work items, the work-item id
+    is included — otherwise every item of a feature would carry an identical ``feat(<feature>): …``
+    subject. Items with no feature just use the per-work-item subject.
+    """
     if getattr(work_item, "feature_id", None):
-        return f"feat({work_item.feature_id}): {work_item.feature_title or work_item.feature_id}"
+        title = work_item.feature_title or work_item.feature_id
+        return f"feat({work_item.feature_id}): {title} [{work_item.id}]"
     return _feature_commit_message(work_item)
 
 
@@ -384,11 +404,7 @@ def commit_node(state: WorkflowState) -> WorkflowState:
         # the push step and consumed by Code Review). A GitHub owner/name slug becomes the https URL;
         # any other remote (URL / local path) is passed through as-is.
         if push:
-            remote = (state.get("git_remote") or "").strip()
-            if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", remote):
-                state["repo_url"] = f"https://github.com/{remote}"
-            elif remote:
-                state["repo_url"] = remote
+            state["repo_url"] = _repo_url_from_remote(state.get("git_remote") or "")
         # Not the run's terminal status anymore — Code Review, Refactoring and the debug/test loop
         # run next; Unit Testing sets the actual terminal status.
         state["workflow_status"] = "code_committed"
