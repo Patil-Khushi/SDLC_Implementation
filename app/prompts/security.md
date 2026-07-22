@@ -28,7 +28,8 @@ Reply with a single JSON object and NOTHING else - no prose, no markdown fences:
 
 ## Rules
 
-- `verdict` is `changes_requested` if any finding is High severity; otherwise use your judgement.
+- **If ANY finding is High severity, `verdict` MUST be `changes_requested` — do not approve.**
+  Otherwise, use your judgment based on the lower-severity findings.
 - Ground the `executive_summary` in the actual findings provided - do not contradict the counts.
 - `executive_summary` may note "no findings" plainly if the list is empty.
 - Output the JSON object only. No code fences, no text before or after it.

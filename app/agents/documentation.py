@@ -66,10 +66,7 @@ class DocumentationAgent(BaseAgent):
 
     @staticmethod
     def _read_sources(executor: Executor, paths: list[str]) -> str:
-        seen: list[str] = []
-        for p in paths:
-            if p not in seen:
-                seen.append(p)
+        seen: list[str] = list(dict.fromkeys(paths))
         blocks: list[str] = []
         for path in seen[:_MAX_FILES]:
             try:

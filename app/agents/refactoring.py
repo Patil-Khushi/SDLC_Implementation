@@ -93,7 +93,7 @@ class RefactoringAgent(BaseAgent):
             state["refactored_code"] = f"Refactoring skipped — findings unavailable: {load_error}. No fixes applied."
             state["refactored_files"] = []
             state["workflow_status"] = "needs_human_review"
-            self._write_report(state)
+            self._write_report(state, load_error=load_error)
             logger.error(
                 "refactoring: findings unavailable (%s) for run %s", load_error, state.get("run_id")
             )
@@ -278,6 +278,8 @@ class RefactoringAgent(BaseAgent):
             return [], f"could not read findings JSON at {path} ({type(exc).__name__})"
         if in_security_loop and isinstance(raw, dict):
             raw = raw.get("findings")
+            if raw is None:
+                return [], f'security findings payload at {path} is missing the "findings" key'
         if not isinstance(raw, list):
             return [], f"findings JSON at {path} is not a list"
         return [f for f in raw if isinstance(f, dict)], None
@@ -318,6 +320,7 @@ class RefactoringAgent(BaseAgent):
         deferred: list[str] | None = None,
         unreached: list[str] | None = None,
         notes: str = "",
+        load_error: str | None = None,
     ) -> None:
         """Render + persist the refactoring report, alongside the Code Review report.
 
@@ -337,6 +340,7 @@ class RefactoringAgent(BaseAgent):
             deferred=deferred or [],
             unreached=unreached or [],
             notes=notes,
+            load_error=load_error,
         )
         state["refactoring_report"] = report
         try:
@@ -370,6 +374,7 @@ def _render_report(
     deferred: list[str],
     unreached: list[str],
     notes: str,
+    load_error: str | None = None,
 ) -> str:
     """The Markdown refactoring report (sectioned like the Code Review report, but simpler)."""
     branch = (state.get("branch") or get_settings().working_branch or "").strip() or "-"
@@ -389,8 +394,12 @@ def _render_report(
     a(f"| Refactored By | Refactoring Agent (automated) |")
     a(f"| Date | {date} |")
     # security_findings_path only exists once Security has run (security-loop re-entry) — see
-    # execute()'s in_security_loop signal; falls back to Code Review's path otherwise.
-    findings_path = state.get("security_findings_path") or state.get("review_findings_path") or "-"
+    # execute()'s in_security_loop signal; falls back to Code Review's path otherwise. On a load
+    # error the path alone would misleadingly read as "no findings" — surface the error instead.
+    if load_error:
+        findings_path = f"<error: {load_error}>"
+    else:
+        findings_path = state.get("security_findings_path") or state.get("review_findings_path") or "-"
     a(f"| Findings source | {findings_path} |")
     a(f"| Findings loaded | {findings_total} |")
     a(f"| Actionable (Open) | {actionable_count} |")
@@ -480,7 +489,7 @@ def refactoring_node(state: WorkflowState) -> WorkflowState:
     logger.info("================ AGENT: Refactoring ================")
     if "security_verdict" in state:
         logger.info("   -> applying Security's findings (security-loop attempt %d) + writing the refactoring report",
-                    int(state.get("security_loop_attempt", 0)) + 1)
+                    int(state.get("security_loop_attempt", 1)))
     else:
         logger.info("   -> applying the code review's findings to the generated files "
                     "+ writing the refactoring report")
