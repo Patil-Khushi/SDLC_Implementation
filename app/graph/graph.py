@@ -9,18 +9,15 @@ project still compiles/builds/passes (with an LLM debugging repair path on failu
 Documentation writes a README from the final source → Security clones the repo again, runs
 Semgrep, and writes a verdict (``approve`` | ``changes_requested``). NO human approval step
 anywhere. The fixed gate/check nodes (and Security's verdict) are the router source; the local
-repair/debug/security-loop caps live in router.py.
+repair/debug caps live in router.py.
 
 Security's verdict drives the run's actual ending (``route_after_security``): ``approve`` →
 ``finalize`` opens (or finds) a `dev -> main` pull request — it never auto-merges, a human
-approves that on GitHub — and the run ends. ``changes_requested`` under the loop cap → Refactoring
-fixes exactly the findings named and pushes back onto `dev`, then loops back to Security to
-re-scan. At the cap, still failing → ``escalate`` (``needs_human_review``, no PR opened) — the same
-terminal path a repair/debug cap-out already uses.
-
-(A separate, not-yet-wired Refactoring slot — consuming Code Review's ``findings.json`` between
-Code Review and the debug/test loop — is a distinct open idea from AGENTS_CONTEXT.md and is NOT
-what `refactoring_node` below does; this graph's `refactoring` node is the Security-loop one only.)
+approves that on GitHub — and the run ends. ``changes_requested`` → ``escalate``
+(``needs_human_review``, no PR opened) — the same terminal path a repair/debug cap-out already
+uses. There is deliberately NO fix-it loop back from Security: `main` already has its own one-shot
+Refactoring stage (fixes Code Review's findings, between `code_review` and `debug_check`) — a
+second, Security-findings-driven use of that same node/agent name would collide with it.
 
     scaffold → select → code_generator → gate ─┬─ pass ──────────────→ select (loop)
                   ▲                             ├─ fail, repair<CAP ─→ repair → gate
@@ -41,16 +38,15 @@ what `refactoring_node` below does; this graph's `refactoring` node is the Secur
                                              unit_test_run ─┬─ pass ──→ documentation → security
                                                              ├─ fail, debug<CAP ─→ debugging → debug_check
                                                              └─ fail, debug>=CAP → escalate → END
-                                             security ─┬─ verdict=approve ─────────→ finalize → END
-                                                        ├─ changes_requested, loop<CAP → refactoring → security (loop)
-                                                        └─ changes_requested, loop>=CAP → escalate → END
+                                             security ─┬─ verdict=approve ──────→ finalize → END
+                                                        └─ changes_requested ───→ escalate → END
 
-Code Review/Documentation/Security each run ONCE per loop-lap, only on this clean completion path
-— every escalate branch above bypasses all of them entirely, same as it bypasses the debug/test
-loop. Documentation is a straight-line fixed edge — it never fails the run on a bad LLM reply or a
+Code Review/Documentation/Security each run ONCE, only on this clean completion path — every
+escalate branch above bypasses all of them entirely, same as it bypasses the debug/test loop.
+Documentation is a straight-line fixed edge — it never fails the run on a bad LLM reply or a
 missing ``repo_url``; it degrades gracefully (an empty report/no-op) instead, so it needs no cap
-or escalate branch. Security/Refactoring/finalize all likewise degrade gracefully on a missing
-``repo_url`` or a GitHub API hiccup rather than crashing the run.
+or escalate branch. Security/finalize likewise degrade gracefully on a missing ``repo_url`` or a
+GitHub API hiccup rather than crashing the run.
 
 Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
 rework loop) is gone — a completed plan commits automatically. The escalation path still flags
@@ -99,7 +95,6 @@ def build_graph():
     graph.add_node("unit_test_run", nodes.unit_test_run_node)
     graph.add_node("documentation", nodes.documentation_node)
     graph.add_node("security", nodes.security_node)
-    graph.add_node("refactoring", nodes.refactoring_node)
     graph.add_node("finalize", nodes.finalize_node)
 
     graph.add_edge(START, "scaffold")
@@ -144,9 +139,8 @@ def build_graph():
     graph.add_edge("documentation", "security")
     graph.add_conditional_edges(
         "security", route_after_security,
-        {"finalize": "finalize", "refactoring": "refactoring", "escalate": "escalate"},
+        {"finalize": "finalize", "escalate": "escalate"},
     )
-    graph.add_edge("refactoring", "security")  # fixes pushed to dev → re-scan (capped by the router)
     graph.add_edge("finalize", END)            # dev -> main PR opened (or skipped/failed) → done
 
     # Checkpointer kept only so get_state(config) can read a finished run; there are no interrupts.

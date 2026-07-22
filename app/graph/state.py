@@ -4,11 +4,10 @@ Each agent receives this state, updates ONLY the fields it owns, and returns it.
 both the guide's linear-pipeline fields (``review_report`` … one per downstream agent) and the
 Code Generation agent's IMP-001 fields (``work_items``, ``gate_result``, ``repair_attempt`` …).
 
-Three LOCAL counters live here and must NOT be conflated with each other or with ``attempt``
-(CLAUDE.md rule 3): ``repair_attempt`` (reset per work item), ``debug_attempt`` (reset once, post-
-commit debug/test loop), and ``security_loop_attempt`` (reset once, the Security<->Refactoring
-loop, capped by ``router.SECURITY_LOOP_CAP``). ``attempt`` is the ORCHESTRATOR's number, echoed
-back unchanged (this service never increments it).
+Two LOCAL counters live here and must NOT be conflated with each other or with ``attempt``
+(CLAUDE.md rule 3): ``repair_attempt`` (reset per work item) and ``debug_attempt`` (reset once,
+post-commit debug/test loop). ``attempt`` is the ORCHESTRATOR's number, echoed back unchanged
+(this service never increments it).
 """
 
 from typing import Any, TypedDict
@@ -90,14 +89,14 @@ class WorkflowState(TypedDict, total=False):
     security_report: str
     security_report_path: str   # Security: where the report .md was saved (reports/…)
     security_verdict: str       # Security: "approve" | "changes_requested" — routing signal
-    security_findings_path: str # Security: normalized Semgrep findings JSON (for Refactoring)
+    security_findings_path: str # Security: normalized Semgrep findings JSON (audit trail)
 
-    # --- Security <-> Refactoring loop + finalize (dev -> main) ---
-    # LOCAL counter (like repair_attempt/debug_attempt): incremented by Refactoring each time it
-    # runs in this loop, reset never (one loop per run). Capped by router.SECURITY_LOOP_CAP.
-    security_loop_attempt: int
+    # --- finalize (dev -> main) ---
+    # Security approving is the run's only path to a PR; changes_requested escalates directly
+    # (needs_human_review) - no automated fix-it loop here (that's main's Code-Review-driven
+    # Refactoring stage's job, upstream of Security; not this agent's).
     pr_url: str                  # finalize: URL of the created/updated dev->main PR
-    finalize_status: str         # finalize: "pr_created" | "pr_exists" | "pr_failed" | "skipped"
+    finalize_status: str         # finalize: "pr_created" | "pr_failed" | "skipped"
 
     # --- Lifecycle ---
     workflow_status: str
@@ -147,6 +146,5 @@ def new_state(
         "push_enabled": push_enabled,
         "git_remote": git_remote,
         "git_token": git_token,
-        "security_loop_attempt": 0,
         "workflow_status": "pending",
     }

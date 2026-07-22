@@ -1,10 +1,9 @@
 """LangGraph node functions.
 
 Each node wraps one step of the IMP-001 subgraph. Agents are instantiated once at import and
-reused (exception: `refactoring_node` imports/instantiates `RefactoringAgent` lazily — see its
-own docstring). The executor is resolved at run time via the provider (``get_executor``), so the
-same node code works with the real MCP sandbox (set in the app lifespan) or a FakeExecutor (set
-in tests).
+reused. The executor is resolved at run time via the provider (``get_executor``), so the same
+node code works with the real MCP sandbox (set in the app lifespan) or a FakeExecutor (set in
+tests).
 """
 
 from __future__ import annotations
@@ -133,47 +132,17 @@ def security_node(state: WorkflowState) -> WorkflowState:
     return out
 
 
-def refactoring_node(state: WorkflowState) -> WorkflowState:
-    """LLM: fix exactly the findings Security flagged and push back to `dev`.
-
-    Reached only via the Security<->Refactoring loop (`router.route_after_security`, capped at
-    `SECURITY_LOOP_CAP`) — never on the `approve` path, which goes straight to `finalize`.
-
-    Increments the LOCAL ``security_loop_attempt`` counter HERE, at the node level, rather than
-    inside ``RefactoringAgent`` itself (unlike ``repair_attempt``/``debug_attempt``, which their
-    respective agents own — see ``repair.py``/``debugging.py``). That's deliberate: the real
-    ``RefactoringAgent`` lives on `main` and was built for an earlier Code-Review-driven loop, with
-    no knowledge of this security loop or its counter. Owning the increment here means the cap is
-    enforced correctly regardless of what that agent does, and is testable without needing the
-    real (cross-branch) implementation.
-
-    Imports ``RefactoringAgent`` lazily (not at module load, unlike the other agents above): its
-    real implementation lives on `main` and isn't necessarily present on every branch this module
-    is edited from. Keeping the import inside the function means the rest of the graph — which
-    never reaches this node on the `approve` path — still imports and runs on its own; only
-    actually taking the `changes_requested` branch requires `app/agents/refactoring.py` to be
-    the real (merged) implementation.
-    """
-    from app.agents.refactoring import RefactoringAgent
-
-    attempt = int(state.get("security_loop_attempt", 0)) + 1
-    state["security_loop_attempt"] = attempt
-    logger.info("[refactoring] run=%s | starting (repo_url=%s, loop attempt %s)",
-                state.get("run_id") or "-", state.get("repo_url") or "none", attempt)
-    out = RefactoringAgent().execute(state)
-    # Belt-and-suspenders: if the agent itself ALSO tracks/overwrites this field (e.g. a future
-    # main-branch implementation adopts the same name), never let the loop counter go backwards.
-    out["security_loop_attempt"] = max(attempt, int(out.get("security_loop_attempt", 0)))
-    logger.info("[refactoring] run=%s | done - status=%s", state.get("run_id") or "-",
-                out.get("workflow_status") or "-")
-    return out
-
-
 def finalize_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic (mirrors `commit_node` — never LLM-formed): Security approved, so open
     (or find) the `dev -> main` pull request. Never merges — a human approves the merge on GitHub;
     this keeps a shared remote safe and matches AGENTS_CONTEXT.md §6b ("the Security agent scans,
     it does not merge" — nor does this step auto-merge on its behalf).
+
+    No fix-it loop back to Security: a `changes_requested` verdict routes straight to `escalate`
+    (see `router.route_after_security`) rather than to a `refactoring` node. `main` already has its
+    own one-shot Refactoring stage (fixes Code Review's findings, between `code_review` and
+    `debug_check`) — reusing that name/agent for a second, differently-shaped (looped, security-
+    findings-driven) purpose here was a naming and design collision with it, not a real fit.
     """
     run_id = state.get("run_id") or "-"
     repo_url = (state.get("repo_url") or "").strip()

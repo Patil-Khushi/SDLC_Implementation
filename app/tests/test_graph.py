@@ -12,9 +12,8 @@ import json
 
 import pytest
 
-import app.agents.refactoring as refactoring_module
 from app.graph.graph import workflow
-from app.graph.router import REPAIR_CAP, SECURITY_LOOP_CAP
+from app.graph.router import REPAIR_CAP
 from app.graph.state import new_state
 from app.integrations.executor import FakeExecutor, set_executor
 from app.models import WorkItem
@@ -71,11 +70,13 @@ def _stub_llm(monkeypatch):
     set_executor(None)
 
 
-def _invoke(executor: FakeExecutor, work_items: list[WorkItem], thread_id: str) -> dict:
+def _invoke(executor: FakeExecutor, work_items: list[WorkItem], thread_id: str, *, repo_url: str = "") -> dict:
     """Fresh invoke; runs to completion (no HITL pause) and returns the final state."""
     set_executor(executor)
     initial = new_state(run_id="run-1", attempt=7, project_id="p1")
     initial["work_items"] = work_items
+    if repo_url:
+        initial["repo_url"] = repo_url
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
     workflow.invoke(initial, config)
     return dict(workflow.get_state(config).values)
@@ -158,35 +159,18 @@ def test_documentation_and_security_run_after_code_review_on_the_happy_path() ->
     assert final["security_report_path"]
 
 
-def test_security_loop_caps_at_3_then_escalates_no_pr(monkeypatch) -> None:
+def test_security_changes_requested_escalates_directly_no_pr() -> None:
     # A disallowed repo_url makes Security (and Code Review) take their deterministic
-    # "changes_requested" no-clone path every single call — no Docker/sandbox needed, and no
-    # dependence on the LLM stub's output. RefactoringAgent's REAL implementation lives on `main`
-    # (this branch's app/agents/refactoring.py is an empty stub), so it's monkeypatched in here;
-    # its only job for this test is to exist and return the state unchanged.
-    class _FakeRefactoringAgent:
-        def execute(self, state):
-            state["refactored_code"] = "fixed (fake, for this test only)"
-            state["workflow_status"] = "refactored"
-            return state
-
-    monkeypatch.setattr(refactoring_module, "RefactoringAgent", _FakeRefactoringAgent, raising=False)
-
+    # "changes_requested" no-clone path — no Docker/sandbox needed, no dependence on the LLM
+    # stub's output. There is no fix-it loop back from Security (that's `main`'s Code-Review-driven
+    # Refactoring stage's job, upstream of this): changes_requested routes straight to escalate.
     executor = FakeExecutor()
-    set_executor(executor)
-    initial = new_state(run_id="run-1", attempt=7, project_id="p1")
-    initial["work_items"] = [LOGIN_ITEM]
-    initial["repo_url"] = "https://evil.com/acme/repo"  # disallowed -> deterministic changes_requested
-    config = {"configurable": {"thread_id": "t-security-loop-cap"}, "recursion_limit": 100}
-    workflow.invoke(initial, config)
-    final = dict(workflow.get_state(config).values)
+    final = _invoke(executor, [LOGIN_ITEM], "t-security-escalate", repo_url="https://evil.com/acme/repo")
 
     assert final["workflow_status"] == "needs_human_review"      # escalated, no PR opened
     assert final["security_verdict"] == "changes_requested"
-    assert final["security_loop_attempt"] == SECURITY_LOOP_CAP   # exactly 3 refactoring attempts
     assert "finalize_status" not in final                        # finalize never reached
     assert "pr_url" not in final
-    assert final["refactored_code"] == "fixed (fake, for this test only)"  # refactoring DID run
 
 
 def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:
