@@ -77,13 +77,3 @@ def route_after_test_run(state: WorkflowState) -> str:
     if int(state.get("debug_attempt", 0)) < DEBUG_CAP:
         return "debugging"
     return "escalate"
-
-
-def route_after_security(state: WorkflowState) -> str:
-    """The run's final decision: Security approved → finalize (open the dev -> main PR);
-    changes_requested → escalate (needs_human_review, no PR opened) — same terminal path a
-    repair/debug cap-out uses. No automated fix-it loop here: that's `main`'s Code-Review-driven
-    Refactoring stage's job, upstream of Security, not this one's."""
-    if state.get("security_verdict") == "approve":
-        return "finalize"
-    return "escalate"

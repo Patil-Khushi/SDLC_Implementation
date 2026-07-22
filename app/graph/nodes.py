@@ -18,8 +18,6 @@ from app.agents.security import SecurityAgent
 from app.agents.unit_test import UnitTestAgent
 from app.graph.state import GateCheck, WorkflowState
 from app.integrations.executor import get_executor
-from app.integrations.github import get_github_client
-from app.integrations.review_sandbox import is_allowed_repo_url
 from app.services.boilerplate import render_scaffold
 
 logger = logging.getLogger(__name__)
@@ -29,9 +27,6 @@ _code_review = CodeReviewAgent()
 _unit_test_agent = UnitTestAgent()
 _documentation_agent = DocumentationAgent()
 _security_agent = SecurityAgent()
-
-# owner/repo out of the same https://github.com/<owner>/<repo> form `is_allowed_repo_url` accepts.
-_OWNER_REPO_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
 # Recognized forms of `git_remote` that resolve to a clone-able GitHub HTTPS URL for Code Review -
 # a bare "owner/repo" slug (same convention commit_feature_history's own remote-detection regex
@@ -130,48 +125,6 @@ def security_node(state: WorkflowState) -> WorkflowState:
     out = _security_agent.execute(state)
     logger.info("[security] run=%s | done - report at %s", state.get("run_id") or "-", out.get("security_report_path") or "(not saved)")
     return out
-
-
-def finalize_node(state: WorkflowState) -> WorkflowState:
-    """FIXED, deterministic (mirrors `commit_node` — never LLM-formed): Security approved, so open
-    (or find) the `dev -> main` pull request. Never merges — a human approves the merge on GitHub;
-    this keeps a shared remote safe and matches AGENTS_CONTEXT.md §6b ("the Security agent scans,
-    it does not merge" — nor does this step auto-merge on its behalf).
-
-    No fix-it loop back to Security: a `changes_requested` verdict routes straight to `escalate`
-    (see `router.route_after_security`) rather than to a `refactoring` node. `main` already has its
-    own one-shot Refactoring stage (fixes Code Review's findings, between `code_review` and
-    `debug_check`) — reusing that name/agent for a second, differently-shaped (looped, security-
-    findings-driven) purpose here was a naming and design collision with it, not a real fit.
-    """
-    run_id = state.get("run_id") or "-"
-    repo_url = (state.get("repo_url") or "").strip()
-    head = (state.get("branch") or "dev").strip()
-
-    if not repo_url or not is_allowed_repo_url(repo_url):
-        logger.info("[finalize] run=%s | no repo_url / not an allowed GitHub URL - skipping PR", run_id)
-        state["finalize_status"] = "skipped"
-        return state
-
-    match = _OWNER_REPO_RE.match(repo_url)
-    if not match:
-        logger.warning("[finalize] run=%s | could not parse owner/repo from repo_url: %s", run_id, repo_url)
-        state["finalize_status"] = "skipped"
-        return state
-    owner, repo = match.group(1), match.group(2)
-
-    title = f"Security-approved: merge {head} into main"
-    body = (state.get("security_report") or "Security scan passed.")[:60000]
-    logger.info("[finalize] run=%s | opening PR %s -> main for %s/%s ...", run_id, head, owner, repo)
-    result = get_github_client().create_or_update_pull_request(owner, repo, head, "main", title, body)
-    if result.ok:
-        state["pr_url"] = result.url
-        state["finalize_status"] = "pr_created"
-        logger.info("[finalize] run=%s | PR ready: %s", run_id, result.url)
-    else:
-        state["finalize_status"] = "pr_failed"
-        logger.warning("[finalize] run=%s | PR failed: %s", run_id, result.error)
-    return state
 
 
 def select_work_item_node(state: WorkflowState) -> WorkflowState:

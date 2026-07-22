@@ -159,18 +159,17 @@ def test_documentation_and_security_run_after_code_review_on_the_happy_path() ->
     assert final["security_report_path"]
 
 
-def test_security_changes_requested_escalates_directly_no_pr() -> None:
+def test_security_verdict_is_advisory_only_run_still_completes() -> None:
     # A disallowed repo_url makes Security (and Code Review) take their deterministic
     # "changes_requested" no-clone path — no Docker/sandbox needed, no dependence on the LLM
-    # stub's output. There is no fix-it loop back from Security (that's `main`'s Code-Review-driven
-    # Refactoring stage's job, upstream of this): changes_requested routes straight to escalate.
+    # stub's output. Nothing currently routes on the verdict: the run still ends normally
+    # (security_node -> END unconditionally), same terminal status as the approve case.
     executor = FakeExecutor()
-    final = _invoke(executor, [LOGIN_ITEM], "t-security-escalate", repo_url="https://evil.com/acme/repo")
+    final = _invoke(executor, [LOGIN_ITEM], "t-security-verdict", repo_url="https://evil.com/acme/repo")
 
-    assert final["workflow_status"] == "needs_human_review"      # escalated, no PR opened
+    assert final["workflow_status"] == "security_reviewed"
     assert final["security_verdict"] == "changes_requested"
-    assert "finalize_status" not in final                        # finalize never reached
-    assert "pr_url" not in final
+    assert "not an allowed GitHub URL" in final["security_report"]
 
 
 def test_scaffold_renders_boilerplate_once_before_any_work_item() -> None:

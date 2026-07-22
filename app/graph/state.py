@@ -91,13 +91,6 @@ class WorkflowState(TypedDict, total=False):
     security_verdict: str       # Security: "approve" | "changes_requested" — routing signal
     security_findings_path: str # Security: normalized Semgrep findings JSON (audit trail)
 
-    # --- finalize (dev -> main) ---
-    # Security approving is the run's only path to a PR; changes_requested escalates directly
-    # (needs_human_review) - no automated fix-it loop here (that's main's Code-Review-driven
-    # Refactoring stage's job, upstream of Security; not this agent's).
-    pr_url: str                  # finalize: URL of the created/updated dev->main PR
-    finalize_status: str         # finalize: "pr_created" | "pr_failed" | "skipped"
-
     # --- Lifecycle ---
     workflow_status: str
 
