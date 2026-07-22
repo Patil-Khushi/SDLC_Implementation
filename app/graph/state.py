@@ -4,10 +4,11 @@ Each agent receives this state, updates ONLY the fields it owns, and returns it.
 both the guide's linear-pipeline fields (``review_report`` … one per downstream agent) and the
 Code Generation agent's IMP-001 fields (``work_items``, ``gate_result``, ``repair_attempt`` …).
 
-Two LOCAL counters live here and must NOT be conflated with each other or with ``attempt``
-(CLAUDE.md rule 3): ``repair_attempt`` (reset per work item) and ``debug_attempt`` (reset once,
-post-commit debug/test loop). ``attempt`` is the ORCHESTRATOR's number, echoed back unchanged
-(this service never increments it).
+Three LOCAL counters live here and must NOT be conflated with each other or with ``attempt``
+(CLAUDE.md rule 3): ``repair_attempt`` (reset per work item), ``debug_attempt`` (reset once,
+post-commit debug/test loop), and ``security_loop_attempt`` (reset once, the Security<->
+Refactoring loop, capped by ``router.SECURITY_LOOP_CAP``). ``attempt`` is the ORCHESTRATOR's
+number, echoed back unchanged (this service never increments it).
 """
 
 from typing import Any, TypedDict
@@ -89,11 +90,13 @@ class WorkflowState(TypedDict, total=False):
     security_report: str
     security_report_path: str   # Security: where the report .md was saved (reports/…)
     security_verdict: str       # Security: "approve" | "changes_requested" — routing signal
-    security_findings_path: str # Security: normalized Semgrep findings JSON (audit trail)
+    security_findings_path: str # Security: normalized Semgrep findings JSON (for Refactoring)
 
-    # --- finalize (dev -> main) + packaging ---
-    # Reached only on security_verdict == "approve" (see router.route_after_security);
-    # changes_requested escalates directly (needs_human_review) instead - no automated fix-it loop.
+    # --- Security <-> Refactoring loop + finalize (dev -> main) + packaging ---
+    # LOCAL counter (like repair_attempt/debug_attempt): incremented by Refactoring only when
+    # re-entered from this loop (never on its original, one-shot post-Code-Review call — see
+    # RefactoringAgent.execute). Capped by router.SECURITY_LOOP_CAP.
+    security_loop_attempt: int
     pr_url: str                  # finalize: URL of the created/updated dev->main PR
     finalize_status: str         # finalize: "pr_created" | "pr_failed" | "skipped"
     package_path: str            # package: local path of the zipped project + docs (the run's output)
@@ -146,5 +149,6 @@ def new_state(
         "push_enabled": push_enabled,
         "git_remote": git_remote,
         "git_token": git_token,
+        "security_loop_attempt": 0,
         "workflow_status": "pending",
     }

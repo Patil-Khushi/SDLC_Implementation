@@ -16,7 +16,7 @@ import pytest
 import app.agents.security as security_module
 import app.graph.nodes as nodes_module
 from app.graph.graph import workflow
-from app.graph.router import REPAIR_CAP
+from app.graph.router import REPAIR_CAP, SECURITY_LOOP_CAP
 from app.graph.state import new_state
 from app.integrations.executor import FakeExecutor, set_executor
 from app.integrations.github import FakeGitHubClient
@@ -212,16 +212,61 @@ def test_security_approve_opens_pr_and_builds_package(monkeypatch) -> None:
     assert Path(final["package_path"]).exists()
 
 
-def test_security_changes_requested_escalates_no_pr_no_package() -> None:
+def test_security_changes_requested_loops_then_escalates_no_pr_no_package() -> None:
     # A disallowed repo_url makes Security take its deterministic "changes_requested" no-clone
-    # path — no Docker/sandbox needed. changes_requested routes straight to escalate: no PR, no
-    # zip. Refactoring already ran once, earlier, driven by Code Review's findings - Security's
-    # findings are advisory-only past that point (no automated fix-it loop back from here).
+    # path on EVERY scan (repo_url never changes) — no Docker/sandbox needed. changes_requested
+    # loops security -> refactoring -> security up to SECURITY_LOOP_CAP times (refactoring finds
+    # nothing actionable each pass, since there's no real finding — just the disallowed-URL note),
+    # then escalates: no PR, no zip.
     executor = FakeExecutor()
     final = _invoke(executor, [LOGIN_ITEM], "t-security-escalate", repo_url="https://evil.com/acme/repo")
 
     assert final["workflow_status"] == "needs_human_review"
     assert final["security_verdict"] == "changes_requested"
+    assert final["security_loop_attempt"] == SECURITY_LOOP_CAP  # looped the full cap before giving up
     assert "finalize_status" not in final
     assert "pr_url" not in final
     assert "package_path" not in final
+
+
+def test_security_loop_exits_via_finalize_once_a_rescan_approves(monkeypatch) -> None:
+    # First scan finds a High-severity issue -> forced changes_requested (regardless of the LLM's
+    # own verdict — see security._final_verdict) -> refactoring runs once -> loops back to
+    # security; the second scan is clean -> approve -> finalize -> package. Verifies the loop's
+    # ROUTING/counter mechanics end-to-end; the actual file edit isn't exercised here since
+    # complete_with_tools is a canned stub in this harness, not a real tool-execution loop.
+    calls = {"n": 0}
+    high_severity_semgrep = json.dumps({"results": [
+        {"check_id": "python.lang.security.audit.exec-detected", "path": "main.py",
+         "start": {"line": 1}, "extra": {"message": "Found exec() call.", "severity": "ERROR"}},
+    ]})
+
+    def sandbox_factory():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            from app.integrations.executor import RunResult
+            return FakeReviewSandbox(
+                files={"main.py": "exec(x)\n"},
+                responses={"semgrep": RunResult(stdout=high_severity_semgrep, stderr="", exit_code=1)},
+            )
+        return FakeReviewSandbox(files={"main.py": "print(x)\n"})  # clean on the re-scan
+
+    def dispatch_complete(prompt, *, system=None, **kwargs):
+        if system and "Security step" in system:
+            return json.dumps({"executive_summary": "reviewed", "verdict": "approve"})
+        return CODEGEN_JSON
+
+    monkeypatch.setattr(llm_gateway.llm_gateway, "complete", dispatch_complete)
+    monkeypatch.setattr(security_module, "get_review_sandbox", sandbox_factory)
+    fake_github = FakeGitHubClient()
+    monkeypatch.setattr(nodes_module, "get_github_client", lambda: fake_github)
+
+    executor = FakeExecutor()
+    final = _invoke(executor, [LOGIN_ITEM], "t-loop-fix", repo_url="https://github.com/acme/generated-app")
+
+    assert final["workflow_status"] == "completed"
+    assert final["security_verdict"] == "approve"       # ended clean, on the SECOND scan
+    assert final["security_loop_attempt"] == 1           # exactly one refactoring pass
+    assert final["finalize_status"] == "pr_created"
+    assert final["package_path"]
+    assert calls["n"] == 2                                # scanned twice: initial + one re-scan

@@ -12,13 +12,15 @@ source) → Security (clones the repo again, runs Semgrep, writes a verdict). NO
 step anywhere. The fixed gate/check nodes (and Security's verdict) are the router source; the
 local repair/debug caps live in router.py.
 
-Security's verdict drives the run's actual ending (``route_after_security``): ``approve`` →
+Security's verdict drives what happens next (``route_after_security``): ``approve`` →
 ``finalize`` opens (or finds) a `dev -> main` pull request — it never auto-merges, a human
 approves that on GitHub — then ``package`` zips the generated project + README/review/security
-reports into one downloadable artifact. ``changes_requested`` → ``escalate``
-(``needs_human_review``, no PR/zip) — the same terminal path a repair/debug cap-out already uses.
-There is no automated fix-it loop back from Security: Refactoring already ran once, earlier,
-driven by Code Review's findings — Security's findings are advisory-only past that point.
+reports into one downloadable artifact. ``changes_requested`` under ``router.SECURITY_LOOP_CAP``
+→ ``refactoring`` (the SAME Refactoring node/agent Code Review's one-shot call uses — see
+``route_after_refactoring`` and ``RefactoringAgent``'s class docstring for how it tells the two
+callers apart) fixes exactly the findings Security named, then loops back to ``security`` to
+re-scan. At the cap, still failing → ``escalate`` (``needs_human_review``, no PR/zip) — the same
+terminal path a repair/debug cap-out already uses.
 
     scaffold → select → code_generator → gate ─┬─ pass ──────────────→ select (loop)
                   ▲                             ├─ fail, repair<CAP ─→ repair → gate
@@ -27,8 +29,8 @@ driven by Code Review's findings — Security's findings are advisory-only past 
                   └── select: nothing left → commit
                                                   │
                                                   ▼
-                                             code_review → refactoring → debug_check
-                                                                              │
+                                             code_review → refactoring ─┬─ (from code_review) → debug_check
+                                                                        └─ (from security loop) → security
                                              debug_check ─┬─ pass, no tests yet ─→ unit_test_generate
                                                            ├─ pass, tests exist ──→ unit_test_run
                                                            ├─ fail, debug<CAP ────→ debugging → debug_check
@@ -38,18 +40,21 @@ driven by Code Review's findings — Security's findings are advisory-only past 
                                              unit_test_run ─┬─ pass ──→ documentation → security
                                                              ├─ fail, debug<CAP ─→ debugging → debug_check
                                                              └─ fail, debug>=CAP → escalate → END
-                                             security ─┬─ verdict=approve ──────→ finalize → package → END
-                                                        └─ changes_requested ───→ escalate → END
+                                             security ─┬─ verdict=approve ────────────→ finalize → package → END
+                                                        ├─ changes_requested, loop<CAP → refactoring → security (loop)
+                                                        └─ changes_requested, loop>=CAP → escalate → END
 
-Code Review + Refactoring run ONCE, right after the run-level commit and BEFORE the debug/test
-loop, so the loop verifies the refactored code. Every escalate branch in the code-generation loop
-above bypasses the whole post-commit pipeline. Refactoring does not commit, push, or re-run any
-gate — downstream verification is the debug/test loop's job. Documentation/Security/finalize all
-degrade gracefully on a missing ``repo_url`` or a GitHub API hiccup rather than crashing the run;
-``package`` runs even if ``finalize``'s PR call failed, so a GitHub hiccup never withholds the
-tangible zip output. The run's true terminal ``workflow_status`` is set by ``package`` (approve
-path) or ``escalate`` (changes_requested path) — Unit Testing's earlier "completed" stamp is just
-an intermediate marker.
+Code Review + Refactoring run at least ONCE, right after the run-level commit and BEFORE the
+debug/test loop, so the loop verifies the refactored code; Refactoring may run up to
+``SECURITY_LOOP_CAP`` MORE times later, driven by Security instead. Every escalate branch in the
+code-generation loop above bypasses the whole post-commit pipeline. Refactoring does not commit,
+push, or re-run any gate — downstream verification (the debug/test loop, or Security's re-scan)
+is the caller's job. Documentation/Security/finalize all degrade gracefully on a missing
+``repo_url`` or a GitHub API hiccup rather than crashing the run; ``package`` runs even if
+``finalize``'s PR call failed, so a GitHub hiccup never withholds the tangible zip output. The
+run's true terminal ``workflow_status`` is set by ``package`` (approve path) or ``escalate``
+(changes_requested path) — Unit Testing's earlier "completed" stamp is just an intermediate
+marker.
 
 Human-in-the-loop was removed as not required: the batch-review approval interrupt (and its
 rework loop) is gone — a completed plan commits automatically. The escalation path still flags
@@ -73,6 +78,7 @@ from app.graph.router import (
     route_after_codegen,
     route_after_debug_check,
     route_after_gate,
+    route_after_refactoring,
     route_after_security,
     route_after_select,
     route_after_test_generate,
@@ -146,11 +152,14 @@ def build_graph():
     )
     graph.add_edge("debugging", "debug_check")    # debugging → back to the fixed debug/build check
     graph.add_edge("code_review", "refactoring")  # review written → apply the fixes it named
-    graph.add_edge("refactoring", "debug_check")  # fixes applied → debug/test the refactored code
+    graph.add_conditional_edges(
+        "refactoring", route_after_refactoring,
+        {"debug_check": "debug_check", "security": "security"},
+    )
     graph.add_edge("documentation", "security")
     graph.add_conditional_edges(
         "security", route_after_security,
-        {"finalize": "finalize", "escalate": "escalate"},
+        {"finalize": "finalize", "refactoring": "refactoring", "escalate": "escalate"},
     )
     graph.add_edge("finalize", "package")  # PR opened (or skipped/failed) → build the zip output
     graph.add_edge("package", END)         # zip ready (or failed) → done

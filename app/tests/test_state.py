@@ -11,7 +11,7 @@ ALL_FIELDS = {
     "push_enabled", "git_remote", "git_token",
     "review_report", "review_report_path", "review_findings_path", "refactored_code", "unit_tests",
     "documentation", "security_report", "security_report_path", "security_verdict",
-    "security_findings_path", "pr_url", "finalize_status", "package_path",
+    "security_findings_path", "security_loop_attempt", "pr_url", "finalize_status", "package_path",
     "workflow_status",
 }
 
@@ -20,7 +20,7 @@ INITIALIZED_FIELDS = {
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
     "gate_result", "repair_attempt", "debug_attempt", "debug_result", "generation_summary",
     "generation_metrics",
-    "push_enabled", "git_remote", "git_token", "workflow_status",
+    "push_enabled", "git_remote", "git_token", "security_loop_attempt", "workflow_status",
 }
 
 
@@ -36,6 +36,7 @@ def test_new_state_defaults() -> None:
     assert state["attempt"] == 3                # orchestrator's counter, echoed unchanged
     assert state["repair_attempt"] == 0         # local counter starts at zero
     assert state["debug_attempt"] == 0
+    assert state["security_loop_attempt"] == 0  # local counter for the Security<->Refactoring loop
     assert state["debug_result"] is None
     assert state["generated_code"] == []        # list of file paths, not a str
     assert state["work_items"] == []
