@@ -125,7 +125,38 @@ class CodeGeneratorAgent(BaseAgent):
                 "[code_generator] %s: unparseable reply (%s). First 1500 chars:\n%s\n--- last 500 chars:\n%s",
                 work_item.id, error, raw[:1500], raw[-500:],
             )
+            parsed = self._generate_per_file(work_item, context, system)
         return parsed
+
+    def _generate_per_file(self, work_item: WorkItem, context: str, system: str) -> list[dict[str, str]] | None:
+        """Last-resort fallback when BOTH bulk replies were unparseable: ask for each target file
+        in its own call. A single-file reply is small and structurally simple, so whatever
+        malformation sank the 15k-char bulk reply (observed live: the model writing `"content">`
+        for one entry out of seven) can only cost that ONE file, not the whole work item. Partial
+        coverage beats zero — the completeness gate + repair loop then supplies anything missed.
+        """
+        logger.warning(
+            "[code_generator] %s: falling back to per-file generation (%d file(s))",
+            work_item.id, len(work_item.target_files),
+        )
+        collected: list[dict[str, str]] = []
+        for path in work_item.target_files:
+            spec = work_item.file_specs.get(path, "")
+            prompt = (
+                f"Work item: {work_item.id} — generate EXACTLY ONE file.\n"
+                f"Target file: {path}\n"
+                + (f"What it must contain: {spec}\n" if spec else "")
+                + f"\nContext (only the cited slices):\n{context}\n\n"
+                f'Respond with STRICT JSON only: {{"files":[{{"path":"{path}","content":...}}]}} '
+                "— one entry, no prose, no code fences."
+            )
+            parsed, error = self._parse(self.llm.complete(prompt=prompt, system=system))
+            if parsed:
+                collected.extend(e for e in parsed if e.get("path"))
+            else:
+                logger.warning("[code_generator] %s: per-file fallback failed for %s (%s)",
+                               work_item.id, path, error)
+        return collected or None
 
     @staticmethod
     def _build_prompt(work_item: WorkItem, context: str) -> str:
@@ -371,6 +402,19 @@ def _repair_invalid_escapes(text: str) -> str:
     return _ESCAPE_TOKEN.sub(lambda m: m.group(0) if len(m.group(0)) > 1 else r"\\", text)
 
 
+# Structural glitch observed live (resources design pack, backend-root-2, every run + retry):
+# for 2 of 7 file entries the model wrote `"content">...` — a literal `>` where `:"` belongs —
+# while the value body itself was correctly escaped AND correctly closed with `"`. Restricted to
+# the three schema keys so a `"...">` inside a string value can't be touched, and applied only
+# on the salvage path (after standard parsing already failed).
+_MISSING_COLON_QUOTE = re.compile(r'"(path|content|notes)">')
+
+
+def _repair_missing_colon_quote(text: str) -> str:
+    """Rewrite `"content">…` to `"content":"…` (and likewise for path/notes)."""
+    return _MISSING_COLON_QUOTE.sub(r'"\1":"', text)
+
+
 def _extract_json(text: str) -> Any:
     """Best-effort JSON object extraction from a model reply.
 
@@ -405,10 +449,17 @@ def _extract_json(text: str) -> Any:
                 return json.loads(attempt, strict=False)  # strict=False: allow raw \n/\t in strings
             except (ValueError, TypeError):
                 pass
-            try:
-                return json.loads(_repair_invalid_escapes(attempt), strict=False)
-            except (ValueError, TypeError):
-                pass
+            # Salvage passes, cheapest first; the structural repair composes with the escape
+            # repair since both defects have been observed in the same reply.
+            for salvaged in (
+                _repair_invalid_escapes(attempt),
+                _repair_missing_colon_quote(attempt),
+                _repair_invalid_escapes(_repair_missing_colon_quote(attempt)),
+            ):
+                try:
+                    return json.loads(salvaged, strict=False)
+                except (ValueError, TypeError):
+                    pass
     return None
 
 

@@ -94,7 +94,8 @@ def test_context_includes_cited_slices() -> None:
 
 def test_invalid_json_twice_records_failure_no_writes() -> None:
     executor = FakeExecutor()
-    agent = CodeGeneratorAgent(executor=executor, llm=FakeLLMGateway(["not json", "still not json"]))
+    # bulk ask + bulk retry + one per-file fallback call (single target file) — ALL junk
+    agent = CodeGeneratorAgent(executor=executor, llm=FakeLLMGateway(["not json", "still not json", "nope"]))
 
     item = WorkItem(id="WI-002", requirement_ids=["REQ-9"], endpoints=["POST /x"], target_files=["a.py"])
     out = agent.execute(_state_with_item(item, {}))
@@ -190,6 +191,58 @@ def test_item_with_regex_heavy_content_completes_end_to_end() -> None:
     assert out["codegen_ok"] is True
     assert executor.writes == ["p1/knexfile.js"]
     assert "\\d{4}" in executor.files["p1/knexfile.js"]
+
+
+def test_missing_colon_quote_after_content_key_is_repaired() -> None:
+    # Live failure #2 on backend-root-2 (after escape salvage had fixed failure #1): for 2 of 7
+    # entries the model wrote `"content">...` — a literal '>' where ':"' belongs — with the value
+    # body correctly escaped AND closed. Both the first ask and the retry glitched identically,
+    # so the repair must recover it. Shape trimmed from the captured raw reply.
+    from app.agents.code_generator import _extract_json
+
+    raw = ('{"files":[{"path":"knexfile.js","content":"module.exports = {};\\n"},'
+           '{"path":".env.example","content"># App\\nDB_HOST=localhost\\n"},'
+           '{"path":".gitignore","content">node_modules\\n.env\\n"}],"notes":""}')
+    obj = _extract_json(raw)
+    assert obj is not None, "structural repair failed to recover the reply"
+    files = {f["path"]: f["content"] for f in obj["files"]}
+    assert files["knexfile.js"] == "module.exports = {};\n"        # well-formed entry untouched
+    assert files[".env.example"] == "# App\nDB_HOST=localhost\n"    # repaired entry intact
+    assert files[".gitignore"] == "node_modules\n.env\n"
+
+
+def test_missing_colon_and_invalid_escape_in_the_same_reply_compose() -> None:
+    # Both observed defects at once: one entry missing ':"' AND another carrying a bad regex
+    # escape — the salvage passes must compose, not fix only one.
+    from app.agents.code_generator import _extract_json
+
+    raw = ('{"files":[{"path":".eslintrc.js","content":"ignore: \\"^\\d+$\\""},'
+           '{"path":".env.example","content"># env\\nKEY=1\\n"}],"notes":""}')
+    obj = _extract_json(raw)
+    assert obj is not None
+    files = {f["path"]: f["content"] for f in obj["files"]}
+    assert files[".eslintrc.js"] == 'ignore: "\\d+$"' or "\\d" in files[".eslintrc.js"]
+    assert files[".env.example"] == "# env\nKEY=1\n"
+
+
+def test_per_file_fallback_recovers_when_both_bulk_replies_are_junk() -> None:
+    # If the bulk reply is unparseable twice (whatever the malformation), the agent must fall
+    # back to one-call-per-target-file instead of failing the whole work item.
+    executor = FakeExecutor()
+
+    def dispatch(prompt: str) -> str:
+        if "generate EXACTLY ONE file" in prompt:
+            for path in ("app/api/login.py", "app/services/login_service.py"):
+                if f'"{path}"' in prompt:
+                    return json.dumps({"files": [{"path": path, "content": f"# {path}\n"}]})
+        return "utter garbage, twice"  # both bulk attempts fail
+
+    agent = CodeGeneratorAgent(executor=executor, llm=FakeLLMGateway(dispatch))
+    out = agent.execute(_state_with_item(LOGIN_ITEM, DESIGN_PACK))
+
+    assert out["codegen_ok"] is True
+    assert executor.files["p1/app/api/login.py"] == "# app/api/login.py\n"
+    assert executor.files["p1/app/services/login_service.py"] == "# app/services/login_service.py\n"
 
 
 def test_reask_once_recovers_from_first_bad_reply() -> None:
