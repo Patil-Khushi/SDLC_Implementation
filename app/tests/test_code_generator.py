@@ -113,6 +113,85 @@ def test_invalid_json_twice_records_failure_no_writes() -> None:
     assert out["attempt"] == 2
 
 
+def test_invalid_regex_escapes_in_content_are_salvaged() -> None:
+    # The backend-root-2 live failure: config/README items carry regex patterns, and the model
+    # emits "\." / "\d" inside string values — invalid JSON escapes that json.loads rejects even
+    # with strict=False. _extract_json must repair them instead of failing the whole work item
+    # (deterministically, on every run, since the same item always carries regexes).
+    from app.agents.code_generator import _extract_json
+
+    raw = '{"files":[{"path":".eslintrc.js","content":"rules: [\\"^\\d+$\\", \\"\\.js$\\"]"}],"notes":""}'
+    obj = _extract_json(raw)
+    assert obj is not None
+    assert obj["files"][0]["path"] == ".eslintrc.js"
+    assert "\\d" in obj["files"][0]["content"]      # the regex survived, backslash intact
+    assert "\\.js" in obj["files"][0]["content"]
+
+
+def test_well_formed_reply_never_needs_the_salvage() -> None:
+    # Happy path: json.dumps output parses on the FIRST attempt (the salvage line is not
+    # reached at all) and content round-trips exactly.
+    from app.agents.code_generator import _extract_json
+
+    raw = json.dumps({"files": [{"path": "a.js", "content": 'line1\nline2\t"quoted" \\ backslash é'}]})
+    obj = _extract_json(raw)
+    assert obj["files"][0]["content"] == 'line1\nline2\t"quoted" \\ backslash é'
+
+
+def test_salvage_preserves_valid_escapes_mixed_with_invalid_ones() -> None:
+    # PR #15 review (blocking): the original lookahead salvage corrupted an already-correct
+    # \\d when a genuinely broken \.js sat in the SAME string — the engine skipped the valid
+    # pair's first backslash, then matched its second backslash alone and doubled it
+    # (\\d -> \\\d), so the salvaged candidate STILL failed to parse. The token-consuming
+    # repair must fix the broken escape while leaving the valid one untouched. This input is
+    # invalid JSON, so — unlike a json.dumps round-trip — it genuinely exercises the salvage.
+    from app.agents.code_generator import _extract_json
+
+    raw = r'{"files":[{"path":".eslintrc.js","content":"valid: \\d bad: \.js"}],"notes":""}'
+    obj = _extract_json(raw)
+    assert obj is not None, "salvage failed to recover the reply"
+    assert obj["files"][0]["content"] == r"valid: \d bad: \.js"   # both escapes correct, nothing doubled
+
+
+def test_repair_helper_is_byte_exact_on_every_escape_kind() -> None:
+    # Unit-level pin of _repair_invalid_escapes itself: every valid JSON escape consumed
+    # untouched, every invalid one doubled — including a valid pair ADJACENT to an invalid one.
+    from app.agents.code_generator import _repair_invalid_escapes
+
+    assert _repair_invalid_escapes(r"\d") == r"\\d"                     # invalid -> doubled
+    assert _repair_invalid_escapes(r"\\d") == r"\\d"                    # valid pair untouched
+    assert _repair_invalid_escapes(r"\\\d") == r"\\\\d"                 # valid pair + invalid tail
+    assert _repair_invalid_escapes(r"\n\t\"\\\/ \b\f\r") == r"\n\t\"\\\/ \b\f\r"  # all valid, untouched
+    assert _repair_invalid_escapes("\\u0041") == "\\u0041"              # valid unicode escape untouched
+    assert _repair_invalid_escapes("\\u12") == "\\\\u12"                # truncated unicode -> doubled
+    assert _repair_invalid_escapes("no backslashes") == "no backslashes"
+
+
+def test_raw_json_reply_with_code_fences_inside_strings_parses_whole_reply() -> None:
+    # A README string value containing ``` must not trick the fence regex into extracting a
+    # garbage fragment — a reply that starts with '{' is parsed as-is first.
+    from app.agents.code_generator import _extract_json
+
+    readme = "# Setup\n```bash\nnpm install\n```\nDone.\n```bash\nnpm test\n```"
+    raw = json.dumps({"files": [{"path": "README.md", "content": readme}], "notes": ""})
+    obj = _extract_json(raw)
+    assert obj is not None
+    assert obj["files"][0]["content"] == readme
+
+
+def test_item_with_regex_heavy_content_completes_end_to_end() -> None:
+    executor = FakeExecutor()
+    reply = '{"files":[{"path":"knexfile.js","content":"pattern: \\"^\\d{4}\\""}],"notes":""}'
+    agent = CodeGeneratorAgent(executor=executor, llm=FakeLLMGateway([reply]))
+
+    item = WorkItem(id="WI-003", requirement_ids=[], target_files=["knexfile.js"])
+    out = agent.execute(_state_with_item(item, {}))
+
+    assert out["codegen_ok"] is True
+    assert executor.writes == ["p1/knexfile.js"]
+    assert "\\d{4}" in executor.files["p1/knexfile.js"]
+
+
 def test_reask_once_recovers_from_first_bad_reply() -> None:
     executor = FakeExecutor()
     # first reply invalid, second reply valid -> exactly one re-ask, files written

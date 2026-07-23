@@ -106,14 +106,25 @@ class CodeGeneratorAgent(BaseAgent):
     def _generate_files(self, work_item: WorkItem, context: str, system: str) -> list[dict[str, str]] | None:
         """Ask the model for the {"files":[...]} JSON; re-ask once on parse failure."""
         prompt = self._build_prompt(work_item, context)
-        parsed, error = self._parse(self.llm.complete(prompt=prompt, system=system))
+        raw = self.llm.complete(prompt=prompt, system=system)
+        parsed, error = self._parse(raw)
         if parsed is None:
             retry = (
                 f"{prompt}\n\nYour previous reply was not valid JSON matching "
                 f'{{"files":[{{"path":...,"content":...}}]}}. Error: {error}. '
-                "Reply with STRICT JSON only — no prose, no code fences."
+                "Reply with STRICT JSON only — no prose, no code fences. Inside string values, "
+                "escape every backslash as \\\\ (regex patterns like \\. or \\d are the usual "
+                "culprits) and every double quote as \\\"."
             )
-            parsed, error = self._parse(self.llm.complete(prompt=retry, system=system))
+            raw = self.llm.complete(prompt=retry, system=system)
+            parsed, error = self._parse(raw)
+        if parsed is None:
+            # Don't discard the evidence: without this, a deterministic parse failure (same item,
+            # every run) is undiagnosable — the raw reply is the only artifact that says why.
+            logger.error(
+                "[code_generator] %s: unparseable reply (%s). First 1500 chars:\n%s\n--- last 500 chars:\n%s",
+                work_item.id, error, raw[:1500], raw[-500:],
+            )
         return parsed
 
     @staticmethod
@@ -343,33 +354,59 @@ def _phase_of(work_item: WorkItem) -> tuple[str, str]:
     return "CODE", ", ".join(work_item.target_files) or work_item.id
 
 
+# Models writing regex-heavy content (ESLint configs, knexfile patterns, README markdown)
+# routinely emit "\." or "\d" inside string values; json.loads rejects those even with
+# strict=False (that flag only permits raw control characters), so one bad escape sinks an
+# otherwise perfect reply. Repair by MATCHING AND CONSUMING each valid escape token (left
+# intact) so the regex engine can never re-examine the second byte of a valid pair — a bare
+# lookahead ("\\(?!...)") gets this wrong: on a valid \\d it skips the first backslash, then
+# matches the second one alone and doubles it, corrupting \\d into \\\d (PR #15 review).
+# Any backslash NOT consumed as part of a valid token falls through to the final "\\"
+# alternative and is doubled into a literal backslash.
+_ESCAPE_TOKEN = re.compile(r'\\u[0-9a-fA-F]{4}|\\[\\"/bfnrt]|\\')
+
+
+def _repair_invalid_escapes(text: str) -> str:
+    """Double every backslash that does not start a valid JSON escape; leave valid ones alone."""
+    return _ESCAPE_TOKEN.sub(lambda m: m.group(0) if len(m.group(0)) > 1 else r"\\", text)
+
+
 def _extract_json(text: str) -> Any:
     """Best-effort JSON object extraction from a model reply.
 
     Tolerant of the ways a model wraps a big ``{"files":[...]}`` payload: a code fence anywhere
-    (```json … ```), a prose preamble/postamble, and — crucially — **unescaped control characters
-    inside string values** (raw newlines/tabs in generated source). ``strict=False`` lets
-    ``json.loads`` accept those literal control chars instead of rejecting the whole reply, which
-    is the most common reason a code-carrying reply otherwise "has no JSON object".
+    (```json … ```), a prose preamble/postamble, **unescaped control characters** inside string
+    values (raw newlines/tabs in generated source — ``strict=False`` accepts those), and
+    **invalid backslash escapes** (``"\\."`` from a regex in an ESLint config — repaired to
+    ``"\\\\."`` as a last resort; see ``_repair_invalid_escapes``).
     """
     stripped = text.strip()
 
-    # A fenced block anywhere wins (```json … ``` or ``` … ```); fall back to the whole reply.
     candidates: list[str] = []
+    # A reply that IS the JSON object wins outright — never let a ``` inside a string value
+    # (a README code fence, say) trick the fence regex into extracting a garbage fragment.
+    if stripped.startswith("{"):
+        candidates.append(stripped)
     fence = re.search(r"```[a-zA-Z0-9]*\n?(.*?)```", stripped, re.DOTALL)
     if fence:
         candidates.append(fence.group(1).strip())
-    candidates.append(stripped)
+    if stripped not in candidates:
+        candidates.append(stripped)
 
     for cand in candidates:
-        try:
-            return json.loads(cand, strict=False)  # strict=False: allow raw \n/\t in string values
-        except (ValueError, TypeError):
-            pass
+        trimmed = None
         start, end = cand.find("{"), cand.rfind("}")  # trim prose around the object
         if start != -1 and end > start:
+            trimmed = cand[start : end + 1]
+        for attempt in (cand, trimmed):
+            if attempt is None:
+                continue
             try:
-                return json.loads(cand[start : end + 1], strict=False)
+                return json.loads(attempt, strict=False)  # strict=False: allow raw \n/\t in strings
+            except (ValueError, TypeError):
+                pass
+            try:
+                return json.loads(_repair_invalid_escapes(attempt), strict=False)
             except (ValueError, TypeError):
                 pass
     return None
