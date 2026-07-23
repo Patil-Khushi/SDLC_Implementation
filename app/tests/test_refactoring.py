@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agents.refactoring import MAX_FILES_PER_RUN, RefactoringAgent
+from app.config.settings import get_settings
 from app.integrations.executor import FakeExecutor
 
 
@@ -52,6 +53,19 @@ def _findings_file(tmp_path: Path, findings: list[dict[str, Any]]) -> str:
     p = tmp_path / "findings.json"
     p.write_text(json.dumps(findings), encoding="utf-8")
     return str(p)
+
+
+def _reports_findings(subfolder: str, findings: list[dict[str, Any]], report_md: str | None = None) -> Path:
+    """Write findings.json (and optionally report.md) into <reports_dir>/<subfolder>/, the layout
+    CodeReviewAgent._finish produces — so the agent can locate them by SCANNING the reports dir.
+    reports_dir is the autouse-fixture tmp path (conftest._reports_to_tmp)."""
+    run_dir = Path(get_settings().reports_dir) / subfolder
+    run_dir.mkdir(parents=True, exist_ok=True)
+    fj = run_dir / "findings.json"
+    fj.write_text(json.dumps(findings), encoding="utf-8")
+    if report_md is not None:
+        (run_dir / "report.md").write_text(report_md, encoding="utf-8")
+    return fj
 
 
 def _open(file: str, **over: Any) -> dict[str, Any]:
@@ -228,6 +242,71 @@ def test_report_folder_matches_code_review_when_project_id_is_empty(tmp_path: Pa
 
     report_path = Path(state["refactoring_report_path"])
     assert report_path.parent.name == "abc123-abc123"       # matches CodeReviewAgent._finish's folder
+
+
+def test_finds_findings_by_scanning_reports_dir() -> None:
+    # No review_findings_path on state: the agent locates findings.json by scanning the reports
+    # dir for the newest <subfolder>/findings.json (where Code Review writes it).
+    _reports_findings("proj-r1", [_open("src/foo.py")])
+    executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
+    state = _state()  # deliberately no review_findings_path
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    assert executor.files["proj/src/foo.py"] == "print(1)\n"        # located + fixed via the scan
+    assert state["refactored_files"] == ["proj/src/foo.py"]
+    assert state["workflow_status"] == "refactored"
+
+
+def test_scan_picks_the_newest_findings_folder() -> None:
+    # Two report folders: the more recently modified one wins (later mtime).
+    _reports_findings("old-run", [_open("src/old.py")])
+    newest = _reports_findings("new-run", [_open("src/new.py")])
+    import os
+    import time
+
+    os.utime(newest, (time.time() + 10, time.time() + 10))  # force new-run to be newest
+    executor = FakeExecutor(files={"proj/src/old.py": "print(0)\n", "proj/src/new.py": "print(0)\n"})
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(_state())
+
+    assert executor.files["proj/src/new.py"] == "print(1)\n"        # the newest folder's finding
+    assert executor.files["proj/src/old.py"] == "print(0)\n"        # the older folder ignored
+
+
+def test_report_md_is_added_to_prompt_as_context() -> None:
+    # report.md sitting next to findings.json is passed to the model as extra context.
+    _reports_findings("proj-r1", [_open("src/foo.py")], report_md="UNIQUE-REPORT-MARKER recommendation")
+    executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
+    llm = _StubLLM()
+
+    RefactoringAgent(executor=executor, llm=llm).execute(_state())
+
+    assert llm.prompts and "UNIQUE-REPORT-MARKER" in llm.prompts[0]  # report prose reached the model
+    assert "src/foo.py" in llm.prompts[0]                            # findings still present
+
+
+def test_state_path_used_when_reports_dir_has_no_findings(tmp_path: Path) -> None:
+    # No scan hit (empty reports dir) -> use the exact path Code Review recorded on state.
+    executor = FakeExecutor(files={"proj/src/foo.py": "print(0)\n"})
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/foo.py")]))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    assert executor.files["proj/src/foo.py"] == "print(1)\n"        # located via the state path
+
+
+def test_explicit_state_path_wins_over_reports_scan(tmp_path: Path) -> None:
+    # A caller that prepared its own findings (e.g. run_refactoring.py's normalized file) must not
+    # be overridden by a stale findings.json the scan finds in the reports dir. State path wins.
+    _reports_findings("stale-run", [_open("src/stale.py")])          # would be picked by a scan
+    executor = FakeExecutor(files={"proj/src/chosen.py": "print(0)\n", "proj/src/stale.py": "print(0)\n"})
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/chosen.py")]))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM()).execute(state)
+
+    assert executor.files["proj/src/chosen.py"] == "print(1)\n"      # the explicit state file won
+    assert executor.files["proj/src/stale.py"] == "print(0)\n"       # the reports scan was ignored
 
 
 def test_defers_files_over_the_fan_out_cap(tmp_path: Path) -> None:
