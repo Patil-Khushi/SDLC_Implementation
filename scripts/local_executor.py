@@ -19,14 +19,19 @@ push. This is how "the agent creates the repo when the code is done" works: the 
 reached only after the completeness gate passes and the human approves, so the push happens on
 completion + approval.
 
-Gate note: the code-generation gate is completeness-only (``files_complete``), so ``compile`` /
-``build`` / ``test`` / ``lint`` are never invoked here — they return a no-op pass.
+Fixed-path checks: ``compile`` / ``build`` / ``test`` / ``lint`` run real commands on disk (same
+shape as ``MCPExecutor``'s sandbox versions — npm/tsc/pytest/ruff/eslint), gated by which project
+manifests exist, so a frontend-only or backend-only generated project only runs the steps that
+apply to it. ``test``'s pytest step is gated on ``requirements.txt`` (not run unconditionally like
+the sandbox executor's) because pytest exits 5 ("no tests collected") on a project with zero
+Python files, which would otherwise mark a pure-JS project's test check as failed.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -37,6 +42,14 @@ if str(_IMPL_DIR) not in sys.path:
     sys.path.insert(0, str(_IMPL_DIR))
 
 from app.integrations.executor import CheckResult, CommitResult, Executor, RunResult, StrPath
+
+# On Windows, npm/npx ship as `.cmd` shims; `subprocess.run(["npm", ...])` without `shell=True`
+# does NOT resolve the PATHEXT extension the way a shell would, and fails with "command not
+# found" (WinError 2) even though `npm` is on PATH. `shutil.which` resolves the real executable
+# (including its extension) on every platform; the bare name is a safe fallback on Unix, where
+# this problem doesn't exist. Resolved once at import time — PATH doesn't change mid-process.
+_NPM = shutil.which("npm") or "npm"
+_NPX = shutil.which("npx") or "npx"
 
 
 def _global_git_identity() -> tuple[str, str]:
@@ -110,7 +123,7 @@ class LocalDiskExecutor(Executor):
 
     def install_package(self, project_dir: StrPath, package: str, manager: str = "pip") -> RunResult:
         if manager == "npm":
-            return self.run_command(["npm", "install", "--no-audit", "--no-fund", package], cwd=project_dir)
+            return self.run_command([_NPM, "install", "--no-audit", "--no-fund", package], cwd=project_dir)
         return self.run_command(
             ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", package],
             cwd=project_dir,
@@ -124,18 +137,63 @@ class LocalDiskExecutor(Executor):
             return CheckResult(name="files_complete", passed=False, stderr=f"missing required files: {', '.join(missing)}")
         return CheckResult(name="files_complete", passed=True)
 
-    # compile/build/test/lint are NOT part of the completeness-only gate — no-op pass.
+    def _exists(self, project_dir: StrPath, rel: str) -> bool:
+        return self._resolve(f"{project_dir}/{rel}").exists()
+
+    def _npm_install(self, project_dir: StrPath) -> RunResult:
+        return self.run_command([_NPM, "install", "--no-audit", "--no-fund"], cwd=project_dir, timeout=600)
+
+    @staticmethod
+    def _aggregate(name: str, results: list[tuple[str, RunResult]]) -> CheckResult:
+        for label, run in results:
+            if not run.ok:
+                return CheckResult(
+                    name=name, passed=False, stderr=f"[{label}] {run.stderr}",
+                    stdout=run.stdout, exit_code=run.exit_code, timed_out=run.timed_out,
+                )
+        return CheckResult(name=name, passed=True)
+
     def compile(self, project_dir: StrPath) -> CheckResult:
-        return CheckResult(name="compile", passed=True, stdout="(compile not run: completeness-only gate)")
+        results = [("py", self.run_command(["python", "-m", "compileall", "-q", "."], cwd=project_dir))]
+        if self._exists(project_dir, "tsconfig.json"):  # frontend
+            # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all — unlike
+            # compileall (syntax-only, no import resolution), so node_modules must exist first.
+            results.append(("npm-install", self._npm_install(project_dir)))
+            results.append(("tsc", self.run_command([_NPX, "tsc", "--noEmit"], cwd=project_dir, timeout=180)))
+        return self._aggregate("compile", results)
 
     def build(self, project_dir: StrPath) -> CheckResult:
-        return CheckResult(name="build", passed=True, stdout="(build not run: completeness-only gate)")
+        results: list[tuple[str, RunResult]] = []
+        if self._exists(project_dir, "requirements.txt"):
+            results.append(("pip", self.run_command(
+                ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
+                cwd=project_dir, timeout=300,
+            )))
+        if self._exists(project_dir, "package.json"):
+            # Mirrors the pip branch above: install before building. Without this, `npm run
+            # build` always fails on a fresh checkout (no node_modules).
+            results.append(("npm-install", self._npm_install(project_dir)))
+            results.append(("npm", self.run_command([_NPM, "run", "build", "--if-present"], cwd=project_dir, timeout=300)))
+        return self._aggregate("build", results) if results else CheckResult(name="build", passed=True)
 
     def test(self, project_dir: StrPath) -> CheckResult:
-        return CheckResult(name="test", passed=True, stdout="(test not run here)")
+        results: list[tuple[str, RunResult]] = []
+        if self._exists(project_dir, "requirements.txt"):
+            # Gated (unlike the sandbox executor's unconditional pytest) — pytest exits 5 ("no
+            # tests collected") on a project with zero Python files, which would otherwise mark a
+            # pure-JS project's test check as failed.
+            results.append(("pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=project_dir, timeout=180)))
+        if self._exists(project_dir, "package.json"):
+            results.append(("npm-test", self.run_command([_NPM, "test", "--if-present"], cwd=project_dir, timeout=300)))
+        return self._aggregate("test", results) if results else CheckResult(name="test", passed=True)
 
     def lint(self, project_dir: StrPath) -> CheckResult:
-        return CheckResult(name="lint", passed=True, stdout="(lint not run here)")
+        results: list[tuple[str, RunResult]] = []
+        if self._exists(project_dir, "requirements.txt"):
+            results.append(("ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=project_dir, timeout=120)))
+        if self._exists(project_dir, "package.json"):
+            results.append(("eslint", self.run_command([_NPX, "eslint", "."], cwd=project_dir, timeout=180)))
+        return self._aggregate("lint", results) if results else CheckResult(name="lint", passed=True)
 
     # -- commit (real git) + optional publish to GitHub (real push) ----------
 

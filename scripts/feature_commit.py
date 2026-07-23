@@ -71,7 +71,11 @@ from app.agents.code_generator import CodeGeneratorAgent, _extract_json  # noqa:
 from app.services.boilerplate import render_scaffold  # noqa: E402
 from app.services.llm_gateway import LLMGateway  # noqa: E402
 
-_REPO_ROOT = _IMPL_DIR.parent if (_IMPL_DIR.parent / "fixtures").is_dir() else _IMPL_DIR.parents[1]
+_REPO_ROOT = (
+    _IMPL_DIR if (_IMPL_DIR / "fixtures").is_dir()
+    else _IMPL_DIR.parent if (_IMPL_DIR.parent / "fixtures").is_dir()
+    else _IMPL_DIR.parents[1]
+)
 _FIXTURES = _REPO_ROOT / "fixtures"
 
 # Generated projects are written OUTSIDE the SDLC repo so each one's own git repo (on `dev`) never
