@@ -131,6 +131,16 @@ class CodeReviewAgent(BaseAgent):
                     logger.info("[1/6] Cloned '%s' @ %s - %s | %d source file(s)",
                                 actual_branch, (sha or "-")[:12], meta["languages"], meta["files_reviewed"])
                     ruff_raw, eslint_raw = self._run_linters(sb, langs, tools)
+                    # ESLint's JSON reporter always emits ABSOLUTE paths (e.g. /work/repo/src/app.js
+                    # - the sandbox's clone dir), unlike Ruff/SonarQube which are already
+                    # repo-relative. Un-normalized, these sort before every relative path ('/' < any
+                    # letter) and dedup as distinct files under aggregate()'s exact-match merge,
+                    # letting Refactoring's file-count cap fill up with paths that can never resolve
+                    # on disk. Normalize with the same resolver already used for evidence/context.
+                    for raw in (ruff_raw, eslint_raw):
+                        for f in raw:
+                            if f.get("file"):
+                                f["file"] = _resolve_path(files, str(f["file"]))
                     scan_note = self._run_sonar_scan(sb, tools)
                     # Fetch SonarQube issues/measures WHILE the sandbox is still open, so we know
                     # every flagged file+line BEFORE reading any source - not just a guessed subset.

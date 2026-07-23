@@ -33,9 +33,14 @@ of which caller triggered the run.
 
 Owns: ``refactored_code`` (summary string), ``refactored_files`` (the edited paths — the publish
 node's input), ``refactoring_report`` / ``refactoring_report_path``, its ``workflow_status``
-stamp, and — only on a security-loop re-entry — the ``security_loop_attempt`` counter. Reads
-``review_findings_path`` OR ``security_findings_path`` (whichever caller triggered this run,
-see ``execute``) and the code via the executor.
+stamp, and — only on a security-loop re-entry — the ``security_loop_attempt`` counter.
+
+Locates its input findings from ``review_findings_path`` on state when present, else by SCANNING
+the reports dir for the newest ``<subfolder>/findings.json`` (or ``security_findings_path`` on a
+security-loop re-entry) — see ``_resolve_findings_path``. It also reads the sibling human-readable
+report (``report.md`` / ``security-report.md``) from the same folder and passes it to the model as
+extra prose context (``_load_review_context``); the structured ``findings.json`` remains the
+authoritative source of what to fix. Reads the code itself via the executor.
 """
 
 from __future__ import annotations
@@ -64,6 +69,11 @@ MAX_FILES_PER_RUN = 25
 #: gateway executes every tool call in a turn), so this is turns-of-reasoning, not files.
 REFACTOR_MAX_ITERS = 16
 
+#: Cap on how much of the sibling human-readable report (report.md / security-report.md) is fed to
+#: the model as extra context. The reports embed huge finding tables (100s of KB); the structured
+#: findings.json is the authoritative "what to fix", so the prose is bounded supporting context.
+MAX_REPORT_CONTEXT_CHARS = 16_000
+
 
 class RefactoringAgent(BaseAgent):
     name = "refactoring"
@@ -85,7 +95,8 @@ class RefactoringAgent(BaseAgent):
             # (in_security_loop is False there — security_verdict isn't set yet).
             state["security_loop_attempt"] = int(state.get("security_loop_attempt", 0)) + 1
 
-        findings, load_error = self._load_findings(state, in_security_loop)
+        findings_path = self._resolve_findings_path(state, in_security_loop)
+        findings, load_error = self._load_findings(findings_path, in_security_loop)
         if load_error is not None:
             # The findings could not be loaded. Surface it as a real failure instead of a silent
             # "nothing to do": refactoring was skipped because its input was missing/unreadable,
@@ -121,6 +132,10 @@ class RefactoringAgent(BaseAgent):
         executor = self._resolve_executor()
         project_dir = _project_dir(state)
         system = self._load_prompt("refactoring")
+
+        # The sibling human-readable report (report.md) gives the model prose context — the
+        # reviewer's recommendations + why/impact/fix — alongside the structured findings.
+        review_context = self._load_review_context(findings_path, in_security_loop)
 
         by_file = _group_by_file(actionable)
         files = sorted(by_file)
@@ -159,7 +174,7 @@ class RefactoringAgent(BaseAgent):
         # full-file rewrite. It fixes ONLY the findings; the write_file tool records touched paths.
         touched: list[str] = []
         tools = self._editing_tools(executor, project_dir, touched)
-        prompt = self._build_prompt(present, by_file)
+        prompt = self._build_prompt(present, by_file, review_context)
         notes = self.llm.complete_with_tools(
             prompt=prompt, system=system, tools=tools, max_iters=REFACTOR_MAX_ITERS
         )
@@ -244,34 +259,72 @@ class RefactoringAgent(BaseAgent):
 
     # -- findings ------------------------------------------------------------
 
-    def _load_findings(
-        self, state: WorkflowState, in_security_loop: bool
-    ) -> tuple[list[dict[str, Any]], str | None]:
-        """Load the structured findings to act on — the source depends on which caller invoked
-        this run (see the class docstring / ``execute``):
+    def _resolve_findings_path(self, state: WorkflowState, in_security_loop: bool) -> str:
+        """Locate the findings file this run should act on.
 
-        - Security-loop re-entry: ``security_findings_path`` — a WRAPPED payload
-          (``{"verdict": ..., "findings": [...]}``, written by ``SecurityAgent._finish``); the
-          findings themselves live under the ``"findings"`` key, not a bare list.
-        - Code Review's one-shot call: ``review_findings_path`` — a bare JSON list, already
-          ``finding_aggregator``-normalized, written by ``CodeReviewAgent._finish``.
+        - Security-loop re-entry: the wrapped Semgrep payload at ``security_findings_path``
+          (different folder + filename + shape), taken straight from state.
+        - Code Review's one-shot call: the exact ``review_findings_path`` recorded on state WINS
+          when present, then fall back to SCANNING the reports dir for the newest
+          ``<subfolder>/findings.json`` (where ``CodeReviewAgent._finish`` writes it).
+
+        Explicit-path-first matters: a caller that deliberately prepared findings (e.g.
+        ``scripts/run_refactoring.py`` normalizes ``/work/repo/`` prefixes into its own file and
+        sets ``review_findings_path`` to it) must not be overridden by a stale ``findings.json``
+        the scan happens to find in the reports dir. The scan is the self-locating fallback for
+        when nothing was handed in on state.
+        """
+        if in_security_loop:
+            return (state.get("security_findings_path") or "").strip()
+        explicit = (state.get("review_findings_path") or "").strip()
+        return explicit or self._latest_findings_in_reports()
+
+    @staticmethod
+    def _latest_findings_in_reports() -> str:
+        """The most recently modified ``<reports_dir>/<subfolder>/findings.json`` (the Code Review
+        artifact), or ``""`` if none exists. Security writes ``security-findings.json``, so its
+        folder carries no bare ``findings.json`` and is naturally skipped. Best-effort: any I/O
+        error yields ``""`` so the caller falls back to the path recorded on state."""
+        reports_dir = Path(get_settings().reports_dir)
+        candidates: list[tuple[float, str]] = []
+        try:
+            subdirs = [p for p in reports_dir.iterdir() if p.is_dir()]
+        except OSError:  # reports dir doesn't exist yet / unreadable
+            return ""
+        for sub in subdirs:
+            fj = sub / "findings.json"
+            try:
+                if fj.is_file():
+                    candidates.append((fj.stat().st_mtime, str(fj)))
+            except OSError:  # noqa: PERF203 - skip an unreadable entry, keep scanning
+                continue
+        if not candidates:
+            return ""
+        return max(candidates, key=lambda t: t[0])[1]
+
+    def _load_findings(
+        self, path: str, in_security_loop: bool
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Load + validate the structured findings at ``path`` (resolved by
+        ``_resolve_findings_path``). The payload shape depends on the caller:
+
+        - Security-loop re-entry: a WRAPPED payload (``{"verdict": ..., "findings": [...]}``,
+          written by ``SecurityAgent._finish``); the findings live under the ``"findings"`` key.
+        - Code Review's one-shot call: a bare JSON list, already ``finding_aggregator``-normalized,
+          written by ``CodeReviewAgent._finish``.
 
         Returns ``(findings, error)``. On success ``error`` is None and ``findings`` may be empty
         (a genuinely clean review/scan). On a missing / unreadable / malformed path ``error``
         carries a human-readable reason so the caller can surface it rather than silently no-op.
 
-        There is deliberately NO Markdown fallback: the persisted reports render findings as
-        Markdown (tables / prose), not a parseable JSON block, so a "parse the report" path would
-        be dead code that masks a real upstream failure.
+        There is deliberately NO Markdown fallback for the STRUCTURED findings: the reports render
+        findings as Markdown tables, not a parseable JSON block, so parsing them would mask a real
+        upstream failure. (report.md is still read separately as prose CONTEXT — see
+        ``_load_review_context`` — never as the source of the actionable finding list.)
         """
-        if in_security_loop:
-            path = (state.get("security_findings_path") or "").strip()
-            source = "Security"
-        else:
-            path = (state.get("review_findings_path") or "").strip()
-            source = "Code Review"
+        source = "Security" if in_security_loop else "Code Review"
         if not path:
-            return [], f"no findings path on state ({source} did not record findings)"
+            return [], f"no findings path ({source} findings not found in the reports dir or on state)"
         try:
             raw = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
@@ -284,17 +337,48 @@ class RefactoringAgent(BaseAgent):
             return [], f"findings JSON at {path} is not a list"
         return [f for f in raw if isinstance(f, dict)], None
 
+    @staticmethod
+    def _load_review_context(findings_path: str, in_security_loop: bool) -> str:
+        """Read the human-readable report that sits NEXT TO the findings file — ``report.md`` for
+        Code Review, ``security-report.md`` for Security — as bounded prose context for the model
+        (the reviewer's recommendations / rationale). Best-effort: a missing or unreadable report
+        just yields ``""`` (the structured findings alone still drive the fixes)."""
+        if not findings_path:
+            return ""
+        name = "security-report.md" if in_security_loop else "report.md"
+        md_path = Path(findings_path).parent / name
+        try:
+            text = md_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+        if len(text) > MAX_REPORT_CONTEXT_CHARS:
+            text = text[:MAX_REPORT_CONTEXT_CHARS] + "\n... (report truncated)"
+        return text
+
     # -- prompt --------------------------------------------------------------
 
     @staticmethod
-    def _build_prompt(files: list[str], by_file: dict[str, list[dict[str, Any]]]) -> str:
+    def _build_prompt(
+        files: list[str], by_file: dict[str, list[dict[str, Any]]], review_context: str = ""
+    ) -> str:
         """One agentic instruction covering every flagged file. The model drives: it reads each
-        file with read_file, then applies the fix with write_file — no fixed output format."""
+        file with read_file, then applies the fix with write_file — no fixed output format.
+
+        ``review_context`` (the reviewer's report.md prose, optional) is appended as SUPPORTING
+        context: it helps the model understand the findings, but the ``File:``/finding list below
+        remains the authoritative contract for what to change."""
         blocks = []
         for rel in files:
             lines = "\n".join(_finding_line(f) for f in by_file[rel]) or "(no detail)"
             blocks.append(f"File: {rel}\n{lines}")
         joined = "\n\n".join(blocks)
+        context_section = ""
+        if review_context.strip():
+            context_section = (
+                "\n\nFor additional context, here is the reviewer's full report (recommendations "
+                "and rationale). Use it to understand the findings, but only apply the fixes the "
+                "findings above call for:\n\n" + review_context.strip()
+            )
         return (
             "The findings below were flagged (Code Review or Security, depending on which stage "
             "called you). Fix them by EDITING the files directly with the tools: call read_file to "
@@ -304,6 +388,7 @@ class RefactoringAgent(BaseAgent):
             "as shown (do not add any prefix).\n\n"
             f"{joined}\n\n"
             "When every fix has been written, reply with a one-line summary of what you changed."
+            f"{context_section}"
         )
 
     # -- persistence -----------------------------------------------------------
