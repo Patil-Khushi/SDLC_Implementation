@@ -354,11 +354,21 @@ def _phase_of(work_item: WorkItem) -> tuple[str, str]:
     return "CODE", ", ".join(work_item.target_files) or work_item.id
 
 
-# A backslash NOT starting a valid JSON escape (\\ \" \/ \b \f \n \r \t \uXXXX). Models writing
-# regex-heavy content (ESLint configs, knexfile patterns, README markdown) routinely emit "\."
-# or "\d" inside string values; json.loads rejects those even with strict=False (that flag only
-# permits raw control characters), so one bad escape sinks an otherwise perfect reply.
-_INVALID_ESCAPE = re.compile(r'\\(?![\\"/bfnrtu]|u[0-9a-fA-F]{4})')
+# Models writing regex-heavy content (ESLint configs, knexfile patterns, README markdown)
+# routinely emit "\." or "\d" inside string values; json.loads rejects those even with
+# strict=False (that flag only permits raw control characters), so one bad escape sinks an
+# otherwise perfect reply. Repair by MATCHING AND CONSUMING each valid escape token (left
+# intact) so the regex engine can never re-examine the second byte of a valid pair — a bare
+# lookahead ("\\(?!...)") gets this wrong: on a valid \\d it skips the first backslash, then
+# matches the second one alone and doubles it, corrupting \\d into \\\d (PR #15 review).
+# Any backslash NOT consumed as part of a valid token falls through to the final "\\"
+# alternative and is doubled into a literal backslash.
+_ESCAPE_TOKEN = re.compile(r'\\u[0-9a-fA-F]{4}|\\[\\"/bfnrt]|\\')
+
+
+def _repair_invalid_escapes(text: str) -> str:
+    """Double every backslash that does not start a valid JSON escape; leave valid ones alone."""
+    return _ESCAPE_TOKEN.sub(lambda m: m.group(0) if len(m.group(0)) > 1 else r"\\", text)
 
 
 def _extract_json(text: str) -> Any:
@@ -368,7 +378,7 @@ def _extract_json(text: str) -> Any:
     (```json … ```), a prose preamble/postamble, **unescaped control characters** inside string
     values (raw newlines/tabs in generated source — ``strict=False`` accepts those), and
     **invalid backslash escapes** (``"\\."`` from a regex in an ESLint config — repaired to
-    ``"\\\\."`` as a last resort; see ``_INVALID_ESCAPE``).
+    ``"\\\\."`` as a last resort; see ``_repair_invalid_escapes``).
     """
     stripped = text.strip()
 
@@ -396,7 +406,7 @@ def _extract_json(text: str) -> Any:
             except (ValueError, TypeError):
                 pass
             try:
-                return json.loads(_INVALID_ESCAPE.sub(r"\\\\", attempt), strict=False)
+                return json.loads(_repair_invalid_escapes(attempt), strict=False)
             except (ValueError, TypeError):
                 pass
     return None

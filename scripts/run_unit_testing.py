@@ -43,12 +43,11 @@ def _setup_logging() -> None:
 
 from app.agents.debugging import DebuggingAgent  # noqa: E402
 from app.agents.unit_test import UnitTestAgent  # noqa: E402
+from app.graph.router import DEBUG_CAP  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import set_executor  # noqa: E402
 from app.models import WorkItem  # noqa: E402
 from local_executor import LocalDiskExecutor  # noqa: E402
-
-DEBUG_CAP = 3  # shared cap for the compile/build + test fix loop (app/graph/router.py)
 
 # Files that don't need a unit test of their own (boilerplate/config/data, not app logic).
 _SKIP_BASENAMES = {

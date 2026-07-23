@@ -40,11 +40,10 @@ def _setup_logging() -> None:
 
 from app.agents.debugging import DebuggingAgent  # noqa: E402
 from app.graph.nodes import debug_check_node  # noqa: E402
+from app.graph.router import DEBUG_CAP  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import set_executor  # noqa: E402
 from local_executor import LocalDiskExecutor  # noqa: E402
-
-DEBUG_CAP = 3  # same cap as app/graph/router.py's debug loop
 
 
 def _list_generated_files(executor: LocalDiskExecutor, project_id: str) -> list[str]:
