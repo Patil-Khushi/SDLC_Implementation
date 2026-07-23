@@ -30,7 +30,9 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -150,6 +152,49 @@ def _dump_state(state: dict[str, Any]) -> None:
     print("=" * 70)
 
 
+def _resolve_owner(owner_arg: str | None) -> str:
+    """The GitHub owner the repo will be created under: --owner, else $GITHUB_OWNER, else `gh`."""
+    owner = (owner_arg or os.environ.get("GITHUB_OWNER", "")).strip()
+    if owner:
+        return owner
+    try:
+        r = subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except OSError:
+        return ""
+
+
+def _unique_project_name(out_base: Path, project: str, *, check_github: bool, owner: str) -> str:
+    """Return a project name that is FRESH for this run — no reuse of an existing local product
+    folder or GitHub repo (every agent then works on a brand-new repo, never a leftover).
+
+    The pipeline keys EVERYTHING off the project name: the local repo folder
+    (<out-dir>/<project>), the GitHub repo (<owner>/<project>), the LangGraph run_id/thread, and
+    the reports folder. Re-running with a name that already exists would make the scaffold write
+    into last run's working tree and push onto last run's repo/branches — silently mixing two
+    runs' histories. If the name is taken, append a timestamp (plus a counter on collision).
+    """
+    def taken(name: str) -> bool:
+        if (out_base / name).exists():
+            return True
+        if check_github and owner:
+            r = subprocess.run(["gh", "repo", "view", f"{owner}/{name}"], capture_output=True, text=True)
+            return r.returncode == 0
+        return False
+
+    if not taken(project):
+        return project
+    stamp = datetime.now().strftime("%m%d-%H%M%S")
+    candidate = f"{project}-{stamp}"
+    n = 1
+    while taken(candidate):
+        candidate = f"{project}-{stamp}-{n}"
+        n += 1
+    print(f"[unique-run] '{project}' already exists (local folder and/or GitHub repo) — "
+          f"this run will use '{candidate}' instead. Pass --keep-name to reuse the old name.")
+    return candidate
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pack_dir", type=Path, help="design-pack directory, e.g. fixtures/ecommerce_complete")
@@ -175,7 +220,12 @@ def main() -> None:
     parser.add_argument("--repo-name", default=None, help="repo name to create (default: --project)")
     parser.add_argument("--sandbox-url", default="http://localhost:8080/mcp")
     parser.add_argument("--project", "--project-id", dest="project", default="fixture-run",
-                        help="project name — also the repo subfolder under --out-dir in --real mode")
+                        help="project name — also the repo subfolder under --out-dir in --real mode. "
+                             "If the folder or GitHub repo already exists, a timestamp suffix is "
+                             "appended so every run gets a FRESH repo (see --keep-name).")
+    parser.add_argument("--keep-name", action="store_true",
+                        help="real mode: use --project exactly as given even if the local folder / "
+                             "GitHub repo already exists (reuses last run's repo — normally wrong)")
     parser.add_argument(
         "--only", default=None,
         help="only generate work items whose id contains this substring, e.g. --only login "
@@ -236,14 +286,18 @@ def main() -> None:
         executor = asyncio.run(MCPExecutor.connect(args.sandbox_url))
     else:  # real (default)
         out_base = (args.out_dir or _DEFAULT_OUT_DIR).resolve()
+        owner = _resolve_owner(args.owner) if do_publish else ""
+        if not args.keep_name:
+            # Fresh repo per run: never write into last run's folder or push onto last run's repo.
+            args.project = _unique_project_name(
+                out_base, args.project,
+                check_github=do_publish and args.repo_name is None, owner=owner,
+            )
         executor = LocalDiskExecutor(out_base, private=not make_public)
         print(f"REAL build with Claude -> product repo at {out_base / args.project}")
         if do_publish:
             # Push DURING the run: commit_node creates the repo via gh, pushes, and sets repo_url,
             # so Code Review clones + reviews it INLINE (one command, every agent real).
-            owner = (args.owner or os.environ.get("GITHUB_OWNER", "")).strip()
-            if not owner:
-                owner = executor.run_command(["gh", "api", "user", "--jq", ".login"]).stdout.strip()
             git_remote = f"{owner}/{args.repo_name or args.project}"
             git_token = os.environ.get("GITHUB_PAT", "").strip()
             push_enabled = True
