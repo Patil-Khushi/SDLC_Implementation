@@ -23,6 +23,7 @@ from app.integrations.github import get_github_client
 from app.integrations.review_sandbox import is_allowed_repo_url
 from app.services.boilerplate import render_scaffold
 from app.services.packaging import build_project_zip
+from app.services.wiring import reconcile_wiring
 
 logger = logging.getLogger(__name__)
 
@@ -578,6 +579,53 @@ def _group_feature_commits(work_items) -> list[tuple[str, list[str]]]:
         paths = list(dict.fromkeys(p for wi in group["items"] for p in wi.target_files))
         commits.append((message, paths))
     return commits
+
+
+def reconcile_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic post-generation wiring pass (no LLM), run once after the plan is
+    exhausted and BEFORE the run-level commit, so the committed repo carries the wired code.
+
+    Each work item was generated in isolation, so cross-file wiring is often left undone — most
+    visibly an Express app factory whose module routers are commented out, making no endpoint
+    reachable (audit issue 2a). ``app.services.wiring.reconcile_wiring`` repairs what it can
+    deterministically over the generated file set and returns only the files it changed; this node
+    reads those files through the executor, applies the fixes, and writes them back. Conservative:
+    when nothing is safely fixable it writes nothing and the run is byte-identical to before.
+    """
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    prefix = f"{project_dir}/"
+
+    # Read the generated source back from the executor keyed by PROJECT-RELATIVE path (the shape the
+    # pure reconciler reasons about — relative requires, module dirs). Skip anything unreadable.
+    files: dict[str, str] = {}
+    for path in state.get("generated_code", []):
+        rel = path[len(prefix):] if path.startswith(prefix) else path
+        try:
+            files[rel] = executor.read_file(path)
+        except Exception:  # noqa: BLE001 - a missing/unreadable file just isn't a wiring input
+            continue
+
+    try:
+        changed = reconcile_wiring(files)
+    except Exception as exc:  # noqa: BLE001 - a reconciler bug must never crash a finished plan
+        logger.exception("wiring reconciliation failed for run %s", state.get("run_id"))
+        state["generation_summary"] = (state.get("generation_summary") or "") + f"[reconcile] FAILED: {exc}\n"
+        return state
+
+    if not changed:
+        state["generation_summary"] = (state.get("generation_summary") or "") + "[reconcile] no wiring changes\n"
+        return state
+
+    _stage("Reconcile (wiring)", "connecting generated modules (mounting routers) before commit")
+    for rel, content in changed.items():
+        executor.write_file(prefix + rel, content)
+    names = ", ".join(sorted(changed))
+    logger.info("[reconcile] run=%s | wired %d file(s): %s", state.get("run_id") or "-", len(changed), names)
+    state["generation_summary"] = (state.get("generation_summary") or "") + (
+        f"[reconcile] wired {len(changed)} file(s): {names}\n"
+    )
+    return state
 
 
 def commit_node(state: WorkflowState) -> WorkflowState:

@@ -104,6 +104,7 @@ def build_graph():
     graph.add_node("code_generator", nodes.code_generator_node)
     graph.add_node("gate", nodes.gate_node)
     graph.add_node("feature_publish", nodes.feature_publish_node)
+    graph.add_node("reconcile", nodes.reconcile_node)
     graph.add_node("commit", nodes.commit_node)
     graph.add_node("repair", repair_node)
     graph.add_node("escalate", nodes.escalate_node)
@@ -127,8 +128,9 @@ def build_graph():
     graph.add_conditional_edges(
         "select",
         route_after_select,
-        {"code_generator": "code_generator", "commit": "commit"},
+        {"code_generator": "code_generator", "commit": "reconcile"},
     )
+    graph.add_edge("reconcile", "commit")  # deterministic wiring pass, then the run-level commit
     graph.add_conditional_edges(
         "code_generator", route_after_codegen, {"gate": "gate", "escalate": "escalate"}
     )

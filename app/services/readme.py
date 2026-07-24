@@ -305,10 +305,11 @@ def _structure_section(pkg: dict[str, Any]) -> str:
 
 def _getting_started_section(config: "ScaffoldConfig") -> str:
     lines = ["## Getting started", "", "### Prerequisites", ""]
+    backend_is_node = config.option("backend", "language", "python") == "node"
     prereqs: list[str] = []
-    if config.enabled("frontend"):
+    if config.enabled("frontend") or (config.enabled("backend") and backend_is_node):
         prereqs.append("- Node.js 18+ and npm")
-    if config.enabled("backend"):
+    if config.enabled("backend") and not backend_is_node:
         prereqs.append("- Python 3.11+")
     if config.enabled("database"):
         prereqs.append(f"- {str(config.option('database', 'provider', 'postgres')).capitalize()}")
@@ -317,9 +318,14 @@ def _getting_started_section(config: "ScaffoldConfig") -> str:
     lines += prereqs or ["- None"]
 
     if config.enabled("backend"):
-        framework = config.option("backend", "framework", "fastapi")
-        run = "flask --app app.main run --debug" if framework == "flask" else "uvicorn app.main:app --reload"
-        lines += ["", "### Backend", "", "```bash", "pip install -r requirements.txt", run, "```"]
+        if backend_is_node:
+            scripts = config.option("backend", "scripts", {}) or {}
+            run = "npm run dev" if "dev" in scripts else "npm start"
+            lines += ["", "### Backend", "", "```bash", "npm install", run, "```"]
+        else:
+            framework = config.option("backend", "framework", "fastapi")
+            run = "flask --app app.main run --debug" if framework == "flask" else "uvicorn app.main:app --reload"
+            lines += ["", "### Backend", "", "```bash", "pip install -r requirements.txt", run, "```"]
 
     if config.enabled("frontend"):
         scripts = config.option("frontend", "scripts", {}) or {}
@@ -374,7 +380,8 @@ def _testing_section(config: "ScaffoldConfig") -> str:
         return ""
     lines = ["## Testing", ""]
     if config.enabled("backend"):
-        lines += ["```bash", "pytest", "```"]
+        backend_is_node = config.option("backend", "language", "python") == "node"
+        lines += ["```bash", "npm test" if backend_is_node else "pytest", "```"]
     if config.enabled("frontend"):
         scripts = config.option("frontend", "scripts", {}) or {}
         if "test" in scripts:

@@ -1,0 +1,10 @@
+{
+  "name": {{ (project.name ~ "-app") | to_json }},
+  "version": {{ project.version | to_json }},
+  "private": true,
+  "description": {{ project.description | to_json }},
+  "main": "src/server.js",
+  "scripts": {{ combined.scripts | to_json(2) | indent(2) }},
+  "dependencies": {{ combined.dependencies | to_json(2) | indent(2) }},
+  "devDependencies": {{ combined.devDependencies | to_json(2) | indent(2) }}
+}
