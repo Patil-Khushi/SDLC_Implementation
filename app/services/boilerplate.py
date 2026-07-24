@@ -86,6 +86,36 @@ _BACKEND_DB_DEPS: dict[str, dict[str, str]] = {
 _BACKEND_AUTH_DEPS = {"python-jose[cryptography]": ">=3.3,<4.0", "passlib[bcrypt]": ">=1.7,<2.0"}
 _BACKEND_TEST_DEPS = {"pytest": ">=8.3,<9.0", "httpx": ">=0.27,<1.0"}
 
+# Node/JS backend frameworks and their npm dependency specs — the parallel of the pip tables above,
+# used when the backend is a JavaScript/TypeScript stack (detected from the structure tree or stated
+# in the capabilities artifact). Kept as DATA so adding Fastify/Nest/Koa is a table edit, not a
+# rewrite. Rendered into a backend ``package.json`` (never ``requirements.txt``).
+_NODE_FRAMEWORKS = {"express", "node", "nodejs", "nestjs", "nest", "fastify", "koa", "hapi"}
+_BACKEND_DEPS_NODE_BY_FRAMEWORK: dict[str, dict[str, str]] = {
+    "express": {"express": "^4.19.2", "cors": "^2.8.5", "helmet": "^7.1.0", "morgan": "^1.10.0"},
+    "fastify": {"fastify": "^4.28.0"},
+    "koa": {"koa": "^2.15.3", "@koa/router": "^12.0.1"},
+}
+_BACKEND_DEPS_NODE_BASE = {"dotenv": "^16.4.5"}   # every node backend loads env via dotenv
+_BACKEND_DB_DEPS_NODE: dict[str, dict[str, str]] = {
+    "postgres": {"knex": "^3.1.0", "pg": "^8.12.0"},
+    "mysql": {"knex": "^3.1.0", "mysql2": "^3.11.0"},
+    "mongo": {"mongoose": "^8.5.1"},
+    "mongodb": {"mongoose": "^8.5.1"},
+    "_default": {"knex": "^3.1.0"},
+}
+# bcryptjs (pure JS) rather than native bcrypt: it installs without a compiler on every platform,
+# resolving the "native module is hard to install" hazard the audit flagged (issue 4d). The naming
+# contract / prompt should steer generated code to the same choice.
+_BACKEND_AUTH_DEPS_NODE = {"jsonwebtoken": "^9.0.2", "bcryptjs": "^2.4.3"}
+_BACKEND_VALIDATION_DEPS_NODE = {"joi": "^17.13.3"}
+_BACKEND_TEST_DEPS_NODE = {"jest": "^29.7.0", "supertest": "^7.0.0"}
+
+#: Directory names that are a project's SOURCE root, not a project WRAPPER — so a tree rooted at
+#: ``src/`` means "files at the repo root", while a tree rooted at ``quickbite-backend/`` means that
+#: dir IS the backend project root (where its manifest/Dockerfile belong).
+_CONVENTIONAL_SOURCE_DIRS = {"src", "app", "public", "tests", "test", "lib", "dist", "assets", "config"}
+
 
 @dataclass(frozen=True)
 class ScaffoldConfig:
@@ -112,6 +142,21 @@ class ScaffoldConfig:
     @property
     def project_name(self) -> str:
         return self.option("project", "name", "") or "project"
+
+    @property
+    def backend_language(self) -> str:
+        """``"node"`` or ``"python"`` — which manifest/Dockerfile the backend gets."""
+        return self.option("backend", "language", "python") or "python"
+
+    @property
+    def backend_root(self) -> str:
+        """Dir prefix the backend project lives under (e.g. ``quickbite-backend/``), or ``""``."""
+        return self.data.get("_backend_root", "") or ""
+
+    @property
+    def frontend_root(self) -> str:
+        """Dir prefix the frontend project lives under (e.g. ``quickbite-frontend/``), or ``""``."""
+        return self.data.get("_frontend_root", "") or ""
 
 
 # (template filename, rendered output path, predicate). A file is emitted ONLY if predicate(cfg)
@@ -190,6 +235,47 @@ def _enabled(cfg: dict[str, Any], section: str) -> bool:
     return bool(node.get("enabled")) if isinstance(node, dict) else bool(node)
 
 
+def _structure_tree(design_package: dict[str, Any], *names: str) -> dict[str, Any]:
+    """The file tree from a ``*-structure.json`` artifact (unwrapped), or ``{}`` if absent."""
+    from app.services.readme import _tree_and_notes  # local: readme type-checks against this module
+
+    tree, _ = _tree_and_notes(_lookup(design_package, *names))
+    return tree if isinstance(tree, dict) else {}
+
+
+def _single_top_dir(tree: dict[str, Any]) -> str:
+    """The project WRAPPER directory a tree lives under (e.g. ``quickbite-backend/``), or ``""``.
+
+    A tree with exactly one top-level directory key and no top-level files, whose name is NOT a
+    conventional source dir (``src``/``app``/…), is a project wrapper — its manifest and Dockerfile
+    belong inside it. A tree rooted directly at ``src/`` (or with multiple/loose top entries) has no
+    wrapper: its project root is the repo root, so ``""`` is returned.
+    """
+    if not tree:
+        return ""
+    dir_keys = [k for k, v in tree.items() if isinstance(v, dict)]
+    file_keys = [k for k, v in tree.items() if not isinstance(v, dict)]
+    if len(dir_keys) == 1 and not file_keys:
+        top = dir_keys[0].rstrip("/")
+        if top.lower() not in _CONVENTIONAL_SOURCE_DIRS:
+            return top + "/"
+    return ""
+
+
+def _detect_backend_language(tree: dict[str, Any]) -> str:
+    """``"node"`` / ``"python"`` / ``""`` (unknown) from the dominant file extension of a tree."""
+    if not tree:
+        return ""
+    from app.services.plan_builder import _dominant_ext, _walk  # no cycle: plan_builder doesn't import this
+
+    ext = _dominant_ext([p for p, _ in _walk(tree)])
+    if ext in (".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"):
+        return "node"
+    if ext == ".py":
+        return "python"
+    return ""
+
+
 def _normalize(cfg: dict[str, Any], project_id: str) -> dict[str, Any]:
     """Fill the REAL application values Jinja will interpolate, deriving sensible ones when the
     Design Package didn't state them. Deterministic; explicit package values always win.
@@ -225,24 +311,61 @@ def _normalize(cfg: dict[str, Any], project_id: str) -> dict[str, Any]:
 
     be = cfg.setdefault("backend", {})
     framework = be.setdefault("framework", "fastapi")
-    deps = dict(_BACKEND_DEPS_BY_FRAMEWORK.get(framework, _BACKEND_DEPS_BY_FRAMEWORK["fastapi"]))
-    if _enabled(cfg, "database"):
-        provider = cfg.get("database", {}).get("provider", "")
-        deps.update(_BACKEND_DB_DEPS.get(provider, _BACKEND_DB_DEPS["_default"]))
-    if _enabled(cfg, "authentication"):
-        deps.update(_BACKEND_AUTH_DEPS)
-    if testing_on:
-        deps.update(_BACKEND_TEST_DEPS)
-    deps.update(be.get("dependencies") or {})  # explicit package deps win / extend
-    be["dependencies"] = deps
+    language = "node" if framework.lower() in _NODE_FRAMEWORKS else "python"
+    be["language"] = language
+    provider = cfg.get("database", {}).get("provider", "") if _enabled(cfg, "database") else ""
+
+    if language == "node":
+        # A Node/JS backend gets a real package.json — npm deps + start/build/migrate/seed scripts —
+        # NOT a Python requirements.txt (issue 1b/1c: infra used to describe a stack the code wasn't).
+        deps = dict(_BACKEND_DEPS_NODE_BASE)
+        deps.update(_BACKEND_DEPS_NODE_BY_FRAMEWORK.get(framework.lower(), _BACKEND_DEPS_NODE_BY_FRAMEWORK["express"]))
+        if provider:
+            deps.update(_BACKEND_DB_DEPS_NODE.get(provider, _BACKEND_DB_DEPS_NODE["_default"]))
+        if _enabled(cfg, "authentication"):
+            deps.update(_BACKEND_AUTH_DEPS_NODE)
+        deps.update(_BACKEND_VALIDATION_DEPS_NODE)
+        deps.update(be.get("dependencies") or {})  # explicit package deps win / extend
+        be["dependencies"] = deps
+        dev = dict(be.get("devDependencies") or {})
+        if testing_on:
+            for name, spec in _BACKEND_TEST_DEPS_NODE.items():
+                dev.setdefault(name, spec)
+        be["devDependencies"] = dev
+        if not be.get("scripts"):
+            scripts = {"start": "node src/server.js", "dev": "node src/server.js"}
+            # knex-based stacks get migrate/seed; a Mongo (mongoose) stack has no migration CLI.
+            if provider and "mongo" not in provider.lower():
+                scripts["migrate"] = "knex migrate:latest"
+                scripts["seed"] = "knex seed:run"
+            if testing_on:
+                scripts["test"] = "jest"
+            be["scripts"] = scripts
+    else:
+        deps = dict(_BACKEND_DEPS_BY_FRAMEWORK.get(framework, _BACKEND_DEPS_BY_FRAMEWORK["fastapi"]))
+        if provider:
+            deps.update(_BACKEND_DB_DEPS.get(provider, _BACKEND_DB_DEPS["_default"]))
+        if _enabled(cfg, "authentication"):
+            deps.update(_BACKEND_AUTH_DEPS)
+        if testing_on:
+            deps.update(_BACKEND_TEST_DEPS)
+        deps.update(be.get("dependencies") or {})  # explicit package deps win / extend
+        be["dependencies"] = deps
 
     env = cfg.setdefault("environment", {})
     if not env.get("variables"):
         variables: list[str] = []
         if _enabled(cfg, "database"):
-            variables.append("DATABASE_URL")
+            # A Node backend reads discrete DB_* vars (knex/pg/mongoose config); a Python backend
+            # conventionally reads a single DATABASE_URL. Match what the generated code will consume.
+            if language == "node" and "mongo" not in provider.lower():
+                variables += ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"]
+            elif language == "node":
+                variables.append("MONGODB_URI")
+            else:
+                variables.append("DATABASE_URL")
         if _enabled(cfg, "authentication"):
-            variables.append("SECRET_KEY")
+            variables.append("JWT_SECRET" if language == "node" else "SECRET_KEY")
         env["variables"] = variables
 
     return cfg
@@ -260,9 +383,25 @@ def resolve_scaffold_config(
     - ``_normalize`` fills the real application values (deps/scripts/env/…) Jinja interpolates.
     """
     package = design_package or {}
-    raw = _lookup(package, *_CAPABILITY_ARTIFACT_NAMES)
-    merged = _deep_merge(DEFAULT_CAPABILITIES, _parse_capabilities(raw))
-    return ScaffoldConfig(_normalize(merged, project_id))
+    raw_caps = _parse_capabilities(_lookup(package, *_CAPABILITY_ARTIFACT_NAMES))
+    merged = _deep_merge(DEFAULT_CAPABILITIES, raw_caps)
+
+    # Stack inference: when the capabilities artifact did NOT state a backend framework, infer the
+    # backend stack from the backend structure tree so the scaffold (Dockerfile / manifest) matches
+    # the code the plan will generate (issue 1c). An explicit package framework always wins.
+    backend_tree = _structure_tree(package, "backend-structure.json", "backend_structure.json", "backend-structure")
+    frontend_tree = _structure_tree(package, "frontend-structure.json", "frontend_structure.json", "frontend-structure")
+    stated_framework = isinstance(raw_caps.get("backend"), dict) and raw_caps["backend"].get("framework")
+    if not stated_framework and _detect_backend_language(backend_tree) == "node":
+        merged.setdefault("backend", {})["framework"] = "express"
+
+    merged = _normalize(merged, project_id)
+    # Per-project roots: where each side's manifest/Dockerfile belong. A separated pack yields the
+    # wrapper dirs (quickbite-backend/, quickbite-frontend/); a shared-root pack yields "" (repo
+    # root) and the render step collapses to a single combined manifest to avoid a collision.
+    merged["_backend_root"] = _single_top_dir(backend_tree)
+    merged["_frontend_root"] = _single_top_dir(frontend_tree)
+    return ScaffoldConfig(merged)
 
 
 def render_scaffold(
@@ -290,21 +429,57 @@ def render_scaffold(
     # still guaranteeing valid, correctly-quoted/escaped JSON for any data. Deterministic
     # (insertion order preserved, no sort).
     env.filters["to_json"] = lambda value, indent=2: json.dumps(value, indent=indent, ensure_ascii=False)
+    be_root, fe_root = config.backend_root, config.frontend_root
+    language = config.backend_language
+    backend_on, frontend_on = config.enabled("backend"), config.enabled("frontend")
     context = {
         "project_id": config.project_name,  # back-compat: templates historically used project_id
+        "backend_root": be_root,
+        "frontend_root": fe_root,
         **config.data,
     }
     # Imported here (not at module top) to avoid an import cycle: readme.py type-checks against
     # ScaffoldConfig defined in this module.
     from app.services.readme import render_readme
 
+    def _render(template_name: str, **extra: Any) -> str:
+        return env.get_template(template_name).render(**{**context, **extra})
+
+    # Emission order (repo root unless a per-project root applies): Dockerfile, .gitignore, README,
+    # docker-compose, .env.example, backend manifest, frontend manifest. For the legacy no-package
+    # default (python backend, shared root) this reproduces the original 7 files in the original
+    # order. Per-project roots place each side's manifest/Dockerfile inside its own project dir.
     entries: list[dict[str, str]] = []
-    for template_name, out_path, predicate in _SCAFFOLD:
-        if not predicate(config):
-            continue
-        if template_name == _README:
-            content = render_readme(config, design_package)
-        else:
-            content = env.get_template(template_name).render(**context)
-        entries.append({"path": out_path, "content": content})
+    if config.enabled("docker") and backend_on:
+        dockerfile = "Dockerfile.node.j2" if language == "node" else "Dockerfile.j2"
+        entries.append({"path": be_root + "Dockerfile", "content": _render(dockerfile)})
+    entries.append({"path": ".gitignore", "content": _render("gitignore.j2")})
+    entries.append({"path": "README.md", "content": render_readme(config, design_package)})
+    if config.enabled("docker"):
+        entries.append({"path": "docker-compose.yml", "content": _render("docker-compose.yml.j2")})
+    if config.enabled("environment"):
+        entries.append({"path": ".env.example", "content": _render("env.example.j2")})
+
+    # A shared-root Node app (backend and frontend both at the repo root) can't carry two
+    # package.json files, so collapse to ONE combined manifest — otherwise the backend would have no
+    # manifest at all (issue 1b). Separated packs (distinct wrapper roots) get a manifest per side.
+    if backend_on and frontend_on and language == "node" and be_root == fe_root:
+        combined = {
+            "scripts": {**(config.option("backend", "scripts", {}) or {}),
+                        **(config.option("frontend", "scripts", {}) or {})},
+            "dependencies": {**(config.option("frontend", "dependencies", {}) or {}),
+                             **(config.option("backend", "dependencies", {}) or {})},
+            "devDependencies": {**(config.option("frontend", "devDependencies", {}) or {}),
+                                **(config.option("backend", "devDependencies", {}) or {})},
+        }
+        entries.append({"path": be_root + "package.json",
+                        "content": _render("package.combined.json.j2", combined=combined)})
+    else:
+        if backend_on:
+            if language == "node":
+                entries.append({"path": be_root + "package.json", "content": _render("package.backend.json.j2")})
+            else:
+                entries.append({"path": be_root + "requirements.txt", "content": _render("requirements.txt.j2")})
+        if frontend_on:
+            entries.append({"path": fe_root + "package.json", "content": _render("package.json.j2")})
     return entries

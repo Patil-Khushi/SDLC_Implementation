@@ -1,9 +1,13 @@
 services:
 {% if backend.enabled %}
   backend:
-    build: .
+    build: {{ backend_root[:-1] if backend_root else "." }}
     ports:
+{% if backend.language == "node" %}
+      - "3000:3000"
+{% else %}
       - "8000:8000"
+{% endif %}
 {% if environment.enabled %}
     env_file:
       - .env

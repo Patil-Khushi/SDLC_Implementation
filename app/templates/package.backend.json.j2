@@ -1,0 +1,10 @@
+{
+  "name": {{ (project.name ~ "-backend") | to_json }},
+  "version": {{ project.version | to_json }},
+  "private": true,
+  "description": {{ project.description | to_json }},
+  "main": "src/server.js",
+  "scripts": {{ backend.scripts | to_json(2) | indent(2) }},
+  "dependencies": {{ backend.dependencies | to_json(2) | indent(2) }},
+  "devDependencies": {{ backend.devDependencies | to_json(2) | indent(2) }}
+}

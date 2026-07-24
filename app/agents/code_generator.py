@@ -29,8 +29,13 @@ from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.models import GenerationSummary, WorkItem
 from app.services.llm_gateway import LLMGateway
+from app.services.naming_contract import build_naming_contract_from_package
 
 logger = logging.getLogger(__name__)
+
+#: Cap on how many already-generated paths are listed in a single item's context (keeps the prompt
+#: bounded on large plans; the list is a discovery aid, not an exhaustive manifest).
+_MANIFEST_CAP = 200
 
 
 def _project_dir(state: WorkflowState) -> str:
@@ -70,7 +75,8 @@ class CodeGeneratorAgent(BaseAgent):
             return state
 
         design_package = state.get("design_package") or {}
-        context, sections_used = self._assemble_context(work_item, design_package)
+        produced = self._already_generated(state)
+        context, sections_used = self._assemble_context(work_item, design_package, produced)
         self._append_plan(state, work_item, sections_used)
 
         phase, subject = _phase_of(work_item)
@@ -252,13 +258,58 @@ class CodeGeneratorAgent(BaseAgent):
 
     # -- context assembly (tight slices only, not whole files) ----------------
 
-    def _assemble_context(self, work_item: WorkItem, design_package: dict[str, Any]) -> tuple[str, list[str]]:
+    def _already_generated(self, state: WorkflowState) -> list[str]:
+        """Project-relative paths already written this run (scaffold + prior work items).
+
+        ``generated_code`` holds workspace paths prefixed with the project dir; strip that prefix so
+        the manifest lists paths as a sibling module would import them.
+        """
+        project_dir = _project_dir(state)
+        prefix = f"{project_dir}/"
+        out: list[str] = []
+        for path in state.get("generated_code") or []:
+            rel = path[len(prefix):] if path.startswith(prefix) else path
+            if rel and rel not in out:
+                out.append(rel)
+        return out
+
+    def _assemble_context(
+        self,
+        work_item: WorkItem,
+        design_package: dict[str, Any],
+        produced: list[str] | None = None,
+    ) -> tuple[str, list[str]]:
         """Return (joined context text, names of the sections that were actually populated).
 
         The names feed the ``[plan]`` summary line so a human can see which design-pack slices
         this item's generation was grounded in, before the LLM is even called.
         """
         sections: list[tuple[str, str]] = []
+
+        # Authoritative naming contract FIRST (see app/services/naming_contract.py). Each work item
+        # is generated in its own isolated LLM call, so without a single must-match block every file
+        # re-derives entity/field/endpoint identifiers independently and the pieces don't line up
+        # (a router importing a symbol the schema never exported, a client calling an unmounted
+        # path). Prepending it to every item's context binds them all to the same names. Empty when
+        # the pack has no parseable schema/API mapping — then behaviour is exactly as before.
+        contract = build_naming_contract_from_package(design_package)
+        if contract:
+            sections.append(("Naming contract", contract))
+
+        # Manifest of files ALREADY generated this run (scaffold + earlier items). Because items are
+        # generated in isolation, an entry point / router / service otherwise can't know what its
+        # siblings actually produced, so it invents module names/paths that don't resolve (the
+        # router-imports-a-file-that-doesn't-exist and phantom-shared-module bugs). Listing the real
+        # paths lets each item import what exists instead of guessing.
+        if produced:
+            listing = "\n".join(f"- {p}" for p in produced[:_MANIFEST_CAP])
+            if len(produced) > _MANIFEST_CAP:
+                listing += f"\n- ... (+{len(produced) - _MANIFEST_CAP} more)"
+            sections.append((
+                "Existing files",
+                "## Files already generated in this project — import from these EXACT paths; do NOT "
+                "invent new module names for something already produced here\n" + listing,
+            ))
 
         skill = _artifact_text(design_package, "SKILL.md", "style-guide/SKILL.md")
         if skill:
