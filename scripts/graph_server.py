@@ -644,7 +644,9 @@ def _run_events(
         _last_run.update({
             "project": project, "pack": pack_dir.name, "mode": mode, "publish": publish,
             "status": "running", "executor": executor, "state": {}, "reports": {},
+            "plan_count": len(work_items),
             "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "finished_at": "",
         })
 
         initial = new_state(
@@ -728,6 +730,7 @@ def _run_events(
         # scaffold/test file classification after the stream has closed.
         _last_run["state"] = dict(state)
         _last_run["status"] = status
+        _last_run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         yield _sse({
             "type": "done",
             "status": status,
@@ -743,6 +746,7 @@ def _run_events(
         # output worth showing on the Output pages.
         if _last_run.get("project"):
             _last_run["status"] = "failed"
+            _last_run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
     finally:
         _run_lock.release()
@@ -1237,6 +1241,146 @@ def run_github() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------- run metrics (dashboard tiles)
+#
+# The Dashboard's "Run Metrics" grid used to render "—" for most tiles because the SSE stream only
+# carried a handful of numbers. This endpoint computes the rest from the SAME real artifacts the
+# other Output endpoints read — generated files (lines of code), the test list, the Security and
+# Code Review findings JSON, and the generated repo's git log — so every tile shows a real value
+# (still "—"/null only when a number genuinely doesn't exist yet, e.g. commits in dry-run).
+
+
+_BINARY_EXT_FOR_LOC = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".bmp", ".pdf", ".zip", ".gz", ".tar",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp4", ".mp3", ".wav", ".mov", ".exe", ".bin",
+})
+
+
+def _run_loc(rec: dict[str, Any]) -> int:
+    """Total lines across the run's generated text files (read through the executor).
+
+    Binary assets are skipped by extension and anything that fails to decode as text is skipped
+    too, so an SVG/PNG never inflates or breaks the count.
+    """
+    executor = rec.get("executor")
+    if executor is None:
+        return 0
+    total = 0
+    for path in _run_file_paths(rec):
+        if any(path.lower().endswith(ext) for ext in _BINARY_EXT_FOR_LOC):
+            continue
+        try:
+            content = executor.read_file(path)
+        except (FileNotFoundError, ValueError, OSError, UnicodeDecodeError):
+            continue
+        if content:
+            total += content.count("\n") + (0 if content.endswith("\n") else 1)
+    return total
+
+
+def _review_findings_count(rec: dict[str, Any]) -> int | None:
+    """How many findings the Code Review agent recorded (its normalized findings.json)."""
+    state = rec.get("state") or {}
+    raw = state.get("review_findings_path") or ""
+    path = Path(raw) if raw else _locate_report(str(rec.get("project") or ""), "findings.json")
+    data = _read_findings(path)
+    if isinstance(data, list):
+        return len(data)
+    if isinstance(data, dict):  # some renderers wrap the list
+        items = data.get("findings")
+        return len(items) if isinstance(items, list) else None
+    return None
+
+
+def _security_findings_count(rec: dict[str, Any]) -> int | None:
+    state = rec.get("state") or {}
+    raw = state.get("security_findings_path") or ""
+    path = Path(raw) if raw else _locate_report(str(rec.get("project") or ""), "security-findings.json")
+    data = _read_findings(path)
+    if isinstance(data, dict):
+        if isinstance(data.get("findings_count"), int):
+            return data["findings_count"]
+        items = data.get("findings")
+        return len(items) if isinstance(items, list) else None
+    if isinstance(data, list):
+        return len(data)
+    return None
+
+
+def _commit_count(rec: dict[str, Any]) -> int | None:
+    """Total commits in the generated repo across all branches (real mode only)."""
+    executor = rec.get("executor")
+    project = str(rec.get("project") or "")
+    if not isinstance(executor, LocalDiskExecutor) or not project:
+        return None
+    if not (executor.root / project / ".git").is_dir():
+        return None
+    result = executor.run_command(["git", "rev-list", "--all", "--count"], cwd=project)
+    out = result.stdout.strip()
+    return int(out) if result.exit_code == 0 and out.isdigit() else None
+
+
+def _execution_seconds(rec: dict[str, Any]) -> float | None:
+    """Wall-clock seconds from run start to finish (None while still running / if unknown)."""
+    started, finished = rec.get("started_at"), rec.get("finished_at")
+    if not started or not finished:
+        return None
+    try:
+        return (datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds()
+    except (ValueError, TypeError):
+        return None
+
+
+def _tests_status(state: dict[str, Any]) -> str:
+    """passed / failed / unknown from the Unit-Test phase's fixed-check result."""
+    result = state.get("test_result")
+    if isinstance(result, dict) and "passed" in result:
+        return "passed" if result["passed"] else "failed"
+    if "tests_ok" in state:
+        return "passed" if state.get("tests_ok") else "failed"
+    return "unknown"
+
+
+@app.get("/api/run/metrics")
+def run_metrics() -> dict[str, Any]:
+    """Every Dashboard metric tile, computed from the run's real artifacts + final state."""
+    rec = _last_run
+    if not rec.get("project"):
+        return {"available": False, "reason": "No run has been started yet."}
+
+    state = rec.get("state") or {}
+    status = str(rec.get("status") or "")
+    files = _run_file_paths(rec)
+    retry_breakdown = {
+        "repair": int(state.get("repair_attempt") or 0),
+        "debug": int(state.get("debug_attempt") or 0),
+        "security": int(state.get("security_loop_attempt") or 0),
+    }
+
+    return {
+        "available": True,
+        "project": rec.get("project", ""),
+        "mode": rec.get("mode", ""),
+        "status": status,
+        "filesGenerated": len(files),
+        "linesOfCode": _run_loc(rec),
+        "workItems": int(rec.get("plan_count") or len(state.get("work_items") or []) or 0),
+        "testsGenerated": len(state.get("unit_tests") or []),
+        "testsStatus": _tests_status(state),
+        "securityFindings": _security_findings_count(rec),
+        "reviewFindings": _review_findings_count(rec),
+        "commits": _commit_count(rec),
+        "prStatus": ("open" if state.get("pr_url")
+                     else "failed" if state.get("finalize_status") == "pr_failed"
+                     else "not-opened"),
+        "executionSeconds": _execution_seconds(rec),
+        # A completed run is a 100% success; anything else has no meaningful single percentage yet.
+        "successRate": 100 if status == "completed" else None,
+        "retryLoops": sum(retry_breakdown.values()),
+        "retryBreakdown": retry_breakdown,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="IMP-001 LangGraph HTTP/SSE bridge for the frontend")
     parser.add_argument("--port", type=int, default=8200)
@@ -1246,7 +1390,7 @@ def main() -> None:
     print(f"IMP-001 graph bridge -> http://{args.host}:{args.port}")
     print("  GET /api/packs | POST /api/plan | GET /api/run/stream?pack=<name>&mode=dry-run")
     print("  output: /api/run/files | /api/run/file?path= | /api/run/diff?path= |"
-          " /api/run/reports | /api/run/security | /api/run/github")
+          " /api/run/reports | /api/run/security | /api/run/github | /api/run/metrics")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
