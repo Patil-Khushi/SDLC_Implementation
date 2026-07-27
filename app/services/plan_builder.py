@@ -164,6 +164,12 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
     pack = Path(pack_dir)
     roles = design_pack.detect_roles(pack)
 
+    # The adaptive path re-roots every file under canonical backend/ , frontend/ folders (a clean
+    # two-folder project regardless of how the pack wrapped its trees); the legacy path keeps its
+    # byte-for-byte paths. This flag threads that choice through the shared reconcile + completeness
+    # helpers below.
+    reroot_paths = False
+
     # Legacy path: a self-contained flat mapping keeps the original output byte-for-byte.
     rich = roles.get("rich_api_mapping")
     if rich:
@@ -195,12 +201,13 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
                 "UI↔API mapping table)."
             )
         backend_tree, frontend_tree = resolved.backend_tree, resolved.frontend_tree
+        reroot_paths = True  # the adaptive builders emit canonical backend/ , frontend/ paths
         items = _backend_items_adaptive(resolved) + _frontend_items_adaptive(resolved)
         # Authoritative-manifest guarantee: every non-test file leaf in the structure trees must be
         # produced by SOME work item. The builders are exhaustive by construction (one item per
         # directory), so this normally adds nothing — it's a guard that turns any future coverage
         # gap into an explicit catch-all item instead of a silent omission.
-        items += _reconcile_uncovered(backend_tree, frontend_tree, items)
+        items += _reconcile_uncovered(backend_tree, frontend_tree, items, reroot=True)
 
     # Final completeness check, run for BOTH paths: after the builders AND the reconcile sweep,
     # every non-test structure-tree leaf must be targeted by some item. This should be
@@ -208,7 +215,7 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
     # hit here means a leaf slipped past BOTH stages (a genuinely new, unanticipated gap, not the
     # already-fixed "zero per-operation matches" case, which reconcile already covers). Warn loudly
     # with the exact missing paths rather than silently ship an incomplete app again.
-    still_missing = _missing_after_reconcile(backend_tree, frontend_tree, items)
+    still_missing = _missing_after_reconcile(backend_tree, frontend_tree, items, reroot=reroot_paths)
     if still_missing:
         logger.warning(
             "%s: %d design file(s) are not targeted by any work item even after reconciliation — "
@@ -221,14 +228,22 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
     return _assign_features(items, _feature_map(pack, roles))
 
 
-def _missing_after_reconcile(backend_tree: dict, frontend_tree: dict, items: list[WorkItem]) -> list[str]:
+def _missing_after_reconcile(
+    backend_tree: dict, frontend_tree: dict, items: list[WorkItem], *, reroot: bool = False
+) -> list[str]:
     """Non-test structure-tree leaves NOT targeted by any of ``items``, sorted. Empty in normal
     operation (``_reconcile_uncovered`` already swept everything it found) — a non-empty result
-    means a leaf slipped past both the builders and the sweep, e.g. a future edit to either one."""
+    means a leaf slipped past both the builders and the sweep, e.g. a future edit to either one.
+
+    ``reroot`` compares in the canonical ``backend/`` / ``frontend/`` form the adaptive builders
+    emit; the legacy path leaves it off so its byte-for-byte paths are compared as-is."""
     targeted = {f for item in items for f in item.target_files}
-    return sorted(
-        p for tree in (backend_tree, frontend_tree) for p, _ in _source_leaves(tree) if p not in targeted
-    )
+    if reroot:
+        expected = {p for p, _ in _rerooted_source_leaves(backend_tree, "backend")}
+        expected |= {p for p, _ in _rerooted_source_leaves(frontend_tree, "frontend")}
+    else:
+        expected = {p for tree in (backend_tree, frontend_tree) for p, _ in _source_leaves(tree)}
+    return sorted(p for p in expected if p not in targeted)
 
 
 def _structure_obj(roles: dict, role: str) -> dict:
@@ -705,6 +720,74 @@ def _source_leaves(tree: dict) -> list[tuple[str, Any]]:
     return _normalize_binary_assets(leaves)
 
 
+# -- canonical two-folder re-rooting ---------------------------------------
+#
+# Design packs wrap their structure trees inconsistently: ``root/backend/…`` (resources),
+# ``auth-backend/…`` / ``quickbite-backend/…`` (per-side project dirs), or a bare ``src/…`` (no
+# wrapper at all). To make the GENERATED project always land in two clean top-level folders, every
+# backend leaf is re-rooted under ``backend/`` and every frontend leaf under ``frontend/``. Applied
+# ONCE in build_plan's adaptive path (before any builder runs) so target files, the reconcile sweep
+# and the completeness check all agree on the canonical paths. The legacy flat-CSV path keeps its
+# byte-for-byte output and is left un-rerooted.
+
+#: Generic wrapper directories a whole project may be nested under; peeled off when re-rooting.
+#: Deliberately EXCLUDES source/package roots — ``src``, ``source``, and ``app``. ``app`` is this
+#: project's own FastAPI convention (``app/main.py``, ``from app.services import …``); peeling it
+#: would collapse ``app/main.py`` → ``backend/main.py`` and break the ``from app.…`` imports the
+#: generator emits, so ``app`` is treated as a real package dir, never a wrapper. Do not add
+#: ``app``/``src``/``source`` here.
+_GENERIC_WRAPPERS = {"root", "project", "workspace", "repo"}
+
+#: Extensionless files that are legitimately part of a tree (kept despite having no ``.``); anything
+#: else with no extension (e.g. a bare ``notes`` annotation some packs put beside the tree) is
+#: treated as metadata, not a file, and dropped.
+_KNOWN_EXTENSIONLESS_FILES = {
+    "dockerfile", "makefile", "procfile", "license", "readme", "codeowners",
+    ".gitignore", ".dockerignore", ".gitattributes", ".npmrc", ".nvmrc",
+}
+
+
+def _looks_like_file(path: str) -> bool:
+    """Whether a leaf names a real file rather than a metadata annotation (a bare ``notes`` key some
+    packs put beside the tree). A real file has an extension or is a known extensionless file."""
+    base = _basename(path)
+    return "." in base or base in _KNOWN_EXTENSIONLESS_FILES
+
+
+def _reroot(path: str, side: str) -> str:
+    """Re-root one leaf path under a canonical top-level ``side`` dir ('backend'/'frontend').
+
+    Peels leading wrapper segments — generic (``root/``, ``app/``) or side-named (``backend/``,
+    ``auth-backend/``, ``quickbite-backend/``) — then anchors the remainder under ``<side>/``. So
+    ``root/backend/src/app.js`` → ``backend/src/app.js`` and a bare ``src/app.js`` →
+    ``backend/src/app.js`` collapse to the same layout."""
+    side_suffixes = (f"-{side}", f"_{side}")
+    segs = [s for s in path.split("/") if s]
+    while segs:
+        head = segs[0].lower()
+        if head in _GENERIC_WRAPPERS or head == side or head.endswith(side_suffixes):
+            segs = segs[1:]
+        else:
+            break
+    return "/".join([side, *segs]) if segs else side
+
+
+def _rerooted_source_leaves(tree: dict, side: str) -> list[tuple[str, Any]]:
+    """Like :func:`_source_leaves` but re-rooted under a single canonical ``side/`` folder
+    ('backend'/'frontend'), filtering out non-file metadata leaves (e.g. a bare ``notes`` key).
+    Re-rooting happens AFTER asset synthesis + favicon normalization, so those transformations
+    are preserved. Dropped (extensionless, non-known) leaves are logged at DEBUG so a later "why
+    wasn't this file generated?" is easy to trace — if a real extensionless file (e.g. ``bin/serve``)
+    shows up here, add it to :data:`_KNOWN_EXTENSIONLESS_FILES`."""
+    out: list[tuple[str, Any]] = []
+    for path, desc in _source_leaves(tree):
+        if _looks_like_file(path):
+            out.append((_reroot(path, side), desc))
+        else:
+            logger.debug("plan_builder: skipping non-file leaf %r in %s tree (treated as metadata)", path, side)
+    return out
+
+
 def _items_from_groups(
     prefix: str,
     leaves: list[tuple[str, Any]],
@@ -745,7 +828,7 @@ def _items_from_groups(
 
 
 def _backend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
-    leaves = _source_leaves(resolved.backend_tree)
+    leaves = _rerooted_source_leaves(resolved.backend_tree, "backend")
     if not leaves:
         return []
     handlers = [p for p, _ in leaves if _is_handler(p)]
@@ -779,7 +862,7 @@ def _backend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkIt
 
 
 def _frontend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
-    leaves = _source_leaves(resolved.frontend_tree)
+    leaves = _rerooted_source_leaves(resolved.frontend_tree, "frontend")
     if not leaves:
         return []
     pages = [p for p, _ in leaves if _is_page(p)]
@@ -808,7 +891,7 @@ def _frontend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkI
 
 
 def _reconcile_uncovered(
-    backend_tree: dict, frontend_tree: dict, items: list[WorkItem]
+    backend_tree: dict, frontend_tree: dict, items: list[WorkItem], *, reroot: bool = False
 ) -> list[WorkItem]:
     """Sweep any structure-tree file not already covered by an item into a catch-all item.
 
@@ -818,12 +901,16 @@ def _reconcile_uncovered(
     only ever target files tied to a SPECIFIC operation/screen, so shared/cross-cutting
     infrastructure (main.py, config/settings.py, core/security.py, a frontend App.tsx, api/
     client.ts, ...) is never assigned to any item on its own — this is what sweeps those in.
+
+    ``reroot`` re-roots swept leaves under canonical ``backend/`` / ``frontend/`` folders, matching
+    what the adaptive builders emit. The legacy path leaves it off to keep its byte-for-byte paths.
     """
+    leaves_of = _rerooted_source_leaves if reroot else lambda tree, _side: _source_leaves(tree)
     covered = {f for item in items for f in item.target_files}
     used_ids = {item.id for item in items}
     extra: list[WorkItem] = []
     for prefix, tree in (("backend", backend_tree), ("frontend", frontend_tree)):
-        uncovered = [(p, d) for p, d in _source_leaves(tree) if p not in covered]
+        uncovered = [(p, d) for p, d in leaves_of(tree, prefix) if p not in covered]
         if uncovered:
             extra += _items_from_groups(prefix, uncovered, used_ids=used_ids)
     return extra

@@ -18,7 +18,7 @@ import pytest
 
 from app.services import design_pack
 from app.services.design_pack import _tokens
-from app.services.plan_builder import _source_leaves, build_plan
+from app.services.plan_builder import _rerooted_source_leaves, _source_leaves, build_plan
 
 # app/tests -> app -> SDLC_Implementation -> SDLC(repo) / fixtures / Test
 _TEST_PACK = Path(__file__).resolve().parents[2].parent / "fixtures" / "Test"
@@ -62,30 +62,39 @@ def test_plan_covers_every_structure_leaf() -> None:
     items = build_plan(pack)
     resolved = design_pack.resolve(pack)
 
-    leaves = {p for p, _ in _source_leaves(resolved.backend_tree)}
-    leaves |= {p for p, _ in _source_leaves(resolved.frontend_tree)}
+    # Compare in the re-rooted (backend/… , frontend/…) form the builders now emit — the same
+    # normalization build_plan applies — since every file is produced under a canonical top folder.
+    leaves = {p for p, _ in _rerooted_source_leaves(resolved.backend_tree, "backend")}
+    leaves |= {p for p, _ in _rerooted_source_leaves(resolved.frontend_tree, "frontend")}
     covered = {f for item in items for f in item.target_files}
 
     missing = sorted(leaves - covered)
     assert not missing, f"{len(missing)} structure-tree files not planned: {missing[:10]}"
 
+    # Every planned file lives under exactly one of the two top-level folders — the whole point of
+    # the re-rooting: a clean backend/ + frontend/ split regardless of how the pack wrapped things.
+    stray = sorted(f for f in covered if not f.startswith(("backend/", "frontend/")))
+    assert not stray, f"files outside backend/ or frontend/: {stray[:10]}"
+
 
 def test_bootstrap_and_ui_files_are_planned() -> None:
-    """Exactly the file classes that were missing from the pushed QuickBite repo."""
+    """Exactly the file classes that were missing from the pushed QuickBite repo — now asserted in
+    their re-rooted form (the ``quickbite-backend/`` / ``quickbite-frontend/`` wrappers collapse to
+    the canonical ``backend/`` / ``frontend/`` top-level folders)."""
     pack = _pack_or_skip()
     covered = {f for item in build_plan(pack) for f in item.target_files}
     for path in [
-        "quickbite-backend/src/app.js",
-        "quickbite-backend/src/server.js",
-        "quickbite-backend/src/config/db.js",
-        "quickbite-backend/src/middleware/errorHandler.js",
-        "quickbite-backend/src/routes/index.js",
-        "quickbite-backend/src/modules/notifications/notifications.service.js",
-        "quickbite-frontend/src/index.jsx",
-        "quickbite-frontend/src/App.jsx",
-        "quickbite-frontend/src/pages/auth/LoginPage/LoginPage.jsx",
-        "quickbite-frontend/src/store/index.js",
-        "quickbite-frontend/src/hooks/useAuth.js",
+        "backend/src/app.js",
+        "backend/src/server.js",
+        "backend/src/config/db.js",
+        "backend/src/middleware/errorHandler.js",
+        "backend/src/routes/index.js",
+        "backend/src/modules/notifications/notifications.service.js",
+        "frontend/src/index.jsx",
+        "frontend/src/App.jsx",
+        "frontend/src/pages/auth/LoginPage/LoginPage.jsx",
+        "frontend/src/store/index.js",
+        "frontend/src/hooks/useAuth.js",
     ]:
         assert path in covered, f"{path} was not planned"
 
