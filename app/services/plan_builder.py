@@ -731,7 +731,12 @@ def _source_leaves(tree: dict) -> list[tuple[str, Any]]:
 # byte-for-byte output and is left un-rerooted.
 
 #: Generic wrapper directories a whole project may be nested under; peeled off when re-rooting.
-_GENERIC_WRAPPERS = {"root", "app", "project", "workspace", "repo", "source"}
+#: Deliberately EXCLUDES source/package roots — ``src``, ``source``, and ``app``. ``app`` is this
+#: project's own FastAPI convention (``app/main.py``, ``from app.services import …``); peeling it
+#: would collapse ``app/main.py`` → ``backend/main.py`` and break the ``from app.…`` imports the
+#: generator emits, so ``app`` is treated as a real package dir, never a wrapper. Do not add
+#: ``app``/``src``/``source`` here.
+_GENERIC_WRAPPERS = {"root", "project", "workspace", "repo"}
 
 #: Extensionless files that are legitimately part of a tree (kept despite having no ``.``); anything
 #: else with no extension (e.g. a bare ``notes`` annotation some packs put beside the tree) is
@@ -771,12 +776,16 @@ def _rerooted_source_leaves(tree: dict, side: str) -> list[tuple[str, Any]]:
     """Like :func:`_source_leaves` but re-rooted under a single canonical ``side/`` folder
     ('backend'/'frontend'), filtering out non-file metadata leaves (e.g. a bare ``notes`` key).
     Re-rooting happens AFTER asset synthesis + favicon normalization, so those transformations
-    are preserved."""
-    return [
-        (_reroot(path, side), desc)
-        for path, desc in _source_leaves(tree)
-        if _looks_like_file(path)
-    ]
+    are preserved. Dropped (extensionless, non-known) leaves are logged at DEBUG so a later "why
+    wasn't this file generated?" is easy to trace — if a real extensionless file (e.g. ``bin/serve``)
+    shows up here, add it to :data:`_KNOWN_EXTENSIONLESS_FILES`."""
+    out: list[tuple[str, Any]] = []
+    for path, desc in _source_leaves(tree):
+        if _looks_like_file(path):
+            out.append((_reroot(path, side), desc))
+        else:
+            logger.debug("plan_builder: skipping non-file leaf %r in %s tree (treated as metadata)", path, side)
+    return out
 
 
 def _items_from_groups(
