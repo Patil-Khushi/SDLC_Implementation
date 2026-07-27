@@ -1,7 +1,9 @@
 """Acceptance tests for the Code Generation agent (Prompt 5).
 
 Uses FakeLLMGateway (canned model output) + FakeExecutor (captures writes) — no network, no
-sandbox. Covers the two-file success path and the invalid-JSON failure path.
+sandbox. Covers the per-file generation path (a multi-file item is generated one file per call so
+its output can't grow with the file count and truncate at the max_tokens cap), the single-file
+one-shot path, and the invalid-JSON failure path.
 """
 
 import json
@@ -27,15 +29,17 @@ DESIGN_PACK = {
     "schema.sql": "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);",
     "validation-rules.json": {"POST /login": {"password": "Password is required."}},
 }
-TWO_FILE_JSON = json.dumps(
-    {
-        "files": [
-            {"path": "app/api/login.py", "content": "# login controller\n"},
-            {"path": "app/services/login_service.py", "content": "# login service\n"},
-        ],
-        "notes": "",
-    }
-)
+
+
+def _one_file(path: str, content: str) -> str:
+    """A valid single-file reply — the shape the per-file path expects from each call."""
+    return json.dumps({"files": [{"path": path, "content": content}], "notes": ""})
+
+
+# LOGIN_ITEM has two targets, so the agent now makes one call per file (in target order): the
+# controller first, then the service.
+LOGIN_CONTROLLER_JSON = _one_file("app/api/login.py", "# login controller\n")
+LOGIN_SERVICE_JSON = _one_file("app/services/login_service.py", "# login service\n")
 
 
 def _state_with_item(item: WorkItem, design_pack: dict[str, Any]) -> WorkflowState:
@@ -46,7 +50,10 @@ def _state_with_item(item: WorkItem, design_pack: dict[str, Any]) -> WorkflowSta
 
 def test_two_file_backend_item_is_written_and_recorded() -> None:
     executor = FakeExecutor()
-    agent = CodeGeneratorAgent(executor=executor, llm=FakeLLMGateway([TWO_FILE_JSON]))
+    # One reply per file (per-file generation): controller, then service.
+    agent = CodeGeneratorAgent(
+        executor=executor, llm=FakeLLMGateway([LOGIN_CONTROLLER_JSON, LOGIN_SERVICE_JSON])
+    )
 
     out = agent.execute(_state_with_item(LOGIN_ITEM, DESIGN_PACK))
 
@@ -81,11 +88,13 @@ def test_two_file_backend_item_is_written_and_recorded() -> None:
 
 
 def test_context_includes_cited_slices() -> None:
-    gateway = FakeLLMGateway([TWO_FILE_JSON])
+    gateway = FakeLLMGateway([LOGIN_CONTROLLER_JSON, LOGIN_SERVICE_JSON])
     agent = CodeGeneratorAgent(executor=FakeExecutor(), llm=gateway)
 
     agent.execute(_state_with_item(LOGIN_ITEM, DESIGN_PACK))
 
+    # The shared design-pack context is grounding for every per-file call, so the first file's
+    # prompt already carries the cited endpoint/table/validation slices.
     prompt = gateway.calls[0]["prompt"]
     assert "POST /login" in prompt                 # cited endpoint reached the prompt
     assert "users" in prompt                       # cited table's CREATE TABLE was sliced in
@@ -194,8 +203,12 @@ def test_item_with_regex_heavy_content_completes_end_to_end() -> None:
 
 def test_reask_once_recovers_from_first_bad_reply() -> None:
     executor = FakeExecutor()
-    # first reply invalid, second reply valid -> exactly one re-ask, files written
-    agent = CodeGeneratorAgent(executor=executor, llm=FakeLLMGateway(["oops not json", TWO_FILE_JSON]))
+    # The first file's first reply is invalid, so it re-asks once (recovering), then the second
+    # file's reply is valid first try -> both files written.
+    agent = CodeGeneratorAgent(
+        executor=executor,
+        llm=FakeLLMGateway(["oops not json", LOGIN_CONTROLLER_JSON, LOGIN_SERVICE_JSON]),
+    )
 
     out = agent.execute(_state_with_item(LOGIN_ITEM, DESIGN_PACK))
     assert len(out["generated_code"]) == 2
@@ -208,3 +221,114 @@ def test_no_current_work_item_is_a_noop() -> None:
     out = agent.execute(state)   # current_work_item is None
     assert out["generated_code"] == []
     assert out.get("generation_summary", "") == ""
+
+
+# --------------------------------------------------------------------------- per-file generation
+#
+# The truncation fix: a multi-file item is generated ONE FILE PER CALL (bounded output) instead of
+# one giant reply carrying every file, which was overrunning the max_tokens cap and coming back as
+# truncated, unparseable JSON ("no JSON object found in reply").
+
+CATALOGUE_ITEM = WorkItem(
+    id="WI-CAT",
+    requirement_ids=["REQ-CAT"],
+    target_files=[
+        "src/modules/catalogue/catalogue.routes.js",
+        "src/modules/catalogue/catalogue.controller.js",
+        "src/modules/catalogue/catalogue.service.js",
+    ],
+)
+
+
+def test_multi_file_item_generates_one_file_per_call() -> None:
+    executor = FakeExecutor()
+    gateway = FakeLLMGateway([
+        _one_file("src/modules/catalogue/catalogue.routes.js", "// routes\n"),
+        _one_file("src/modules/catalogue/catalogue.controller.js", "// controller\n"),
+        _one_file("src/modules/catalogue/catalogue.service.js", "// service\n"),
+    ])
+    agent = CodeGeneratorAgent(executor=executor, llm=gateway)
+
+    out = agent.execute(_state_with_item(CATALOGUE_ITEM, {}))
+
+    assert len(gateway.calls) == 3                       # exactly one call per target file
+    assert out["codegen_ok"] is True
+    assert out["generation_metrics"]["files_produced"] == 3
+    assert executor.writes == [
+        "p1/src/modules/catalogue/catalogue.routes.js",
+        "p1/src/modules/catalogue/catalogue.controller.js",
+        "p1/src/modules/catalogue/catalogue.service.js",
+    ]
+    # each call is scoped to exactly one file, in target order
+    assert all("Generate EXACTLY ONE file now:" in c["prompt"] for c in gateway.calls)
+    assert "catalogue.routes.js" in gateway.calls[0]["prompt"]
+    assert "catalogue.service.js" in gateway.calls[2]["prompt"]
+
+
+def test_one_unparseable_file_does_not_sink_the_others() -> None:
+    # A single file that never parses is skipped (the completeness gate + repair loop fills it in);
+    # the files that DID parse are still written, instead of failing the whole item.
+    executor = FakeExecutor()
+    gateway = FakeLLMGateway([
+        LOGIN_CONTROLLER_JSON,          # file 1 -> ok
+        "not json", "still not json",   # file 2 -> bad reply, retry also bad
+    ])
+    agent = CodeGeneratorAgent(executor=executor, llm=gateway)
+
+    out = agent.execute(_state_with_item(LOGIN_ITEM, DESIGN_PACK))
+
+    assert out["codegen_ok"] is True                                # partial success, not a hard fail
+    assert executor.writes == ["p1/app/api/login.py"]               # only the file that parsed
+    assert "p1/app/services/login_service.py" not in executor.files
+    assert out["generation_metrics"]["files_produced"] == 1
+
+
+def test_all_files_failing_records_item_failure() -> None:
+    # If EVERY file fails to parse, the item is recorded as failed with no writes — same escalation
+    # contract as before (codegen_ok False, so the router escalates without a gate/commit).
+    executor = FakeExecutor()
+    gateway = FakeLLMGateway(default="not json ever")       # every call (and retry) is unparseable
+    agent = CodeGeneratorAgent(executor=executor, llm=gateway)
+
+    out = agent.execute(_state_with_item(LOGIN_ITEM, DESIGN_PACK))
+
+    assert out["codegen_ok"] is False
+    assert executor.writes == []
+    assert out["generated_code"] == []
+    assert "FAILED" in out["generation_summary"]
+
+
+def test_earlier_file_content_is_fed_into_later_file_prompts() -> None:
+    # Cross-file coherence: a file generated earlier this item is injected into the prompts that
+    # follow, so a later file can import the exact symbols an earlier one defined.
+    executor = FakeExecutor()
+    gateway = FakeLLMGateway([
+        _one_file("app/api/login.py", "# CONTROLLER_MARKER_XYZ\n"),
+        _one_file("app/services/login_service.py", "# service\n"),
+    ])
+    agent = CodeGeneratorAgent(executor=executor, llm=gateway)
+
+    agent.execute(_state_with_item(LOGIN_ITEM, DESIGN_PACK))
+
+    second_prompt = gateway.calls[1]["prompt"]              # the second file's prompt...
+    assert "app/api/login.py" in second_prompt              # ...shows the first file's path...
+    assert "CONTROLLER_MARKER_XYZ" in second_prompt         # ...and its content
+    assert "CONTROLLER_MARKER_XYZ" not in gateway.calls[0]["prompt"]  # first file had no siblings yet
+
+
+def test_wrong_file_returned_is_rejected_not_relabeled() -> None:
+    # If a per-file call returns a DIFFERENT file than requested, its content must NOT be relabeled
+    # onto the requested path (that would silently write the wrong code under it). It's skipped, so
+    # the gate/repair loop supplies the real file — and the good file is never overwritten.
+    executor = FakeExecutor()
+    gateway = FakeLLMGateway([
+        LOGIN_CONTROLLER_JSON,                            # file 1 (login.py) -> ok
+        _one_file("app/api/login.py", "# WRONG FILE\n"),  # file 2 asked for the service, got login.py
+    ])
+    agent = CodeGeneratorAgent(executor=executor, llm=gateway)
+
+    out = agent.execute(_state_with_item(LOGIN_ITEM, DESIGN_PACK))
+
+    assert executor.writes == ["p1/app/api/login.py"]                       # service.py skipped
+    assert executor.files["p1/app/api/login.py"] == "# login controller\n"  # not overwritten
+    assert out["generation_metrics"]["files_produced"] == 1
