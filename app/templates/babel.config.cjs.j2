@@ -1,0 +1,76 @@
+/**
+ * Babel configuration for the Jest harness — DETERMINISTIC scaffold output
+ * (app/services/boilerplate.py), not model output.
+ *
+ * CommonJS (.cjs) ON PURPOSE: generated package.json files commonly declare "type": "module", and
+ * a babel.config.js would then be loaded as an ES module, where `module.exports` is undefined.
+ * Babel always reads a .cjs config as CommonJS, so this file is correct under both module systems.
+ *
+ * Without this file Jest has no transform at all: every `import`/`export` is a parse error and
+ * every JSX element is a syntax error — the whole suite fails before running a single assertion.
+ */
+
+/**
+ * `import.meta` -> CommonJS equivalents.
+ *
+ * @babel/preset-env deliberately does NOT transform `import.meta` (it has no CJS equivalent it can
+ * assume), so Vite-convention source — `import.meta.env.VITE_API_URL`, `import.meta.url` — throws
+ * "Cannot use 'import.meta' outside a module" the moment Jest runs it as CommonJS. This plugin
+ * rewrites the two forms real code actually uses.
+ */
+function importMetaToCommonJs({ types: t }) {
+  return {
+    name: 'import-meta-to-commonjs',
+    visitor: {
+      MetaProperty(path) {
+        if (path.node.meta.name !== 'import' || path.node.property.name !== 'meta') {
+          return;
+        }
+        const parent = path.parentPath;
+        const isUrl =
+          parent.isMemberExpression() &&
+          parent.node.object === path.node &&
+          !parent.node.computed &&
+          parent.node.property.name === 'url';
+        if (isUrl) {
+          // `import.meta.url` -> require('url').pathToFileURL(module.filename).href
+          //
+          // module.filename, NOT a bare `__filename`: Babel's scope-hygiene pass renames a
+          // `__filename` identifier it did not itself introduce, which turns the replacement into a
+          // self-referential expression (`_filename = pathToFileURL(_filename)`) that resolves to
+          // undefined at run time. `module.filename` is a member expression Babel leaves alone.
+          parent.replaceWith(
+            t.memberExpression(
+              t.callExpression(
+                t.memberExpression(
+                  t.callExpression(t.identifier('require'), [t.stringLiteral('url')]),
+                  t.identifier('pathToFileURL'),
+                ),
+                [t.memberExpression(t.identifier('module'), t.identifier('filename'))],
+              ),
+              t.identifier('href'),
+            ),
+          );
+          return;
+        }
+        // `import.meta.env.X` -> `process.env.X`, which is where Jest-time config actually lives.
+        // A bare `import.meta` collapses to `process` for the same reason: reads like
+        // `import.meta.hot` then evaluate to undefined (no HMR under test) instead of throwing.
+        path.replaceWith(t.identifier('process'));
+      },
+    },
+  };
+}
+
+module.exports = {
+  presets: [
+    // targets: node current — the code is transformed for the Node that runs Jest, nothing more.
+    ['@babel/preset-env', { targets: { node: 'current' } }],
+{% if dom %}
+    // runtime: automatic — JSX compiles without every file importing React (the React 17+ default,
+    // and what Vite already does in the app build).
+    ['@babel/preset-react', { runtime: 'automatic' }],
+{% endif %}
+  ],
+  plugins: [importMetaToCommonJs],
+};

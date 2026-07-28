@@ -23,7 +23,7 @@ from app.integrations.github import get_github_client
 from app.integrations.review_sandbox import is_allowed_repo_url
 from app.services.boilerplate import render_scaffold
 from app.services.packaging import build_project_zip
-from app.services.wiring import reconcile_wiring
+from app.services.wiring import find_unresolved_imports, reconcile_wiring
 
 logger = logging.getLogger(__name__)
 
@@ -614,6 +614,28 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
         logger.exception("wiring reconciliation failed for run %s", state.get("run_id"))
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[reconcile] FAILED: {exc}\n"
         return state
+
+    # Report-only companion pass: relative imports that resolve to nothing in the generated file
+    # set. Deliberately NOT auto-fixed — the two real shapes (a module nobody generated, and one
+    # generated under a different convention) are repaired either by creating the file or by
+    # renaming the importer, and choosing between them is a judgement call that belongs to the LLM
+    # debugging agent. Surfacing them here means that agent is handed the list up front instead of
+    # rediscovering them one crash at a time from test stack traces.
+    try:
+        unresolved = find_unresolved_imports(files)
+    except Exception:  # noqa: BLE001 - an analysis bug must never crash a finished plan
+        logger.exception("unresolved-import analysis failed for run %s", state.get("run_id"))
+        unresolved = []
+    if unresolved:
+        logger.warning(
+            "[reconcile] run=%s | %d unresolved import(s) — left for the debugging agent",
+            state.get("run_id") or "-",
+            len(unresolved),
+        )
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            f"[reconcile] {len(unresolved)} unresolved import(s) (not auto-fixed):\n"
+            + "".join(f"    - {item.as_note()}\n" for item in unresolved)
+        )
 
     if not changed:
         state["generation_summary"] = (state.get("generation_summary") or "") + "[reconcile] no wiring changes\n"

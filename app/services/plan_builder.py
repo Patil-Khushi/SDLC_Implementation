@@ -11,6 +11,9 @@ Two builders, chosen by input shape:
   ``frontend-structure.json`` trees are authoritative — one item is emitted PER DIRECTORY so every
   file leaf is produced exactly once, and endpoints/tables/screens/req_ids are ATTACHED to those
   items as traceability + prompt-grounding context (they no longer decide which items exist).
+  Leaves the deterministic scaffold already renders (the jest/babel test harness — see
+  ``_SCAFFOLD_OWNED_RE``) are held back: they are produced by ``scaffold_node``, and letting a work
+  item target them would only let the LLM overwrite a known-correct file with a guess.
 * LEGACY (self-contained flat-CSV packs): per-operation/per-screen item generation is
   unchanged — one BACKEND item per operationId and one FRONTEND item per screen, grouped by
   (screen, layer) — but when structure trees are present, the overall output also runs the same
@@ -196,10 +199,10 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
             )
         backend_tree, frontend_tree = resolved.backend_tree, resolved.frontend_tree
         items = _backend_items_adaptive(resolved) + _frontend_items_adaptive(resolved)
-        # Authoritative-manifest guarantee: every non-test file leaf in the structure trees must be
-        # produced by SOME work item. The builders are exhaustive by construction (one item per
-        # directory), so this normally adds nothing — it's a guard that turns any future coverage
-        # gap into an explicit catch-all item instead of a silent omission.
+        # Authoritative-manifest guarantee: every non-test, non-scaffold-owned file leaf in the
+        # structure trees must be produced by SOME work item. The builders are exhaustive by
+        # construction (one item per directory), so this normally adds nothing — it's a guard that
+        # turns any future coverage gap into an explicit catch-all item instead of a silent omission.
         items += _reconcile_uncovered(backend_tree, frontend_tree, items)
 
     # Final completeness check, run for BOTH paths: after the builders AND the reconcile sweep,
@@ -222,9 +225,11 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
 
 
 def _missing_after_reconcile(backend_tree: dict, frontend_tree: dict, items: list[WorkItem]) -> list[str]:
-    """Non-test structure-tree leaves NOT targeted by any of ``items``, sorted. Empty in normal
-    operation (``_reconcile_uncovered`` already swept everything it found) — a non-empty result
-    means a leaf slipped past both the builders and the sweep, e.g. a future edit to either one."""
+    """Generatable structure-tree leaves NOT targeted by any of ``items``, sorted (tests and
+    scaffold-owned harness configs are not generatable — see :func:`_source_leaves`). Empty in
+    normal operation (``_reconcile_uncovered`` already swept everything it found) — a non-empty
+    result means a leaf slipped past both the builders and the sweep, e.g. a future edit to
+    either one."""
     targeted = {f for item in items for f in item.target_files}
     return sorted(
         p for tree in (backend_tree, frontend_tree) for p, _ in _source_leaves(tree) if p not in targeted
@@ -484,6 +489,29 @@ def _is_test_path(path: str) -> bool:
     return "tests" in segs or "__tests__" in segs
 
 
+#: Test-harness config files the DETERMINISTIC scaffold owns (rendered by
+#: :mod:`app.services.boilerplate` from templates whose correct shape is already known:
+#: ``jest.config.cjs``, ``babel.config.cjs``, ``jest.setup.cjs``).
+#:
+#: They must NOT appear in any work item's ``target_files``. ``scaffold_node`` writes them BEFORE
+#: code generation, so a work item listing one has the LLM silently overwrite the good version with
+#: a guessed one — and the guess is made from inside a single-sided work item that cannot see the
+#: whole project. That is exactly how a full-stack repo shipped a backend-framed jest.config.js
+#: (``testEnvironment: 'node'``, a testMatch catching only ``*.test.js``, no Babel config at all)
+#: over a React frontend: 103 of 235 test files were never collected and every JSX/ESM test failed
+#: to parse. Matching is by NAME, not extension, so a ``.js``/``.cjs``/``.mjs``/``.ts``/``.json``
+#: variant is excluded just the same.
+_SCAFFOLD_OWNED_RE = re.compile(
+    r"^(?:jest\.config|jest\.setup|babel\.config)\.[cm]?[jt]s(?:on)?$"
+    r"|^\.babelrc(?:\.[a-z]+)?$"
+)
+
+
+def _is_scaffold_owned(path: str) -> bool:
+    """True for a file the deterministic scaffold renders, so no work item should target it."""
+    return not _is_dir_leaf(path) and bool(_SCAFFOLD_OWNED_RE.match(_basename(path)))
+
+
 def _is_validator(path: str) -> bool:
     return not _is_dir_leaf(path) and "validator" in _basename(path)
 
@@ -692,14 +720,20 @@ def _normalize_binary_assets(leaves: list[tuple[str, Any]]) -> list[tuple[str, A
 def _source_leaves(tree: dict) -> list[tuple[str, Any]]:
     """File leaves to generate for a structure tree.
 
-    Excludes test files and directory entries — EXCEPT bulk ``assets/…/`` folders, which are
+    Excludes test files, directory entries, and the test-harness configs the deterministic scaffold
+    already renders (see :data:`_SCAFFOLD_OWNED_RE`) — EXCEPT bulk ``assets/…/`` folders, which are
     expanded into concrete ``.svg`` targets (see :func:`_asset_leaves`) so the assets they stand
     for are actually generated. Binary targets the generator can't emit are normalized to SVG
-    (see :func:`_normalize_binary_assets`). Centralizing both here keeps the builders,
-    ``_reconcile_uncovered`` and ``_missing_after_reconcile`` in agreement.
+    (see :func:`_normalize_binary_assets`). Centralizing all of it here keeps the builders,
+    ``_reconcile_uncovered`` and ``_missing_after_reconcile`` in agreement — and, for the
+    scaffold-owned files, keeps the "every leaf is produced" guarantee honest: they ARE produced,
+    just by ``scaffold_node`` rather than by a work item, so counting them as uncovered would be
+    the false alarm and generating them would be the real bug.
     """
     leaves: list[tuple[str, Any]] = [
-        (p, d) for p, d in _walk(tree) if not _is_dir_leaf(p) and not _is_test_path(p)
+        (p, d)
+        for p, d in _walk(tree)
+        if not _is_dir_leaf(p) and not _is_test_path(p) and not _is_scaffold_owned(p)
     ]
     leaves += _asset_leaves(tree)
     return _normalize_binary_assets(leaves)

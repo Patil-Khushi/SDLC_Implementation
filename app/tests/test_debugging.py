@@ -113,19 +113,68 @@ def test_fresh_debug_result_failure_outranks_stale_test_result_failure() -> None
     assert "AssertionError: expected 2 got 1" not in prompt  # stale signal must not leak in
 
 
-def test_debug_attempt_increments_by_one_per_execute_call() -> None:
+def _failing(stderr: str = "boom", stdout: str = "", name: str = "build") -> dict:
+    return {"passed": False, "checks": [
+        {"name": name, "passed": False, "stderr": stderr, "stdout": stdout, "exit_code": 1}
+    ]}
+
+
+def test_debug_attempt_counts_consecutive_stalled_rounds_not_raw_calls() -> None:
+    """The cap counter advances only when a round FAILS to reduce the failure count.
+
+    A flat per-call counter conflated "stuck" with "lots of independent failures" — see the
+    module docstring in app/agents/debugging.py.
+    """
     executor = FakeExecutor()
     llm = _FixedReplyLLM("backend/app/main.py")
     agent = DebuggingAgent(executor=executor, llm=llm)
-    state = _state(
-        debug_result={"passed": False, "checks": [{"name": "build", "passed": False, "stderr": "boom", "exit_code": 1}]}
-    )
+    # Same failure count every round => no progress is ever made.
+    state = _state(debug_result=_failing(stdout="Tests: 5 failed, 1 passed, 6 total"))
 
     agent.execute(state)
-    assert state["debug_attempt"] == 1
+    # First measured round has no baseline to compare against, so it is not counted as a stall.
+    assert state["debug_attempt"] == 0
+    assert state["debug_last_failure_count"] == 5
 
+    agent.execute(state)
+    assert state["debug_attempt"] == 1  # still 5 failing => stalled
     agent.execute(state)
     assert state["debug_attempt"] == 2
+
+    # Total rounds are tracked separately, and DO count every call (the oscillation backstop).
+    assert state["debug_rounds"] == 3
+
+
+def test_progress_resets_the_stall_counter() -> None:
+    executor = FakeExecutor()
+    llm = _FixedReplyLLM("backend/app/main.py")
+    agent = DebuggingAgent(executor=executor, llm=llm)
+    state = _state(debug_result=_failing(stdout="Tests: 9 failed, 0 passed, 9 total"))
+
+    agent.execute(state)                       # baseline 9
+    state["debug_result"] = _failing(stdout="Tests: 9 failed, 0 passed, 9 total")
+    agent.execute(state)
+    assert state["debug_attempt"] == 1         # stalled at 9
+
+    # A round that actually fixed something clears the stall counter, so a converging loop is
+    # never cut off by the cap no matter how many independent failures the project has.
+    state["debug_result"] = _failing(stdout="Tests: 4 failed, 5 passed, 9 total")
+    agent.execute(state)
+    assert state["debug_attempt"] == 0
+    assert state["debug_last_failure_count"] == 4
+
+
+def test_a_round_that_makes_things_worse_counts_as_a_stall() -> None:
+    executor = FakeExecutor()
+    llm = _FixedReplyLLM("backend/app/main.py")
+    agent = DebuggingAgent(executor=executor, llm=llm)
+    state = _state(debug_result=_failing(stdout="Tests: 3 failed, 7 passed, 10 total"))
+
+    agent.execute(state)
+    state["debug_result"] = _failing(stdout="Tests: 8 failed, 2 passed, 10 total")
+    agent.execute(state)
+
+    assert state["debug_attempt"] == 1
 
 
 def test_unparseable_reply_writes_nothing_and_does_not_raise() -> None:
