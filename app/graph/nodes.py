@@ -275,10 +275,10 @@ def gate_node(state: WorkflowState) -> WorkflowState:
 
     try:
         result = executor.files_complete(project_dir, target_files)
-        checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "exit_code": result.exit_code})
+        checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code})
     except Exception as exc:  # noqa: BLE001 - executor failure becomes a gate failure, not a crash
         logger.exception("gate: files_complete raised for run %s", state.get("run_id"))
-        checks.append({"name": "files_complete", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1})
+        checks.append({"name": "files_complete", "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1})
 
     state["gate_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
     return state
@@ -300,10 +300,10 @@ def debug_check_node(state: WorkflowState) -> WorkflowState:
     for name, check in (("compile", executor.compile), ("build", executor.build)):
         try:
             result = check(project_dir)
-            checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "exit_code": result.exit_code})
+            checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code})
         except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
             logger.exception("debug_check: %s raised for run %s", name, state.get("run_id"))
-            checks.append({"name": name, "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1})
+            checks.append({"name": name, "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1})
 
     state["debug_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
     return state
@@ -332,10 +332,10 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
 
     try:
         result = executor.test(project_dir)
-        check: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "exit_code": result.exit_code}
+        check: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code}
     except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
         logger.exception("unit_test_run: test raised for run %s", state.get("run_id"))
-        check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1}
+        check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1}
 
     state["test_result"] = {"passed": check["passed"], "checks": [check]}
     return state
@@ -497,9 +497,11 @@ def package_node(state: WorkflowState) -> WorkflowState:
             executor=executor,
             project_dir=project_dir,
             generated_code=state.get("generated_code", []),
+            unit_tests=state.get("unit_tests", []),
             documentation=state.get("documentation", ""),
             review_report=state.get("review_report", ""),
             security_report=state.get("security_report", ""),
+            debugging_report=state.get("debugging_report", ""),
         )
     except Exception as exc:  # noqa: BLE001 - a packaging failure must not crash a finished run
         logger.exception("packaging failed for run %s", state.get("run_id"))

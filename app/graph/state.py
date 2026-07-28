@@ -22,6 +22,9 @@ class GateCheck(TypedDict):
     name: str        # "compile" | "build" | "test" | "lint"
     passed: bool
     stderr: str       # captured stderr (empty when passed) — the gate/router reads this
+    stdout: str       # captured stdout (empty when passed) — test runners (jest/vitest) commonly
+                       # put the actual failing assertions here, not on stderr; the repair path
+                       # (app/agents/debugging.py) needs both to see the real failure reason
     exit_code: int
 
 
@@ -55,7 +58,21 @@ class WorkflowState(TypedDict, total=False):
     repair_attempt: int                   # LOCAL repair counter, reset per work item
     # LOCAL counter for the post-commit debug/test loop, reset once (not per work item like
     # repair_attempt above, and not the orchestrator's attempt either).
+    #
+    # PROGRESS-SENSITIVE (router.DEBUG_CAP): this counts CONSECUTIVE NO-PROGRESS rounds, not raw
+    # entries into the debugging node. A round that actually reduced the failure count resets it
+    # to 0. Rationale: the cap exists to stop a STUCK loop, not to bound total work — a large
+    # generated project routinely has dozens of independent failures, and a flat per-entry cap
+    # killed runs that were still converging (one observed run spent every one of its 10 attempts
+    # on genuinely distinct problems and was cut off mid-progress, while attempts that fixed
+    # nothing at all cost exactly the same as attempts that fixed three files).
     debug_attempt: int
+    # The failure count the debug/test loop last observed, used to decide whether a round made
+    # progress. -1 = "no round has been measured yet" (a real count can legitimately be 0).
+    debug_last_failure_count: int
+    # TOTAL debugging rounds this run, regardless of progress — the absolute backstop against an
+    # oscillating loop that keeps resetting debug_attempt forever (debugging.DEBUG_ROUNDS_CEILING).
+    debug_rounds: int
     debug_result: GateResult | None        # most recent compile+build check outcome (Debugging phase fixed check)
     tests_ok: bool                        # did unit-test generation produce at least one parseable test file?
     test_result: GateResult | None        # most recent `test` check outcome (Unit Test phase fixed check)
@@ -96,6 +113,8 @@ class WorkflowState(TypedDict, total=False):
     refactoring_report: str        # Refactoring: the Markdown report content
     refactoring_report_path: str   # Refactoring: where the report .md was saved (reports/…)
     unit_tests: list[str]                  # workspace-relative paths of test files written
+    debugging_report: str        # Debugging: the Markdown report content (what each round changed)
+    debugging_report_path: str   # Debugging: where the report .md was saved (reports/…)
     documentation: str
     security_report: str
     security_report_path: str   # Security: where the report .md was saved (reports/…)
@@ -154,6 +173,8 @@ def new_state(
         "gate_result": None,
         "repair_attempt": 0,
         "debug_attempt": 0,
+        "debug_last_failure_count": -1,  # -1 = nothing measured yet (0 is a legitimate count)
+        "debug_rounds": 0,
         "debug_result": None,
         "generation_summary": "",
         "generation_metrics": {},

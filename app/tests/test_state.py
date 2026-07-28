@@ -6,11 +6,13 @@ from app.models import WorkItem
 ALL_FIELDS = {
     "project_id", "run_id", "attempt", "design_package", "repo_url", "branch", "commit_sha",
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
-    "codegen_ok", "gate_result", "repair_attempt", "debug_attempt", "debug_result", "tests_ok",
+    "codegen_ok", "gate_result", "repair_attempt", "debug_attempt", "debug_last_failure_count",
+    "debug_rounds", "debug_result", "tests_ok",
     "test_result", "generation_summary", "generation_metrics",
     "push_enabled", "git_remote", "git_token",
     "review_report", "review_report_path", "review_findings_path", "refactored_code",
     "refactored_files", "refactoring_report", "refactoring_report_path", "unit_tests",
+    "debugging_report", "debugging_report_path",
     "documentation", "security_report", "security_report_path", "security_verdict",
     "security_findings_path", "security_loop_attempt", "pr_url", "finalize_status", "package_path",
     "workflow_status",
@@ -19,7 +21,8 @@ ALL_FIELDS = {
 INITIALIZED_FIELDS = {
     "project_id", "run_id", "attempt", "design_package",
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
-    "gate_result", "repair_attempt", "debug_attempt", "debug_result", "generation_summary",
+    "gate_result", "repair_attempt", "debug_attempt", "debug_last_failure_count", "debug_rounds",
+    "debug_result", "generation_summary",
     "generation_metrics",
     "push_enabled", "git_remote", "git_token", "security_loop_attempt", "workflow_status",
 }
