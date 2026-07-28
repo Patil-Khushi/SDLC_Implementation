@@ -632,9 +632,14 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
             state.get("run_id") or "-",
             len(unresolved),
         )
+        notes = [item.as_note() for item in unresolved]
+        # Stored on state (not just logged) so DebuggingAgent._build_prompt can hand the agent the
+        # WHOLE list at once. Without this the agent only ever sees the single import the build
+        # happened to trip over first, and rediscovers the rest one failed round at a time.
+        state["unresolved_imports"] = notes
         state["generation_summary"] = (state.get("generation_summary") or "") + (
             f"[reconcile] {len(unresolved)} unresolved import(s) (not auto-fixed):\n"
-            + "".join(f"    - {item.as_note()}\n" for item in unresolved)
+            + "".join(f"    - {note}\n" for note in notes)
         )
 
     if not changed:

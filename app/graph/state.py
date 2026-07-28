@@ -112,6 +112,12 @@ class WorkflowState(TypedDict, total=False):
     refactored_files: list[str]
     refactoring_report: str        # Refactoring: the Markdown report content
     refactoring_report_path: str   # Refactoring: where the report .md was saved (reports/…)
+    # Relative imports the deterministic reconcile pass could not resolve against the generated
+    # file set (app/services/wiring.py::find_unresolved_imports). Report-only — deliberately NOT
+    # auto-fixed, because "create the missing module" vs "rename the importer" is a judgement call.
+    # Passed into the Debugging agent's prompt so it starts from the full list instead of
+    # rediscovering them one build error at a time.
+    unresolved_imports: list[str]
     unit_tests: list[str]                  # workspace-relative paths of test files written
     debugging_report: str        # Debugging: the Markdown report content (what each round changed)
     debugging_report_path: str   # Debugging: where the report .md was saved (reports/…)

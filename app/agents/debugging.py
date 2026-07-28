@@ -159,7 +159,9 @@ class DebuggingAgent(BaseAgent):
         manifest = list(state.get("generated_code", []))
 
         system = self._load_prompt("debugging")
-        prompt = self._build_prompt(check_name, stderr, stdout, manifest)
+        prompt = self._build_prompt(
+            check_name, stderr, stdout, manifest, list(state.get("unresolved_imports", []))
+        )
         # Tools are bound to the model inside the gateway; the model may inspect/install/diff.
         # Own iteration budget, not the gateway's generic default — see DEBUG_MAX_ITERS.
         raw = self.llm.complete_with_tools(
@@ -269,7 +271,13 @@ class DebuggingAgent(BaseAgent):
             logger.exception("debugging: failed to write the report for run %s", state.get("run_id"))
 
     @staticmethod
-    def _build_prompt(check_name: str, stderr: str, stdout: str, manifest: list[str]) -> str:
+    def _build_prompt(
+        check_name: str,
+        stderr: str,
+        stdout: str,
+        manifest: list[str],
+        unresolved_imports: list[str] | None = None,
+    ) -> str:
         """Point the model at the failure + what exists, and let it pull content on demand.
 
         Previously this inlined the FULL content of every generated file (300+ files on a large
@@ -282,12 +290,29 @@ class DebuggingAgent(BaseAgent):
         Both stderr AND stdout are included: test runners (jest/vitest) commonly print the actual
         failing assertions/stack traces to stdout, with stderr carrying only warnings or nothing at
         all — stderr alone can leave the model with no real signal to act on.
+
+        ``unresolved_imports`` (from the deterministic reconcile pass) is included because a
+        bundler reports only the FIRST unresolvable import and then stops: fixing it just reveals
+        the next one, so N broken imports cost N build-fail/fix rounds. Handing over the whole
+        pre-computed list lets one round fix all of them.
         """
         files_list = "\n".join(f"- {path}" for path in manifest) or "(none on record)"
+        unresolved_block = ""
+        if unresolved_imports:
+            listed = "\n".join(f"- {note}" for note in unresolved_imports)
+            unresolved_block = (
+                f"\nA deterministic pre-pass found {len(unresolved_imports)} relative import(s) that "
+                "resolve to NO generated file. The check above may only be reporting the first one; "
+                "these are very likely the same root cause and you should fix as many as you can in "
+                "this one reply — either create the missing module or correct the importer, "
+                "whichever matches the conventions the rest of the project already uses:\n"
+                f"{listed}\n"
+            )
         return (
             f"The fixed {check_name} check failed.\n"
             f"Captured stderr:\n{stderr or '(none)'}\n\n"
-            f"Captured stdout:\n{stdout or '(none)'}\n\n"
+            f"Captured stdout:\n{stdout or '(none)'}\n"
+            f"{unresolved_block}\n"
             "Generated file(s) in this project (call read_file on whichever ones the failure "
             f"above implicates — do not assume you need all of them):\n{files_list}\n\n"
             'Return the corrected file(s) as STRICT JSON: {"files":[{"path":...,"content":...}],"notes":...}'
