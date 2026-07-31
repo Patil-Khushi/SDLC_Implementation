@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 #: bounded on large plans; the list is a discovery aid, not an exhaustive manifest).
 _MANIFEST_CAP = 200
 
+#: Char budget for the bodies of an item's already-produced files that get fed into each subsequent
+#: per-file prompt (their paths are always listed; only the bodies are capped) — keeps the prompt
+#: bounded when an item's earlier files are large, without dropping the cross-file context entirely.
+_SIBLING_CHARS_CAP = 60_000
+
 
 def _project_dir(state: WorkflowState) -> str:
     """Root dir of the generated project within the workspace. Single source of truth shared by
@@ -110,19 +115,24 @@ class CodeGeneratorAgent(BaseAgent):
     # -- generation -----------------------------------------------------------
 
     def _generate_files(self, work_item: WorkItem, context: str, system: str) -> list[dict[str, str]] | None:
-        """Ask the model for the {"files":[...]} JSON; re-ask once on parse failure."""
+        """Produce the item's files. A multi-file item is generated ONE FILE PER CALL so its output
+        can't grow with the file count and truncate at the max_tokens cap — the whole-item call's
+        failure mode was ``stop=max_tokens`` → half a JSON object → "no JSON object found in reply".
+        Items with a single known target — or none, where the model chooses the files — keep the
+        one-shot call, which for a single file already can't truncate on *combining* files."""
+        targets = [p.strip() for p in work_item.target_files if p and p.strip()]
+        if len(targets) >= 2:
+            return self._generate_per_file(work_item, context, system, targets)
+        return self._generate_whole_item(work_item, context, system)
+
+    def _generate_whole_item(self, work_item: WorkItem, context: str, system: str) -> list[dict[str, str]] | None:
+        """One call returning EVERY file for the item; re-ask once on parse failure. Used for the
+        single/zero-target items that :meth:`_generate_files` keeps on the one-shot path."""
         prompt = self._build_prompt(work_item, context)
         raw = self.llm.complete(prompt=prompt, system=system)
         parsed, error = self._parse(raw)
         if parsed is None:
-            retry = (
-                f"{prompt}\n\nYour previous reply was not valid JSON matching "
-                f'{{"files":[{{"path":...,"content":...}}]}}. Error: {error}. '
-                "Reply with STRICT JSON only — no prose, no code fences. Inside string values, "
-                "escape every backslash as \\\\ (regex patterns like \\. or \\d are the usual "
-                "culprits) and every double quote as \\\"."
-            )
-            raw = self.llm.complete(prompt=retry, system=system)
+            raw = self.llm.complete(prompt=self._retry_instruction(prompt, error), system=system)
             parsed, error = self._parse(raw)
         if parsed is None:
             # Don't discard the evidence: without this, a deterministic parse failure (same item,
@@ -132,6 +142,96 @@ class CodeGeneratorAgent(BaseAgent):
                 work_item.id, error, raw[:1500], raw[-500:],
             )
         return parsed
+
+    def _generate_per_file(
+        self, work_item: WorkItem, context: str, system: str, targets: list[str]
+    ) -> list[dict[str, str]] | None:
+        """Generate a multi-file item ONE FILE PER CALL. Each call emits a single file, so output
+        stays well under the max_tokens cap that truncated the whole-item reply. Every file produced
+        is fed into the prompts that follow (``siblings``) so a later file (e.g. the controller)
+        imports the exact symbols an earlier one (the service/validator) actually exported. A file
+        that still won't parse after a retry is skipped and logged rather than sinking the whole
+        item — the completeness gate/repair loop then fills the gap. Returns the files produced, or
+        ``None`` only if EVERY file failed (so the caller records the item as failed, as before)."""
+        produced: list[dict[str, str]] = []
+        siblings: dict[str, str] = {}
+        for index, path in enumerate(targets, start=1):
+            logger.info(
+                "[code_generator] %s: [FILE %d/%d] generating %s", work_item.id, index, len(targets), path
+            )
+            entry = self._generate_one_file(
+                work_item, context, system, path, work_item.file_specs.get(path, ""), targets, siblings
+            )
+            if entry is None:
+                logger.warning(
+                    "[code_generator] %s: file %r not produced — skipping (gate/repair will catch it)",
+                    work_item.id, path,
+                )
+                continue
+            siblings[entry["path"]] = entry["content"]  # visible to the files generated after it
+            produced.append(entry)
+        if not produced:
+            logger.error(
+                "[code_generator] %s: per-file generation produced 0 of %d planned files",
+                work_item.id, len(targets),
+            )
+            return None
+        return produced
+
+    def _generate_one_file(
+        self, work_item: WorkItem, context: str, system: str, path: str, spec: str,
+        targets: list[str], siblings: dict[str, str],
+    ) -> dict[str, str] | None:
+        """Generate EXACTLY one file; re-ask once on parse failure. Returns ``{path, content}`` with
+        the path pinned to the REQUESTED one (the model may re-case or rename it), or ``None`` if it
+        still won't parse after the retry."""
+        prompt = self._build_file_prompt(work_item, context, path, spec, targets, siblings)
+        raw = self.llm.complete(prompt=prompt, system=system)
+        parsed, error = self._parse(raw)
+        if parsed is None:
+            raw = self.llm.complete(prompt=self._retry_instruction(prompt, error), system=system)
+            parsed, error = self._parse(raw)
+        if parsed is None:
+            logger.error(
+                "[code_generator] %s: file %r unparseable (%s). First 1500 chars:\n%s\n--- last 500 chars:\n%s",
+                work_item.id, path, error, raw[:1500], raw[-500:],
+            )
+            return None
+        # Pin the requested path onto the returned content. A normalized path match wins outright.
+        norm = _normalize_path(path)
+        base = norm.rsplit("/", 1)[-1].lower()
+        match = next((f for f in parsed if _normalize_path(f["path"]) == norm), None)
+        if match is None:
+            # Otherwise tolerate a COSMETIC path difference (dropped directory, re-cased, ./-prefix)
+            # by accepting a lone file whose basename still matches. A DIFFERENT basename means the
+            # model produced some OTHER file — relabeling it would silently write the wrong content
+            # under this path (a bug no error surfaces), so reject it and let the gate/repair supply
+            # the real file instead. The target path here is authoritative (it comes from the plan),
+            # so a mismatch is a real signal, not noise to paper over.
+            base_matches = [
+                f for f in parsed if _normalize_path(f["path"]).rsplit("/", 1)[-1].lower() == base
+            ]
+            if len(base_matches) == 1:
+                match = base_matches[0]
+        if match is None:
+            logger.warning(
+                "[code_generator] %s: reply for %r held %d file(s), none matching by path (%s) — skipping",
+                work_item.id, path, len(parsed), [f["path"] for f in parsed],
+            )
+            return None
+        return {"path": path, "content": match["content"]}
+
+    @staticmethod
+    def _retry_instruction(prompt: str, error: str) -> str:
+        """The re-ask appended after an unparseable reply — shared by the whole-item and per-file
+        paths so both nudge the model identically (strict JSON, escaped backslashes/quotes)."""
+        return (
+            f"{prompt}\n\nYour previous reply was not valid JSON matching "
+            f'{{"files":[{{"path":...,"content":...}}]}}. Error: {error}. '
+            "Reply with STRICT JSON only — no prose, no code fences. Inside string values, "
+            "escape every backslash as \\\\ (regex patterns like \\. or \\d are the usual "
+            "culprits) and every double quote as \\\"."
+        )
 
     @staticmethod
     def _build_prompt(work_item: WorkItem, context: str) -> str:
@@ -166,6 +266,43 @@ class CodeGeneratorAgent(BaseAgent):
             f"{svg_hint}"
             f"Context (only the cited slices):\n{context}\n\n"
             'Respond with STRICT JSON only: {"files":[{"path":...,"content":...}],"notes":...}'
+        )
+
+    @staticmethod
+    def _build_file_prompt(
+        work_item: WorkItem, context: str, path: str, spec: str,
+        targets: list[str], siblings: dict[str, str],
+    ) -> str:
+        """Prompt for ONE file of a multi-file item. Same grounding as the whole-item prompt (item
+        metadata + the shared design-pack context), plus: the full list of planned siblings so the
+        model knows the module's shape, and the CONTENT of siblings already produced this item so a
+        later file imports the exact symbols an earlier one exported. Output is a single file, so it
+        can't hit the max_tokens cap and truncate — the failure this whole path exists to prevent."""
+        planned = "\n".join(f"- {p}" for p in targets)
+        spec_block = f"What THIS file must contain (from the design package):\n- {path}: {spec}\n\n" if spec else ""
+        svg_hint = ""
+        if path.lower().endswith(".svg"):
+            svg_hint = (
+                "This is an .svg target: `content` must be a COMPLETE standalone SVG document "
+                '(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" …>…</svg>). Use '
+                "currentColor for strokes/fills so it inherits the design tokens, and keep the same "
+                "24×24 stroke style as the mockup. Reuse a provided mockup icon's paths verbatim "
+                "when the target filename matches an icon shown there.\n\n"
+            )
+        return (
+            f"Work item: {work_item.id}\n"
+            f"Covers requirements: {', '.join(work_item.requirement_ids) or '-'}\n"
+            f"Endpoints: {', '.join(work_item.endpoints) or '-'}\n"
+            f"Tables: {', '.join(work_item.tables) or '-'}\n"
+            f"Screens: {', '.join(work_item.screens) or '-'}\n"
+            f"All files planned for this work item (stay consistent with these siblings):\n{planned}\n\n"
+            f"{spec_block}"
+            f"{svg_hint}"
+            f"{_siblings_view(siblings)}"
+            f"Context (only the cited slices):\n{context}\n\n"
+            f"Generate EXACTLY ONE file now: {path}\n"
+            'Respond with STRICT JSON containing ONLY that one file: '
+            '{"files":[{"path":...,"content":...}]}. No other files, no prose, no code fences.'
         )
 
     @staticmethod
@@ -387,6 +524,37 @@ class CodeGeneratorAgent(BaseAgent):
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _normalize_path(path: str) -> str:
+    """Normalize a model-echoed path for comparison: strip surrounding space, a leading ``./`` and
+    ``/``, so a rename/re-case/prefix mismatch doesn't hide that a returned file IS the one asked
+    for (see :meth:`CodeGeneratorAgent._generate_one_file`)."""
+    path = path.strip()
+    while path.startswith("./"):
+        path = path[2:]
+    return path.lstrip("/")
+
+
+def _siblings_view(siblings: dict[str, str]) -> str:
+    """Compact view of the files already generated for THIS work item, injected into each subsequent
+    per-file prompt so later files reference earlier ones by their real paths/symbols instead of
+    re-inventing them. Bounded by :data:`_SIBLING_CHARS_CAP` so a big early file can't blow up the
+    prompt for every file that follows — an over-budget body is elided but its path still listed."""
+    if not siblings:
+        return ""
+    parts: list[str] = []
+    budget = _SIBLING_CHARS_CAP
+    for path, body in siblings.items():
+        if len(body) > budget:
+            parts.append(f"### {path}\n(content omitted — too large; import it by this exact path)")
+            continue
+        parts.append(f"### {path}\n```\n{body}\n```")
+        budget -= len(body)
+    return (
+        "Files already generated for THIS work item — import from / stay consistent with these "
+        "EXACT paths and the symbols they define:\n" + "\n\n".join(parts) + "\n\n"
+    )
 
 
 def _phase_of(work_item: WorkItem) -> tuple[str, str]:

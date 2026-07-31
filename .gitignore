@@ -38,6 +38,9 @@ htmlcov/
 
 # === Workspace artifacts (generated project outputs during a run) ===
 app/workspace/*
+
+# === Uploaded design packs (runtime data saved by scripts/graph_server.py) ===
+uploads/
 !app/workspace/.gitkeep
 
 # === Demo --real mode output (real generated projects + their own git repos) ===
