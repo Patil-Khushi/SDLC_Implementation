@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # Workspace
     workspace_dir: str = "app/workspace"
 
+    # LangGraph checkpointer: a SQLite file so a crashed run (network drop mid-LLM-call, etc.)
+    # can resume from its last completed node instead of restarting the whole pipeline. Kept next
+    # to workspace_dir by convention; set to ":memory:" to fall back to a fresh, non-persistent
+    # database (existing threads won't resume, but nothing on disk is touched).
+    checkpoint_db_path: str = "app/workspace/checkpoints.sqlite"
+
     # exec-sandbox MCP server (integrations/executor.py :: MCPExecutor)
     sandbox_enabled: bool = False               # connect the executor in the app lifespan
     sandbox_mcp_url: str = "http://localhost:8080/mcp"

@@ -480,10 +480,19 @@ class MCPExecutor(Executor):
     # shared primitives
     def run_command(self, cmd: Sequence[str], cwd: StrPath = ".", timeout: float | None = None) -> RunResult:
         d = _as_dict(self._invoke("run_command", {"cmd": list(cmd), "cwd": str(cwd), "timeout": timeout}))
+        # `.get(key, default)` only substitutes the default when the KEY IS ABSENT — a sandbox
+        # payload with the key present but JSON null (e.g. {"stderr": null}) passes straight
+        # through as None, and str(None) silently becomes the literal 4-char string "None". That
+        # corrupted "None" then gets persisted into WorkflowState (test_result/debug_result) and
+        # fed verbatim into the Debugging agent's fix prompt as if it were real captured output.
+        # `or default` coalesces None (and "") to the same safe default either way.
+        # NOTE: exit_code uses an explicit None-check, not `or` — 0 (success) is falsy in Python,
+        # so `d.get("exit_code") or -1` would silently turn a legitimate exit_code=0 into -1.
+        raw_exit_code = d.get("exit_code")
         return RunResult(
-            stdout=str(d.get("stdout", "")),
-            stderr=str(d.get("stderr", "")),
-            exit_code=int(d.get("exit_code", -1)),
+            stdout=str(d.get("stdout") or ""),
+            stderr=str(d.get("stderr") or ""),
+            exit_code=int(raw_exit_code) if raw_exit_code is not None else -1,
             timed_out=bool(d.get("timed_out", False)),
         )
 
@@ -501,10 +510,13 @@ class MCPExecutor(Executor):
 
     def install_package(self, project_dir: StrPath, package: str, manager: str = "pip") -> RunResult:
         d = _as_dict(self._invoke("install_package", {"name": package, "manager": manager, "cwd": str(project_dir)}))
+        # Same null-coalescing as run_command above: a present-but-null field must not become the
+        # literal string "None", and exit_code needs an explicit None-check (0 is falsy).
+        raw_exit_code = d.get("exit_code")
         return RunResult(
-            stdout=str(d.get("stdout", "")),
-            stderr=str(d.get("stderr", "")),
-            exit_code=int(d.get("exit_code", -1)),
+            stdout=str(d.get("stdout") or ""),
+            stderr=str(d.get("stderr") or ""),
+            exit_code=int(raw_exit_code) if raw_exit_code is not None else -1,
             timed_out=bool(d.get("timed_out", False)),
         )
 

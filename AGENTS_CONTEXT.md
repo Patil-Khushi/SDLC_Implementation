@@ -13,19 +13,28 @@
 Design Package
   -> Code Generation   writes code            [BUILT]  app/agents/code_generator.py
   -> Code Review        reviews code           [BUILT]  app/agents/code_review.py
-  -> Refactoring        fixes issues found     [STUB]   app/agents/refactoring.py   (empty)
-  -> Debugging          fixes bugs             [STUB]   app/agents/debugging.py     (empty)
-  -> Unit Test          writes tests           [STUB]   app/agents/unit_test.py     (empty)
-  -> Documentation      writes docs            [STUB]   app/agents/documentation.py (empty)
-  -> Security           security scan          [STUB]   app/agents/security.py      (empty)
+  -> Refactoring        fixes issues found     [BUILT]  app/agents/refactoring.py
+  -> Debugging          fixes bugs             [BUILT]  app/agents/debugging.py
+  -> Unit Test          writes tests           [BUILT]  app/agents/unit_test.py
+  -> Documentation      writes docs            [BUILT]  app/agents/documentation.py
+  -> Security           security scan          [BUILT]  app/agents/security.py
 -> Implementation Package
 ```
 
 Also built: `app/agents/base.py` (BaseAgent), `app/agents/repair.py` (the code-gen repair loop
 — NOT a pipeline stage, see §7).
 
-**Status is verified by file size:** the five stubs above are literally 0 bytes. Do not assume
-any behavior for them — they are unwritten.
+> **Correction (superseding the "five stubs, 0 bytes" claim this section used to make):** all
+> five agents above are now built — verified directly by file size (`refactoring.py` 29,946B,
+> `debugging.py` 9,022B, `unit_test.py` 8,434B, `documentation.py` 4,373B, `security.py` 13,939B —
+> none are 0 bytes). `unit_test.py` was read in full this session: it's a close twin of
+> `code_generator.py` (per-work-item prompt → JSON parse-with-one-retry → `executor.write_file`),
+> writes only `unit_tests` (a `list[str]` of paths, not `str` — §4's table below is also wrong on
+> this), never calls git, and does not use `pytest_runner.py` (still genuinely a 0-byte stub, see
+> §6) at all — test *execution* is the separate fixed `unit_test_run` node in `graph.py`, not this
+> agent. The other four agents' §9 write-ups below were NOT re-verified this pass beyond file
+> size — treat their job/reads/writes/open-decision details as unconfirmed until someone reads
+> the actual files, the same way this note just did for Unit Test.
 
 ---
 
@@ -100,10 +109,10 @@ class XxxAgent(BaseAgent):
 | `generation_metrics` | dict | Code Gen | metrics |
 | `review_report` | str | **Code Review** | Markdown report content |
 | `review_report_path` | str | **Code Review** | path under `reports/` |
-| `refactored_code` | str | **Refactoring** | (stub — to build) |
-| `unit_tests` | str | **Unit Test** | (stub — to build) |
-| `documentation` | str | **Documentation** | (stub — to build) |
-| `security_report` | str | **Security** | (stub — to build) |
+| `refactored_code` | str | **Refactoring** | built — shape not re-verified this pass |
+| `unit_tests` | list[str] | **Unit Test** | built — paths of test files written (verified) |
+| `documentation` | str | **Documentation** | built — shape not re-verified this pass |
+| `security_report` | str | **Security** | built — shape not re-verified this pass |
 | `workflow_status` | str | any (lifecycle) | current stage |
 
 **Golden rule:** an agent reads what it needs and writes ONLY its own field.
@@ -223,7 +232,11 @@ def xxx_node(state: WorkflowState) -> WorkflowState:
 **`router.py`** — conditional edges read state and return the next node name. `REPAIR_CAP = 3`
 lives here (local repair cap, separate from orchestrator `attempt`).
 
-**`graph.py`** — current compiled graph:
+**`graph.py`** — the diagram below predates the debugging/unit_test/refactoring/documentation/
+security/finalize/package agents being built and is now historical/superseded — **do not treat it
+as current**. Read `app/graph/graph.py`'s own module docstring for the real, up-to-date graph
+shape (it is code-adjacent and gets kept in sync there; duplicating the full diagram here would
+just create a second copy that drifts, which is exactly what happened to this one):
 ```
 START -> select
 select        -> code_generator      (item pending)   | code_review (plan exhausted)
@@ -234,7 +247,12 @@ repair        -> gate
 escalate      -> human_review -> END
 code_review   -> END
 ```
-Compiled with a `MemorySaver` checkpointer (for the human-review interrupt).
+There is no `human_review` node and no interrupt anymore (HITL was removed — a completed plan
+auto-commits; `escalate` sets `needs_human_review` and ends the run, see `CLAUDE.md`). The graph
+compiles with a disk-backed **`SqliteSaver`** checkpointer (`app/graph/graph.py::_build_checkpointer`),
+not `MemorySaver` — so a run that crashes mid-graph can resume via `workflow.invoke(None, config)`
+instead of restarting; it is kept for that, and for `get_state()` reading a finished run, not for
+any interrupt.
 
 To add the next stage, insert your node between `code_review` and `END` (and re-point the tail).
 Follow DEVELOPER_GUIDE §6's 4-step recipe: prompt → agent → node → edge.
@@ -247,6 +265,9 @@ For each: its job (from the guide), what it reads, the field it writes, the exec
 the **open decisions** (mark these; do not guess).
 
 ### Refactoring (`refactoring.py`, prompt `refactoring.md`)
+> ⚠ File is now BUILT (29,946 bytes, confirmed by size only — not re-read this session). The
+> job/reads/writes/open-decision details below predate that and may be stale; re-verify against
+> the actual file before relying on them, the way §1's correction note did for Unit Test.
 - **Job:** apply the fixes the review names. It **changes code** (read-write).
 - **Reads:** `review_report`, the code (via `repo_url` or the sandbox).
 - **Writes:** `refactored_code`.
@@ -256,24 +277,44 @@ the **open decisions** (mark these; do not guess).
   review report rather than a gate failure.
 
 ### Debugging (`debugging.py`, prompt `debugging.md`)
+> ⚠ File is now BUILT (9,022 bytes) and was actively edited this session (`DEBUG_MAX_ITERS`,
+> `_current_failure()`/`_build_prompt()` reading `(check_name, stderr, stdout)` from `GateCheck`,
+> etc.) — the "OPEN: no debugged_code field" note below is very likely resolved/moot and should
+> not be trusted; re-read the current file instead of this write-up.
 - **Job:** fix bugs (logic/runtime), distinct from `repair.py` which only fixes compile/build
   gate failures inside code-gen.
 - **Reads:** failing signals (tests, review). **Writes:** — **OPEN: there is no `debugged_code`
   state field.** Decide: reuse `refactored_code`, add a new field, or fold Debugging into
   Refactoring. Add the field to `state.py` + `test_state.py::ALL_FIELDS` if you add one.
 
-### Unit Test (`unit_test.py`, prompt `unit_test.md`)
-- **Job:** generate unit tests. **Reads:** code. **Writes:** `unit_tests`.
-- **Integration:** will use `pytest_runner.py` (currently a stub) to execute the generated tests
-  and report pass/fail — build that wrapper first (mirror `executor`/`review_sandbox` shape:
-  ABC + Fake + real).
+### Unit Test (`unit_test.py`, prompt `unit_test.md`) — BUILT, re-verified this session
+- **Job:** write test files for the already-generated, already-committed source of every work
+  item, once, after Debugging's compile/build check has passed. Mirrors `code_generator.py`'s
+  shape: per-work-item prompt → `{"files":[...]}` JSON parsed with one retry on failure →
+  `executor.write_file`. Partial failure (one item's JSON doesn't parse) does not abort the run.
+- **Reads:** each work item's own `target_files` (via `executor.read_file`) for context — nothing
+  else; it never sees the project's `package.json`/`jest.config.js`, which is why its prompt
+  (`unit_test.md`) must name the test framework explicitly rather than assume the model will
+  infer it correctly (see the fixed Vitest/Jest mismatch bug, this session).
+- **Writes:** `unit_tests` (list[str] of paths), `tests_ok` (bool — false only if work items
+  existed but zero test files were written), `generation_summary`, `generation_metrics.tests_written`.
+- **Does NOT commit.** Per its own docstring: "no gate/compile logic, no git, no routing." Files
+  sit as uncommitted working-tree content until the separate fixed `unit_test_run` node (wired in
+  `graph.py`, not this file) runs them and — only on a full pass — routes to `debug_publish`,
+  which is what actually commits. A run stuck failing `unit_test_run` (e.g. a framework mismatch
+  across every generated test file) means the generated tests stay uncommitted indefinitely; this
+  is expected behavior, not a bug in this agent.
+- **Does not use `pytest_runner.py`** (still a genuine 0-byte stub, §6) — nothing in the current
+  code path calls it.
 
 ### Documentation (`documentation.py`, prompt `documentation.md`)
+> ⚠ File is now BUILT (4,373 bytes, confirmed by size only). Details below not re-verified.
 - **Job:** write docs (README/API docs) from the code + design package. **Reads:** code,
   `design_package`. **Writes:** `documentation`. Pure LLM; no sandbox needed unless it inspects
   the repo (then reuse `review_sandbox` read-only, like Code Review).
 
 ### Security (`security.py`, prompt `security.md`)
+> ⚠ File is now BUILT (13,939 bytes, confirmed by size only). Details below not re-verified.
 - **Job:** security SAST — **this is the home for Semgrep** (decided earlier: Semgrep belongs in
   Security, not Code Review). **Reads:** code. **Writes:** `security_report`.
 - **Execution model:** static, like Code Review — clone via `review_sandbox`, run the scanner,

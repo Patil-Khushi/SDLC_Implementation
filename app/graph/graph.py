@@ -69,18 +69,26 @@ rework loop) is gone — a completed plan commits automatically. The escalation 
 ``needs_human_review`` for the orchestrator, but no longer pauses on an interrupt (it had no
 resume contract and always ended the run anyway).
 
-Compiled with a checkpointer so ``get_state`` (used by the API/demo to read a finished run) works;
-the graph itself no longer contains any interrupt().
+Compiled with a disk-backed (SQLite) checkpointer so ``get_state`` (used by the API/demo to read a
+finished run) works, AND so a run that crashes mid-graph (an uncaught exception — e.g. a transient
+network error during an LLM call) can be resumed from its last completed node with
+``workflow.invoke(None, config)`` instead of restarting the whole pipeline; the graph itself still
+contains no interrupt().
 """
 
 from __future__ import annotations
 
-from langgraph.checkpoint.memory import MemorySaver
+import sqlite3
+from pathlib import Path
+
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.debugging import debugging_node
 from app.agents.refactoring import refactoring_node
 from app.agents.repair import repair_node
+from app.config.settings import get_settings
 from app.graph import nodes
 from app.graph.router import (
     route_after_codegen,
@@ -93,6 +101,28 @@ from app.graph.router import (
     route_after_test_run,
 )
 from app.graph.state import WorkflowState
+from app.models import WorkItem
+
+
+def _build_checkpointer() -> SqliteSaver:
+    """A disk-backed checkpointer keyed by ``thread_id`` (== ``run_id``): a run crashing mid-graph
+    (e.g. a transient network drop during an LLM call) can resume from its last completed node
+    via ``workflow.invoke(None, config)`` instead of restarting the whole pipeline — unlike
+    ``MemorySaver``, which loses all history the moment the process exits.
+
+    ``WorkItem`` (stored in ``work_items``/``current_work_item``) is a pydantic model, not a
+    plain dict — the default serde's msgpack allowlist only permits it with a "will be blocked
+    in a future version" warning on every checkpoint read. Explicitly allow-listing it here keeps
+    it deserializing as a real ``WorkItem`` (not a plain dict, which would break every node's
+    attribute access, e.g. ``work_item.target_files``) once a future langgraph release tightens
+    the default, and silences the warning now.
+    """
+    db_path = get_settings().checkpoint_db_path
+    if db_path != ":memory:":
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    serde = JsonPlusSerializer(allowed_msgpack_modules=[WorkItem])
+    return SqliteSaver(conn, serde=serde)
 
 
 def build_graph():
@@ -185,8 +215,9 @@ def build_graph():
     graph.add_edge("finalize", "package")  # PR opened (or skipped/failed) → build the zip output
     graph.add_edge("package", END)         # zip ready (or failed) → done
 
-    # Checkpointer kept only so get_state(config) can read a finished run; there are no interrupts.
-    return graph.compile(checkpointer=MemorySaver())
+    # Disk-backed checkpointer: lets get_state(config) read a finished run AND lets a crashed run
+    # resume from its last completed node (see _build_checkpointer) — there are no interrupts.
+    return graph.compile(checkpointer=_build_checkpointer())
 
 
 # Compiled once at import; FastAPI invokes this.

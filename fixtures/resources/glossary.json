@@ -1,0 +1,24 @@
+{
+  "terms": [
+    {
+      "term": "CMS",
+      "definition": "Content Management System"
+    },
+    {
+      "term": "GST",
+      "definition": "Goods and Services Tax"
+    },
+    {
+      "term": "KYC",
+      "definition": "Know Your Customer"
+    },
+    {
+      "term": "SKU",
+      "definition": "Stock Keeping Unit"
+    },
+    {
+      "term": "WCAG",
+      "definition": "Web Content Accessibility Guidelines"
+    }
+  ]
+}

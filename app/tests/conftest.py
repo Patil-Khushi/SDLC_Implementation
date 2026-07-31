@@ -15,8 +15,21 @@ from typing import Any
 
 import pytest
 
-from app.models import WorkItem
-from app.services.llm_gateway import FakeLLMGateway, LLMGateway
+# MUST run before any app.* import below: app.graph.graph compiles its `workflow` singleton
+# (checkpointer included) at MODULE IMPORT TIME, so setting this any later — e.g. in a fixture —
+# would be too late to affect it. ":memory:" is the settings module's own documented escape hatch
+# for a fresh, non-persistent checkpoint db (see Settings.checkpoint_db_path). Without this, tests
+# shared the SAME on-disk app/workspace/checkpoints.sqlite used by real runs, keyed by hardcoded
+# thread ids (t-happy, dtl-happy, ...) that never get cleaned up — a later test run then RESUMES
+# a prior run's stale checkpoint instead of starting fresh, corrupting its assertions. setdefault
+# so a developer can still point at a real file on purpose via an explicit env var.
+os.environ.setdefault("CHECKPOINT_DB_PATH", ":memory:")
+
+from app.config.settings import get_settings  # noqa: E402
+from app.models import WorkItem  # noqa: E402
+from app.services.llm_gateway import FakeLLMGateway, LLMGateway  # noqa: E402
+
+get_settings.cache_clear()  # defensive: guarantee a fresh Settings() picks up the env var above
 
 _TESTS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _TESTS_DIR.parents[3]  # tests -> app -> implementation -> services -> repo

@@ -4,6 +4,9 @@ uvicorn[standard]>=0.32,<1.0
 
 # Workflow orchestration
 langgraph>=0.2,<2.0
+# Disk-backed checkpointer (app/graph/graph.py) so a crashed run can resume from its last
+# completed node instead of restarting the whole pipeline.
+langgraph-checkpoint-sqlite>=2.0,<4.0
 
 # Validation & config
 pydantic>=2.9,<3.0

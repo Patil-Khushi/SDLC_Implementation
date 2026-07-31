@@ -1,0 +1,2551 @@
+{
+  "register": {
+    "method": "POST",
+    "path": "/auth/register",
+    "request": {
+      "email": "jane.doe@example.com",
+      "password": "S3cur3P@ssw0rd!",
+      "full_name": "Jane Doe",
+      "phone": "+919876543210"
+    },
+    "responses": {
+      "201": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMWIyYzNkNC1lNWY2LTc4OTAtYWJjZC1lZjEyMzQ1Njc4OTAiLCJyb2xlIjoiY3VzdG9tZXIiLCJpYXQiOjE3MTAwMDAwMDAsImV4cCI6MTcxMDA4NjQwMH0.signature",
+        "user": {
+          "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "email": "jane.doe@example.com",
+          "full_name": "Jane Doe",
+          "phone": "+919876543210",
+          "role_id": "role-uuid-customer",
+          "is_active": true,
+          "created_at": "2024-03-15T10:00:00Z",
+          "updated_at": "2024-03-15T10:00:00Z"
+        }
+      }
+    }
+  },
+  "login": {
+    "method": "POST",
+    "path": "/auth/login",
+    "request": {
+      "email": "jane.doe@example.com",
+      "password": "S3cur3P@ssw0rd!"
+    },
+    "responses": {
+      "200": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhMWIyYzNkNC1lNWY2LTc4OTAtYWJjZC1lZjEyMzQ1Njc4OTAiLCJyb2xlIjoiY3VzdG9tZXIiLCJpYXQiOjE3MTAwMDAwMDAsImV4cCI6MTcxMDA4NjQwMH0.signature",
+        "user": {
+          "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "email": "jane.doe@example.com",
+          "full_name": "Jane Doe",
+          "phone": "+919876543210",
+          "role_id": "role-uuid-customer",
+          "is_active": true,
+          "created_at": "2024-01-10T08:30:00Z",
+          "updated_at": "2024-03-15T10:00:00Z"
+        }
+      }
+    }
+  },
+  "logout": {
+    "method": "POST",
+    "path": "/auth/logout",
+    "request": {},
+    "responses": {
+      "200": {
+        "message": "Successfully logged out."
+      }
+    }
+  },
+  "forgotPassword": {
+    "method": "POST",
+    "path": "/auth/forgot-password",
+    "request": {
+      "email": "jane.doe@example.com"
+    },
+    "responses": {
+      "200": {
+        "message": "If that email address is registered, a password reset link has been sent."
+      }
+    }
+  },
+  "resetPassword": {
+    "method": "POST",
+    "path": "/auth/reset-password",
+    "request": {
+      "token": "eyJhbGciOiJIUzI1NiJ9.reset-payload.signature",
+      "new_password": "N3wS3cur3P@ssw0rd!",
+      "confirm_password": "N3wS3cur3P@ssw0rd!"
+    },
+    "responses": {
+      "200": {
+        "message": "Your password has been reset successfully. Please log in with your new password."
+      }
+    }
+  },
+  "guestRegister": {
+    "method": "POST",
+    "path": "/auth/guest-register",
+    "request": {
+      "guest_email": "guest.shopper@example.com",
+      "order_id": "ord-uuid-7890abcd-ef12-3456-7890-abcdef123456",
+      "password": "G3st2R3g!Pass",
+      "full_name": "Guest Shopper",
+      "phone": "+919812345678"
+    },
+    "responses": {
+      "201": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiMmMzZDRlNS1mNmE3LTg5MDEtYmNkZS1mMDEyMzQ1Njc4OTEiLCJyb2xlIjoiY3VzdG9tZXIiLCJpYXQiOjE3MTAwMDAwMDAsImV4cCI6MTcxMDA4NjQwMH0.signature",
+        "user": {
+          "id": "b2c3d4e5-f6a7-8901-bcde-f01234567891",
+          "email": "guest.shopper@example.com",
+          "full_name": "Guest Shopper",
+          "phone": "+919812345678",
+          "role_id": "role-uuid-customer",
+          "is_active": true,
+          "created_at": "2024-03-15T12:00:00Z",
+          "updated_at": "2024-03-15T12:00:00Z"
+        }
+      }
+    }
+  },
+  "getMe": {
+    "method": "GET",
+    "path": "/users/me",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "email": "jane.doe@example.com",
+        "full_name": "Jane Doe",
+        "phone": "+919876543210",
+        "role_id": "role-uuid-customer-0001",
+        "is_active": true,
+        "created_at": "2024-01-15T10:30:00Z",
+        "updated_at": "2024-06-01T08:00:00Z"
+      }
+    }
+  },
+  "updateMe": {
+    "method": "PATCH",
+    "path": "/users/me",
+    "request": {
+      "full_name": "Jane M. Doe",
+      "phone": "+919876543211"
+    },
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "email": "jane.doe@example.com",
+        "full_name": "Jane M. Doe",
+        "phone": "+919876543211",
+        "role_id": "role-uuid-customer-0001",
+        "is_active": true,
+        "created_at": "2024-01-15T10:30:00Z",
+        "updated_at": "2024-06-10T12:00:00Z"
+      }
+    }
+  },
+  "changePassword": {
+    "method": "POST",
+    "path": "/users/me/change-password",
+    "request": {
+      "current_password": "OldP@ssw0rd!",
+      "new_password": "NewS3cur3P@ss!",
+      "confirm_new_password": "NewS3cur3P@ss!"
+    },
+    "responses": {
+      "200": {
+        "message": "Password changed successfully."
+      }
+    }
+  },
+  "listUsers": {
+    "method": "GET",
+    "path": "/users",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "email": "jane.doe@example.com",
+            "full_name": "Jane Doe",
+            "phone": "+919876543210",
+            "role_id": "role-uuid-customer-0001",
+            "is_active": true,
+            "created_at": "2024-01-15T10:30:00Z",
+            "updated_at": "2024-06-01T08:00:00Z"
+          },
+          {
+            "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+            "email": "john.smith@example.com",
+            "full_name": "John Smith",
+            "phone": "+919876500001",
+            "role_id": "role-uuid-customer-0001",
+            "is_active": true,
+            "created_at": "2024-02-20T09:15:00Z",
+            "updated_at": "2024-05-28T14:30:00Z"
+          }
+        ],
+        "meta": {
+          "page": 1,
+          "limit": 20,
+          "total": 142,
+          "total_pages": 8
+        }
+      }
+    }
+  },
+  "getUser": {
+    "method": "GET",
+    "path": "/users/{userId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "email": "jane.doe@example.com",
+        "full_name": "Jane Doe",
+        "phone": "+919876543210",
+        "role_id": "role-uuid-customer-0001",
+        "is_active": true,
+        "created_at": "2024-01-15T10:30:00Z",
+        "updated_at": "2024-06-01T08:00:00Z"
+      }
+    }
+  },
+  "updateUser": {
+    "method": "PATCH",
+    "path": "/users/{userId}",
+    "request": {
+      "full_name": "Jane Updated Doe",
+      "phone": "+919800000001",
+      "role_id": "role-uuid-staff-00002",
+      "is_active": true
+    },
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "email": "jane.doe@example.com",
+        "full_name": "Jane Updated Doe",
+        "phone": "+919800000001",
+        "role_id": "role-uuid-staff-00002",
+        "is_active": true,
+        "created_at": "2024-01-15T10:30:00Z",
+        "updated_at": "2024-06-15T09:45:00Z"
+      }
+    }
+  },
+  "deleteUser": {
+    "method": "DELETE",
+    "path": "/users/{userId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "User a1b2c3d4-e5f6-7890-abcd-ef1234567890 has been deactivated."
+      }
+    }
+  },
+  "listAddresses": {
+    "method": "GET",
+    "path": "/users/me/addresses",
+    "request": null,
+    "responses": {
+      "200": [
+        {
+          "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "user_id": "u1b2c3d4-e5f6-7890-abcd-ef1234567891",
+          "full_name": "Riya Sharma",
+          "line1": "42, MG Road",
+          "line2": "Near City Mall",
+          "city": "Bengaluru",
+          "state": "Karnataka",
+          "pin_code": "560001",
+          "country": "India",
+          "phone": "+919876543210",
+          "is_default": true,
+          "created_at": "2024-03-01T10:00:00Z",
+          "updated_at": "2024-03-01T10:00:00Z"
+        },
+        {
+          "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+          "user_id": "u1b2c3d4-e5f6-7890-abcd-ef1234567891",
+          "full_name": "Riya Sharma",
+          "line1": "12, Koramangala 5th Block",
+          "line2": null,
+          "city": "Bengaluru",
+          "state": "Karnataka",
+          "pin_code": "560095",
+          "country": "India",
+          "phone": "+919876543210",
+          "is_default": false,
+          "created_at": "2024-04-15T08:30:00Z",
+          "updated_at": "2024-04-15T08:30:00Z"
+        }
+      ]
+    }
+  },
+  "createAddress": {
+    "method": "POST",
+    "path": "/users/me/addresses",
+    "request": {
+      "full_name": "Riya Sharma",
+      "line1": "88, Indiranagar 12th Main",
+      "line2": "Apartment 4B",
+      "city": "Bengaluru",
+      "state": "Karnataka",
+      "pin_code": "560038",
+      "country": "India",
+      "phone": "+919876543210",
+      "is_default": false
+    },
+    "responses": {
+      "201": {
+        "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+        "user_id": "u1b2c3d4-e5f6-7890-abcd-ef1234567891",
+        "full_name": "Riya Sharma",
+        "line1": "88, Indiranagar 12th Main",
+        "line2": "Apartment 4B",
+        "city": "Bengaluru",
+        "state": "Karnataka",
+        "pin_code": "560038",
+        "country": "India",
+        "phone": "+919876543210",
+        "is_default": false,
+        "created_at": "2024-06-01T12:00:00Z",
+        "updated_at": "2024-06-01T12:00:00Z"
+      }
+    }
+  },
+  "getAddress": {
+    "method": "GET",
+    "path": "/users/me/addresses/{addressId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "user_id": "u1b2c3d4-e5f6-7890-abcd-ef1234567891",
+        "full_name": "Riya Sharma",
+        "line1": "42, MG Road",
+        "line2": "Near City Mall",
+        "city": "Bengaluru",
+        "state": "Karnataka",
+        "pin_code": "560001",
+        "country": "India",
+        "phone": "+919876543210",
+        "is_default": true,
+        "created_at": "2024-03-01T10:00:00Z",
+        "updated_at": "2024-03-01T10:00:00Z"
+      }
+    }
+  },
+  "updateAddress": {
+    "method": "PUT",
+    "path": "/users/me/addresses/{addressId}",
+    "request": {
+      "full_name": "Riya Sharma",
+      "line1": "42, MG Road",
+      "line2": "Near City Mall, 2nd Floor",
+      "city": "Bengaluru",
+      "state": "Karnataka",
+      "pin_code": "560001",
+      "country": "India",
+      "phone": "+919876543211",
+      "is_default": true
+    },
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "user_id": "u1b2c3d4-e5f6-7890-abcd-ef1234567891",
+        "full_name": "Riya Sharma",
+        "line1": "42, MG Road",
+        "line2": "Near City Mall, 2nd Floor",
+        "city": "Bengaluru",
+        "state": "Karnataka",
+        "pin_code": "560001",
+        "country": "India",
+        "phone": "+919876543211",
+        "is_default": true,
+        "created_at": "2024-03-01T10:00:00Z",
+        "updated_at": "2024-06-10T09:15:00Z"
+      }
+    }
+  },
+  "deleteAddress": {
+    "method": "DELETE",
+    "path": "/users/me/addresses/{addressId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Address deleted successfully"
+      }
+    }
+  },
+  "checkServiceability": {
+    "method": "GET",
+    "path": "/serviceability",
+    "request": null,
+    "responses": {
+      "200": {
+        "pin_code": "560001",
+        "is_serviceable": true,
+        "city": "Bengaluru",
+        "state": "Karnataka",
+        "message": "Delivery is available at PIN code 560001."
+      },
+      "400": {
+        "code": "VALIDATION_ERROR",
+        "message": "The 'pin_code' query parameter is required and must be a valid PIN code format."
+      },
+      "404": {
+        "code": "PIN_CODE_NOT_FOUND",
+        "message": "The PIN code '999999' was not found in our serviceability records."
+      },
+      "500": {
+        "code": "INTERNAL_SERVER_ERROR",
+        "message": "An unexpected error occurred. Please try again later."
+      }
+    }
+  },
+  "listProducts": {
+    "method": "GET",
+    "path": "/products",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "name": "Wireless Noise-Cancelling Headphones",
+            "slug": "wireless-noise-cancelling-headphones",
+            "description": "Premium over-ear headphones with active noise cancellation.",
+            "brand_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+            "category_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+            "base_price_paise": 1999900,
+            "tax_rate_pct": "18.00",
+            "is_returnable": true,
+            "return_window_days": 7,
+            "attributes": {
+              "color": [
+                "Black",
+                "White"
+              ],
+              "connectivity": "Bluetooth 5.2"
+            },
+            "average_rating": "4.35",
+            "is_active": true,
+            "created_at": "2024-01-15T08:00:00Z",
+            "updated_at": "2024-06-10T12:30:00Z"
+          }
+        ],
+        "facets": [
+          {
+            "field": "brand_id",
+            "label": "Brand",
+            "options": [
+              {
+                "value": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                "label": "Sony",
+                "count": 12
+              }
+            ]
+          },
+          {
+            "field": "category_id",
+            "label": "Category",
+            "options": [
+              {
+                "value": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+                "label": "Audio",
+                "count": 24
+              }
+            ]
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 1,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "createProduct": {
+    "method": "POST",
+    "path": "/products",
+    "request": {
+      "name": "Wireless Noise-Cancelling Headphones",
+      "slug": "wireless-noise-cancelling-headphones",
+      "description": "Premium over-ear headphones with active noise cancellation.",
+      "brand_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "category_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "base_price_paise": 1999900,
+      "tax_rate_pct": "18.00",
+      "is_returnable": true,
+      "return_window_days": 7,
+      "attributes": {
+        "color": [
+          "Black",
+          "White"
+        ],
+        "connectivity": "Bluetooth 5.2"
+      },
+      "is_active": true
+    },
+    "responses": {
+      "201": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "name": "Wireless Noise-Cancelling Headphones",
+        "slug": "wireless-noise-cancelling-headphones",
+        "description": "Premium over-ear headphones with active noise cancellation.",
+        "brand_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "category_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+        "base_price_paise": 1999900,
+        "tax_rate_pct": "18.00",
+        "is_returnable": true,
+        "return_window_days": 7,
+        "attributes": {
+          "color": [
+            "Black",
+            "White"
+          ],
+          "connectivity": "Bluetooth 5.2"
+        },
+        "average_rating": null,
+        "is_active": true,
+        "created_at": "2024-06-15T09:00:00Z",
+        "updated_at": "2024-06-15T09:00:00Z"
+      }
+    }
+  },
+  "getProduct": {
+    "method": "GET",
+    "path": "/products/{productId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "name": "Wireless Noise-Cancelling Headphones",
+        "slug": "wireless-noise-cancelling-headphones",
+        "description": "Premium over-ear headphones with active noise cancellation.",
+        "brand_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "category_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+        "base_price_paise": 1999900,
+        "tax_rate_pct": "18.00",
+        "is_returnable": true,
+        "return_window_days": 7,
+        "attributes": {
+          "color": [
+            "Black",
+            "White"
+          ],
+          "connectivity": "Bluetooth 5.2"
+        },
+        "average_rating": "4.35",
+        "is_active": true,
+        "created_at": "2024-01-15T08:00:00Z",
+        "updated_at": "2024-06-10T12:30:00Z",
+        "images": [
+          {
+            "id": "d4e5f6a7-b8c9-0123-defa-234567890123",
+            "product_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "url": "https://cdn.example.com/products/headphones-black.jpg",
+            "alt_text": "Headphones in Black",
+            "sort_order": 1,
+            "created_at": "2024-01-15T08:05:00Z"
+          }
+        ]
+      }
+    }
+  },
+  "updateProduct": {
+    "method": "PUT",
+    "path": "/products/{productId}",
+    "request": {
+      "name": "Wireless Noise-Cancelling Headphones Pro",
+      "slug": "wireless-noise-cancelling-headphones-pro",
+      "description": "Updated premium over-ear headphones with enhanced ANC.",
+      "brand_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "category_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "base_price_paise": 2499900,
+      "tax_rate_pct": "18.00",
+      "is_returnable": true,
+      "return_window_days": 10,
+      "attributes": {
+        "color": [
+          "Black",
+          "White",
+          "Midnight Blue"
+        ],
+        "connectivity": "Bluetooth 5.3"
+      },
+      "is_active": true
+    },
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "name": "Wireless Noise-Cancelling Headphones Pro",
+        "slug": "wireless-noise-cancelling-headphones-pro",
+        "description": "Updated premium over-ear headphones with enhanced ANC.",
+        "brand_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "category_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+        "base_price_paise": 2499900,
+        "tax_rate_pct": "18.00",
+        "is_returnable": true,
+        "return_window_days": 10,
+        "attributes": {
+          "color": [
+            "Black",
+            "White",
+            "Midnight Blue"
+          ],
+          "connectivity": "Bluetooth 5.3"
+        },
+        "average_rating": "4.35",
+        "is_active": true,
+        "created_at": "2024-01-15T08:00:00Z",
+        "updated_at": "2024-06-20T14:00:00Z"
+      }
+    }
+  },
+  "deleteProduct": {
+    "method": "DELETE",
+    "path": "/products/{productId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Product deactivated successfully."
+      }
+    }
+  },
+  "listSkus": {
+    "method": "GET",
+    "path": "/products/{productId}/skus",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "e5f6a7b8-c9d0-1234-efab-345678901234",
+            "product_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "sku_code": "WNC-HP-BLK-001",
+            "variant_attributes": {
+              "color": "Black",
+              "size": "One Size"
+            },
+            "price_paise": 1999900,
+            "stock_qty": 150,
+            "reserved_qty": 10,
+            "is_active": true,
+            "created_at": "2024-01-15T08:10:00Z",
+            "updated_at": "2024-06-10T11:00:00Z"
+          },
+          {
+            "id": "f6a7b8c9-d0e1-2345-fabc-456789012345",
+            "product_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "sku_code": "WNC-HP-WHT-001",
+            "variant_attributes": {
+              "color": "White",
+              "size": "One Size"
+            },
+            "price_paise": 1999900,
+            "stock_qty": 80,
+            "reserved_qty": 5,
+            "is_active": true,
+            "created_at": "2024-01-15T08:12:00Z",
+            "updated_at": "2024-06-10T11:00:00Z"
+          }
+        ]
+      }
+    }
+  },
+  "createSku": {
+    "method": "POST",
+    "path": "/products/{productId}/skus",
+    "request": {
+      "sku_code": "WNC-HP-MNB-001",
+      "variant_attributes": {
+        "color": "Midnight Blue",
+        "size": "One Size"
+      },
+      "price_paise": 2099900,
+      "stock_qty": 50,
+      "is_active": true
+    },
+    "responses": {
+      "201": {
+        "id": "a7b8c9d0-e1f2-3456-abcd-567890123456",
+        "product_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "sku_code": "WNC-HP-MNB-001",
+        "variant_attributes": {
+          "color": "Midnight Blue",
+          "size": "One Size"
+        },
+        "price_paise": 2099900,
+        "stock_qty": 50,
+        "reserved_qty": 0,
+        "is_active": true,
+        "created_at": "2024-06-20T15:00:00Z",
+        "updated_at": "2024-06-20T15:00:00Z"
+      }
+    }
+  },
+  "getSku": {
+    "method": "GET",
+    "path": "/products/{productId}/skus/{skuId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "e5f6a7b8-c9d0-1234-efab-345678901234",
+        "product_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "sku_code": "WNC-HP-BLK-001",
+        "variant_attributes": {
+          "color": "Black",
+          "size": "One Size"
+        },
+        "price_paise": 1999900,
+        "stock_qty": 150,
+        "reserved_qty": 10,
+        "is_active": true,
+        "created_at": "2024-01-15T08:10:00Z",
+        "updated_at": "2024-06-10T11:00:00Z"
+      }
+    }
+  },
+  "updateSku": {
+    "method": "PUT",
+    "path": "/products/{productId}/skus/{skuId}",
+    "request": {
+      "sku_code": "TSHIRT-RED-L-V2",
+      "variant_attributes": {
+        "color": "Red",
+        "size": "L"
+      },
+      "price_paise": 149900,
+      "stock_qty": 75,
+      "is_active": true
+    },
+    "responses": {
+      "200": {
+        "id": "b3f1c2d4-1234-4abc-8def-000000000101",
+        "product_id": "a1b2c3d4-5678-4abc-8def-000000000001",
+        "sku_code": "TSHIRT-RED-L-V2",
+        "variant_attributes": {
+          "color": "Red",
+          "size": "L"
+        },
+        "price_paise": 149900,
+        "stock_qty": 75,
+        "reserved_qty": 5,
+        "is_active": true,
+        "created_at": "2024-01-10T08:00:00Z",
+        "updated_at": "2024-06-15T12:30:00Z"
+      }
+    }
+  },
+  "deleteSku": {
+    "method": "DELETE",
+    "path": "/products/{productId}/skus/{skuId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "SKU b3f1c2d4-1234-4abc-8def-000000000101 has been deactivated."
+      }
+    }
+  },
+  "listProductImages": {
+    "method": "GET",
+    "path": "/products/{productId}/images",
+    "request": null,
+    "responses": {
+      "200": [
+        {
+          "id": "c4d5e6f7-0001-4abc-8def-000000000201",
+          "product_id": "a1b2c3d4-5678-4abc-8def-000000000001",
+          "url": "https://cdn.example.com/products/tshirt-red-front.jpg",
+          "alt_text": "Red T-Shirt front view",
+          "sort_order": 1,
+          "created_at": "2024-01-10T08:05:00Z"
+        },
+        {
+          "id": "c4d5e6f7-0002-4abc-8def-000000000202",
+          "product_id": "a1b2c3d4-5678-4abc-8def-000000000001",
+          "url": "https://cdn.example.com/products/tshirt-red-back.jpg",
+          "alt_text": "Red T-Shirt back view",
+          "sort_order": 2,
+          "created_at": "2024-01-10T08:06:00Z"
+        }
+      ]
+    }
+  },
+  "addProductImage": {
+    "method": "POST",
+    "path": "/products/{productId}/images",
+    "request": {
+      "url": "https://cdn.example.com/products/tshirt-red-side.jpg",
+      "alt_text": "Red T-Shirt side view",
+      "sort_order": 3
+    },
+    "responses": {
+      "201": {
+        "id": "c4d5e6f7-0003-4abc-8def-000000000203",
+        "product_id": "a1b2c3d4-5678-4abc-8def-000000000001",
+        "url": "https://cdn.example.com/products/tshirt-red-side.jpg",
+        "alt_text": "Red T-Shirt side view",
+        "sort_order": 3,
+        "created_at": "2024-06-15T13:00:00Z"
+      }
+    }
+  },
+  "deleteProductImage": {
+    "method": "DELETE",
+    "path": "/products/{productId}/images/{imageId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Image c4d5e6f7-0003-4abc-8def-000000000203 has been removed from product."
+      }
+    }
+  },
+  "listCategories": {
+    "method": "GET",
+    "path": "/categories",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "d1e2f3a4-0001-4abc-8def-000000000301",
+            "name": "Clothing",
+            "slug": "clothing",
+            "parent_id": null,
+            "description": "All apparel and clothing items",
+            "is_active": true,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+          },
+          {
+            "id": "d1e2f3a4-0002-4abc-8def-000000000302",
+            "name": "Electronics",
+            "slug": "electronics",
+            "parent_id": null,
+            "description": "Gadgets, devices, and accessories",
+            "is_active": true,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+          }
+        ],
+        "meta": {
+          "page": 1,
+          "limit": 50,
+          "total": 2,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "createCategory": {
+    "method": "POST",
+    "path": "/categories",
+    "request": {
+      "name": "T-Shirts",
+      "slug": "t-shirts",
+      "parent_id": "d1e2f3a4-0001-4abc-8def-000000000301",
+      "description": "Casual and formal T-shirts for all occasions",
+      "is_active": true
+    },
+    "responses": {
+      "201": {
+        "id": "d1e2f3a4-0003-4abc-8def-000000000303",
+        "name": "T-Shirts",
+        "slug": "t-shirts",
+        "parent_id": "d1e2f3a4-0001-4abc-8def-000000000301",
+        "description": "Casual and formal T-shirts for all occasions",
+        "is_active": true,
+        "created_at": "2024-06-15T14:00:00Z",
+        "updated_at": "2024-06-15T14:00:00Z"
+      }
+    }
+  },
+  "getCategory": {
+    "method": "GET",
+    "path": "/categories/{categoryId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "d1e2f3a4-0003-4abc-8def-000000000303",
+        "name": "T-Shirts",
+        "slug": "t-shirts",
+        "parent_id": "d1e2f3a4-0001-4abc-8def-000000000301",
+        "description": "Casual and formal T-shirts for all occasions",
+        "is_active": true,
+        "created_at": "2024-06-15T14:00:00Z",
+        "updated_at": "2024-06-15T14:00:00Z"
+      }
+    }
+  },
+  "updateCategory": {
+    "method": "PUT",
+    "path": "/categories/{categoryId}",
+    "request": {
+      "name": "Smartphones",
+      "slug": "smartphones",
+      "parent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "description": "All kinds of smartphones and mobile phones",
+      "is_active": true
+    },
+    "responses": {
+      "200": {
+        "id": "d4e5f6a7-b8c9-0123-defa-456789012345",
+        "name": "Smartphones",
+        "slug": "smartphones",
+        "parent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "description": "All kinds of smartphones and mobile phones",
+        "is_active": true,
+        "created_at": "2024-01-15T10:00:00Z",
+        "updated_at": "2024-06-20T14:30:00Z"
+      }
+    }
+  },
+  "deleteCategory": {
+    "method": "DELETE",
+    "path": "/categories/{categoryId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Category deactivated successfully"
+      }
+    }
+  },
+  "listProductsByCategory": {
+    "method": "GET",
+    "path": "/categories/{categoryId}/products",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "f1e2d3c4-b5a6-7890-fedc-ba0987654321",
+            "name": "Samsung Galaxy S24",
+            "slug": "samsung-galaxy-s24",
+            "description": "Latest Samsung flagship smartphone",
+            "brand_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+            "category_id": "d4e5f6a7-b8c9-0123-defa-456789012345",
+            "base_price_paise": 7999900,
+            "tax_rate_pct": "18.00",
+            "is_returnable": true,
+            "return_window_days": 10,
+            "attributes": {
+              "color": [
+                "Black",
+                "White",
+                "Purple"
+              ],
+              "storage": [
+                "128GB",
+                "256GB"
+              ]
+            },
+            "average_rating": "4.50",
+            "is_active": true,
+            "created_at": "2024-02-01T08:00:00Z",
+            "updated_at": "2024-06-15T12:00:00Z"
+          }
+        ],
+        "facets": [
+          {
+            "field": "brand_id",
+            "values": [
+              {
+                "value": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                "label": "Samsung",
+                "count": 12
+              }
+            ]
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 1,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "listBrands": {
+    "method": "GET",
+    "path": "/brands",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+            "name": "Samsung",
+            "slug": "samsung",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+          },
+          {
+            "id": "c3d4e5f6-a7b8-9012-cdef-012345678902",
+            "name": "Apple",
+            "slug": "apple",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+          }
+        ],
+        "meta": {
+          "page": 1,
+          "limit": 50,
+          "total": 2,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "createBrand": {
+    "method": "POST",
+    "path": "/brands",
+    "request": {
+      "name": "OnePlus",
+      "slug": "oneplus"
+    },
+    "responses": {
+      "201": {
+        "id": "e5f6a7b8-c9d0-1234-efab-234567890123",
+        "name": "OnePlus",
+        "slug": "oneplus",
+        "created_at": "2024-06-20T15:00:00Z",
+        "updated_at": "2024-06-20T15:00:00Z"
+      }
+    }
+  },
+  "getBrand": {
+    "method": "GET",
+    "path": "/brands/{brandId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "name": "Samsung",
+        "slug": "samsung",
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-01-01T00:00:00Z"
+      }
+    }
+  },
+  "updateBrand": {
+    "method": "PUT",
+    "path": "/brands/{brandId}",
+    "request": {
+      "name": "Samsung Electronics",
+      "slug": "samsung-electronics"
+    },
+    "responses": {
+      "200": {
+        "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "name": "Samsung Electronics",
+        "slug": "samsung-electronics",
+        "created_at": "2024-01-01T00:00:00Z",
+        "updated_at": "2024-06-20T16:00:00Z"
+      }
+    }
+  },
+  "deleteBrand": {
+    "method": "DELETE",
+    "path": "/brands/{brandId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Brand deleted successfully"
+      }
+    }
+  },
+  "search": {
+    "method": "GET",
+    "path": "/search",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "name": "Sony WH-1000XM5 Wireless Headphones",
+            "slug": "sony-wh-1000xm5-wireless-headphones",
+            "description": "Industry-leading noise cancelling headphones with exceptional sound quality.",
+            "brand_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+            "category_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+            "base_price_paise": 2999900,
+            "tax_rate_pct": "18.00",
+            "is_returnable": true,
+            "return_window_days": 7,
+            "attributes": {
+              "color": "Black",
+              "connectivity": "Bluetooth 5.2"
+            },
+            "average_rating": "4.60",
+            "is_active": true,
+            "created_at": "2024-01-15T10:00:00Z",
+            "updated_at": "2024-06-01T12:00:00Z"
+          },
+          {
+            "id": "d4e5f6a7-b8c9-0123-defa-234567890123",
+            "name": "Bose QuietComfort 45 Headphones",
+            "slug": "bose-quietcomfort-45-headphones",
+            "description": "World-class noise cancellation meets high-fidelity audio.",
+            "brand_id": "e5f6a7b8-c9d0-1234-efab-345678901234",
+            "category_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+            "base_price_paise": 2499900,
+            "tax_rate_pct": "18.00",
+            "is_returnable": true,
+            "return_window_days": 7,
+            "attributes": {
+              "color": "White",
+              "connectivity": "Bluetooth 5.1"
+            },
+            "average_rating": "4.45",
+            "is_active": true,
+            "created_at": "2024-02-10T09:30:00Z",
+            "updated_at": "2024-05-20T11:00:00Z"
+          }
+        ],
+        "facets": [
+          {
+            "field": "brand_id",
+            "label": "Brand",
+            "options": [
+              {
+                "value": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                "label": "Sony",
+                "count": 12
+              },
+              {
+                "value": "e5f6a7b8-c9d0-1234-efab-345678901234",
+                "label": "Bose",
+                "count": 8
+              }
+            ]
+          },
+          {
+            "field": "category_id",
+            "label": "Category",
+            "options": [
+              {
+                "value": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+                "label": "Headphones",
+                "count": 20
+              }
+            ]
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "page_size": 20,
+          "total_items": 2,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "searchSuggest": {
+    "method": "GET",
+    "path": "/search/suggest",
+    "request": null,
+    "responses": {
+      "200": [
+        {
+          "label": "Sony WH-1000XM5 Wireless Headphones",
+          "slug": "sony-wh-1000xm5-wireless-headphones",
+          "product_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "type": "string",
+          "image_url": "https://cdn.example.com/products/sony-wh1000xm5-thumb.jpg"
+        },
+        {
+          "label": "Sony WF-1000XM4 Earbuds",
+          "slug": "sony-wf-1000xm4-earbuds",
+          "product_id": "f6a7b8c9-d0e1-2345-fab0-456789012345",
+          "type": "string",
+          "image_url": "https://cdn.example.com/products/sony-wf1000xm4-thumb.jpg"
+        },
+        {
+          "label": "Sony",
+          "slug": null,
+          "product_id": null,
+          "type": "string",
+          "image_url": null
+        },
+        {
+          "label": "Headphones",
+          "slug": "headphones",
+          "product_id": null,
+          "type": "string",
+          "image_url": null
+        }
+      ]
+    }
+  },
+  "createCart": {
+    "method": "POST",
+    "path": "/carts",
+    "request": null,
+    "responses": {
+      "201": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "user_id": null,
+        "guest_email": null,
+        "promo_code_id": null,
+        "status": "active",
+        "created_at": "2024-06-01T10:00:00Z",
+        "updated_at": "2024-06-01T10:00:00Z"
+      }
+    }
+  },
+  "getCart": {
+    "method": "GET",
+    "path": "/carts/{cartId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "user_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "guest_email": null,
+        "promo_code_id": null,
+        "status": "active",
+        "items": [
+          {
+            "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+            "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "sku_id": "d4e5f6a7-b8c9-0123-defa-234567890123",
+            "quantity": 2,
+            "unit_price_paise": 49900,
+            "created_at": "2024-06-01T10:05:00Z",
+            "updated_at": "2024-06-01T10:05:00Z"
+          }
+        ],
+        "created_at": "2024-06-01T10:00:00Z",
+        "updated_at": "2024-06-01T10:05:00Z"
+      }
+    }
+  },
+  "addCartItem": {
+    "method": "POST",
+    "path": "/carts/{cartId}/items",
+    "request": {
+      "sku_id": "d4e5f6a7-b8c9-0123-defa-234567890123",
+      "quantity": 2
+    },
+    "responses": {
+      "201": {
+        "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+        "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "sku_id": "d4e5f6a7-b8c9-0123-defa-234567890123",
+        "quantity": 2,
+        "unit_price_paise": 49900,
+        "created_at": "2024-06-01T10:05:00Z",
+        "updated_at": "2024-06-01T10:05:00Z"
+      }
+    }
+  },
+  "updateCartItem": {
+    "method": "PATCH",
+    "path": "/carts/{cartId}/items/{itemId}",
+    "request": {
+      "quantity": 3
+    },
+    "responses": {
+      "200": {
+        "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+        "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "sku_id": "d4e5f6a7-b8c9-0123-defa-234567890123",
+        "quantity": 3,
+        "unit_price_paise": 49900,
+        "created_at": "2024-06-01T10:05:00Z",
+        "updated_at": "2024-06-01T10:15:00Z"
+      }
+    }
+  },
+  "removeCartItem": {
+    "method": "DELETE",
+    "path": "/carts/{cartId}/items/{itemId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Item removed from cart successfully"
+      }
+    }
+  },
+  "applyPromoToCart": {
+    "method": "POST",
+    "path": "/carts/{cartId}/promo",
+    "request": {
+      "code": "SUMMER20"
+    },
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "user_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "guest_email": null,
+        "promo_code_id": "e5f6a7b8-c9d0-1234-efab-345678901234",
+        "status": "active",
+        "created_at": "2024-06-01T10:00:00Z",
+        "updated_at": "2024-06-01T10:20:00Z"
+      }
+    }
+  },
+  "removePromoFromCart": {
+    "method": "DELETE",
+    "path": "/carts/{cartId}/promo",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "user_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "guest_email": null,
+        "promo_code_id": null,
+        "status": "active",
+        "created_at": "2024-06-01T10:00:00Z",
+        "updated_at": "2024-06-01T10:25:00Z"
+      }
+    }
+  },
+  "checkoutStart": {
+    "method": "POST",
+    "path": "/checkout/start",
+    "request": {
+      "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "guest_email": "guest@example.com"
+    },
+    "responses": {
+      "201": {
+        "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "reservations": [
+          {
+            "id": "f1e2d3c4-b5a6-7890-abcd-123456789012",
+            "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "sku_id": "d4c3b2a1-f6e5-0987-dcba-fedcba987654",
+            "quantity": 2,
+            "status": "reserved",
+            "expires_at": "2024-07-15T11:30:00Z",
+            "created_at": "2024-07-15T11:00:00Z",
+            "updated_at": "2024-07-15T11:00:00Z"
+          }
+        ],
+        "expires_at": "2024-07-15T11:30:00Z"
+      }
+    }
+  },
+  "checkoutAddress": {
+    "method": "POST",
+    "path": "/checkout/address",
+    "request": {
+      "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "address_id": "9f8e7d6c-5b4a-3210-fedc-ba9876543210",
+      "new_address": null
+    },
+    "responses": {
+      "200": {
+        "id": "9f8e7d6c-5b4a-3210-fedc-ba9876543210",
+        "user_id": "c1d2e3f4-a5b6-7890-abcd-112233445566",
+        "full_name": "Ravi Kumar",
+        "line1": "42, MG Road",
+        "line2": "Near City Mall",
+        "city": "Bengaluru",
+        "state": "Karnataka",
+        "pin_code": "560001",
+        "country": "India",
+        "phone": "+919876543210",
+        "is_default": true,
+        "created_at": "2024-06-01T09:00:00Z",
+        "updated_at": "2024-07-10T14:00:00Z"
+      }
+    }
+  },
+  "checkoutReview": {
+    "method": "GET",
+    "path": "/checkout/review",
+    "request": null,
+    "responses": {
+      "200": {
+        "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "items": [
+          {
+            "sku_id": "d4c3b2a1-f6e5-0987-dcba-fedcba987654",
+            "sku_code": "TSHIRT-RED-M",
+            "product_name": "Classic Cotton T-Shirt",
+            "variant_attributes": {
+              "color": "Red",
+              "size": "M"
+            },
+            "quantity": 2,
+            "unit_price_paise": 59900,
+            "tax_paise": 5990,
+            "line_total_paise": 125790
+          }
+        ],
+        "subtotal_paise": 119800,
+        "discount_paise": 10000,
+        "shipping_paise": 4900,
+        "tax_paise": 11980,
+        "total_paise": 126680,
+        "free_shipping_threshold_paise": 50000,
+        "promo_code": {
+          "id": "e5f6a7b8-c9d0-1234-efab-567890123456",
+          "code": "SAVE10",
+          "discount_type": "flat",
+          "discount_value": 10000
+        },
+        "delivery_address": {
+          "id": "9f8e7d6c-5b4a-3210-fedc-ba9876543210",
+          "full_name": "Ravi Kumar",
+          "line1": "42, MG Road",
+          "city": "Bengaluru",
+          "state": "Karnataka",
+          "pin_code": "560001",
+          "country": "India"
+        }
+      }
+    }
+  },
+  "placeOrder": {
+    "method": "POST",
+    "path": "/checkout/place-order",
+    "request": {
+      "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "guest_email": "guest@example.com",
+      "payment_method": "upi"
+    },
+    "responses": {
+      "201": {
+        "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "order_number": "ORD-20240715-00042",
+        "user_id": null,
+        "guest_email": "guest@example.com",
+        "cart_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "delivery_address_id": "9f8e7d6c-5b4a-3210-fedc-ba9876543210",
+        "delivery_address_snapshot": {
+          "full_name": "Ravi Kumar",
+          "line1": "42, MG Road",
+          "line2": "Near City Mall",
+          "city": "Bengaluru",
+          "state": "Karnataka",
+          "pin_code": "560001",
+          "country": "India",
+          "phone": "+919876543210"
+        },
+        "status": "pending_payment",
+        "subtotal_paise": 119800,
+        "discount_paise": 10000,
+        "shipping_paise": 4900,
+        "tax_paise": 11980,
+        "total_paise": 126680,
+        "free_shipping_threshold_paise": 50000,
+        "promo_code_id": "e5f6a7b8-c9d0-1234-efab-567890123456",
+        "promo_code_snapshot": {
+          "code": "SAVE10",
+          "discount_type": "flat",
+          "discount_value": 10000
+        },
+        "pin_code": "560001",
+        "created_at": "2024-07-15T11:05:00Z",
+        "updated_at": "2024-07-15T11:05:00Z"
+      }
+    }
+  },
+  "listOrders": {
+    "method": "GET",
+    "path": "/orders",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "a1b2c3d4-0001-4000-8000-000000000001",
+            "order_number": "ORD-20240601-0001",
+            "user_id": "u1000000-0000-4000-8000-000000000001",
+            "guest_email": null,
+            "cart_id": "c1000000-0000-4000-8000-000000000001",
+            "delivery_address_id": "d1000000-0000-4000-8000-000000000001",
+            "delivery_address_snapshot": {
+              "full_name": "Riya Sharma",
+              "line1": "12 MG Road",
+              "line2": "Apt 4B",
+              "city": "Bengaluru",
+              "state": "Karnataka",
+              "pin_code": "560001",
+              "country": "India",
+              "phone": "9876543210"
+            },
+            "status": "confirmed",
+            "subtotal_paise": 149900,
+            "discount_paise": 10000,
+            "shipping_paise": 0,
+            "tax_paise": 26982,
+            "total_paise": 166882,
+            "free_shipping_threshold_paise": 50000,
+            "promo_code_id": "p1000000-0000-4000-8000-000000000001",
+            "promo_code_snapshot": {
+              "code": "SAVE10",
+              "discount_type": "percentage",
+              "discount_value": 10
+            },
+            "pin_code": "560001",
+            "created_at": "2024-06-01T10:30:00Z",
+            "updated_at": "2024-06-01T10:35:00Z"
+          }
+        ],
+        "meta": {
+          "total": 48,
+          "page": 1,
+          "limit": 20,
+          "total_pages": 3
+        }
+      }
+    }
+  },
+  "getOrder": {
+    "method": "GET",
+    "path": "/orders/{orderId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-0001-4000-8000-000000000001",
+        "order_number": "ORD-20240601-0001",
+        "user_id": "u1000000-0000-4000-8000-000000000001",
+        "guest_email": null,
+        "cart_id": "c1000000-0000-4000-8000-000000000001",
+        "delivery_address_id": "d1000000-0000-4000-8000-000000000001",
+        "delivery_address_snapshot": {
+          "full_name": "Riya Sharma",
+          "line1": "12 MG Road",
+          "line2": "Apt 4B",
+          "city": "Bengaluru",
+          "state": "Karnataka",
+          "pin_code": "560001",
+          "country": "India",
+          "phone": "9876543210"
+        },
+        "status": "shipped",
+        "subtotal_paise": 149900,
+        "discount_paise": 10000,
+        "shipping_paise": 0,
+        "tax_paise": 26982,
+        "total_paise": 166882,
+        "free_shipping_threshold_paise": 50000,
+        "promo_code_id": "p1000000-0000-4000-8000-000000000001",
+        "promo_code_snapshot": {
+          "code": "SAVE10",
+          "discount_type": "percentage",
+          "discount_value": 10
+        },
+        "pin_code": "560001",
+        "items": [
+          {
+            "id": "oi000001-0000-4000-8000-000000000001",
+            "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+            "sku_id": "s1000000-0000-4000-8000-000000000001",
+            "sku_snapshot": {
+              "sku_code": "TSHIRT-RED-L",
+              "variant_attributes": {
+                "color": "Red",
+                "size": "L"
+              },
+              "price_paise": 74950
+            },
+            "quantity": 2,
+            "unit_price_paise": 74950,
+            "tax_paise": 13491,
+            "line_total_paise": 163391,
+            "is_returnable": true,
+            "return_window_days": 7,
+            "created_at": "2024-06-01T10:30:00Z"
+          }
+        ],
+        "timeline": [
+          {
+            "id": "tl000001-0000-4000-8000-000000000001",
+            "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+            "status": "shipped",
+            "notes": "Dispatched via BlueDart",
+            "advanced_by": "staff000-0000-4000-8000-000000000001",
+            "created_at": "2024-06-02T08:00:00Z"
+          }
+        ],
+        "created_at": "2024-06-01T10:30:00Z",
+        "updated_at": "2024-06-02T08:00:00Z"
+      }
+    }
+  },
+  "cancelOrder": {
+    "method": "POST",
+    "path": "/orders/{orderId}/cancel",
+    "request": {
+      "reason": "Changed my mind about the purchase"
+    },
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-0001-4000-8000-000000000001",
+        "order_number": "ORD-20240601-0001",
+        "user_id": "u1000000-0000-4000-8000-000000000001",
+        "guest_email": null,
+        "cart_id": "c1000000-0000-4000-8000-000000000001",
+        "delivery_address_id": "d1000000-0000-4000-8000-000000000001",
+        "delivery_address_snapshot": {
+          "full_name": "Riya Sharma",
+          "line1": "12 MG Road",
+          "city": "Bengaluru",
+          "state": "Karnataka",
+          "pin_code": "560001",
+          "country": "India"
+        },
+        "status": "cancelled",
+        "subtotal_paise": 149900,
+        "discount_paise": 10000,
+        "shipping_paise": 0,
+        "tax_paise": 26982,
+        "total_paise": 166882,
+        "free_shipping_threshold_paise": 50000,
+        "promo_code_id": null,
+        "promo_code_snapshot": null,
+        "pin_code": "560001",
+        "created_at": "2024-06-01T10:30:00Z",
+        "updated_at": "2024-06-01T11:00:00Z"
+      }
+    }
+  },
+  "advanceOrder": {
+    "method": "POST",
+    "path": "/orders/{orderId}/advance",
+    "request": {
+      "status": "shipped",
+      "notes": "Dispatched via BlueDart, AWB: BD1234567890"
+    },
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-0001-4000-8000-000000000001",
+        "order_number": "ORD-20240601-0001",
+        "user_id": "u1000000-0000-4000-8000-000000000001",
+        "guest_email": null,
+        "cart_id": "c1000000-0000-4000-8000-000000000001",
+        "delivery_address_id": "d1000000-0000-4000-8000-000000000001",
+        "delivery_address_snapshot": {
+          "full_name": "Riya Sharma",
+          "line1": "12 MG Road",
+          "city": "Bengaluru",
+          "state": "Karnataka",
+          "pin_code": "560001",
+          "country": "India"
+        },
+        "status": "shipped",
+        "subtotal_paise": 149900,
+        "discount_paise": 10000,
+        "shipping_paise": 0,
+        "tax_paise": 26982,
+        "total_paise": 166882,
+        "free_shipping_threshold_paise": 50000,
+        "promo_code_id": "p1000000-0000-4000-8000-000000000001",
+        "promo_code_snapshot": {
+          "code": "SAVE10"
+        },
+        "pin_code": "560001",
+        "created_at": "2024-06-01T10:30:00Z",
+        "updated_at": "2024-06-02T08:00:00Z"
+      }
+    }
+  },
+  "getOrderTracking": {
+    "method": "GET",
+    "path": "/orders/{orderId}/tracking",
+    "request": null,
+    "responses": {
+      "200": [
+        {
+          "id": "tr000001-0000-4000-8000-000000000001",
+          "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+          "tracking_event": "ORDER_PICKED_UP",
+          "location": "BlueDart Facility, Bengaluru",
+          "description": "Package picked up from seller warehouse",
+          "event_at": "2024-06-02T07:00:00Z",
+          "created_at": "2024-06-02T07:05:00Z"
+        },
+        {
+          "id": "tr000002-0000-4000-8000-000000000002",
+          "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+          "tracking_event": "IN_TRANSIT",
+          "location": "BlueDart Hub, Mumbai",
+          "description": "Package in transit to destination city",
+          "event_at": "2024-06-02T18:00:00Z",
+          "created_at": "2024-06-02T18:10:00Z"
+        },
+        {
+          "id": "tr000003-0000-4000-8000-000000000003",
+          "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+          "tracking_event": "OUT_FOR_DELIVERY",
+          "location": "Bengaluru, Karnataka",
+          "description": "Package out for delivery",
+          "event_at": "2024-06-03T09:00:00Z",
+          "created_at": "2024-06-03T09:05:00Z"
+        }
+      ]
+    }
+  },
+  "getOrderTimeline": {
+    "method": "GET",
+    "path": "/orders/{orderId}/timeline",
+    "request": null,
+    "responses": {
+      "200": [
+        {
+          "id": "tl000001-0000-4000-8000-000000000001",
+          "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+          "status": "pending",
+          "notes": "Order placed by customer",
+          "advanced_by": null,
+          "created_at": "2024-06-01T10:30:00Z"
+        },
+        {
+          "id": "tl000002-0000-4000-8000-000000000002",
+          "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+          "status": "confirmed",
+          "notes": "Payment verified, order confirmed",
+          "advanced_by": "staff000-0000-4000-8000-000000000001",
+          "created_at": "2024-06-01T10:35:00Z"
+        },
+        {
+          "id": "tl000003-0000-4000-8000-000000000003",
+          "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+          "status": "shipped",
+          "notes": "Dispatched via BlueDart, AWB: BD1234567890",
+          "advanced_by": "staff000-0000-4000-8000-000000000001",
+          "created_at": "2024-06-02T08:00:00Z"
+        }
+      ]
+    }
+  },
+  "createReturnRequest": {
+    "method": "POST",
+    "path": "/orders/{orderId}/return-requests",
+    "request": {
+      "order_item_id": "oi000001-0000-4000-8000-000000000001",
+      "reason": "The product arrived damaged – the collar stitching was torn."
+    },
+    "responses": {
+      "201": {
+        "id": "rr000001-0000-4000-8000-000000000001",
+        "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+        "order_item_id": "oi000001-0000-4000-8000-000000000001",
+        "requested_by": "u1000000-0000-4000-8000-000000000001",
+        "reason": "The product arrived damaged – the collar stitching was torn.",
+        "status": "requested",
+        "reviewed_by": null,
+        "reviewed_at": null,
+        "rejection_reason": null,
+        "created_at": "2024-06-04T12:00:00Z",
+        "updated_at": "2024-06-04T12:00:00Z"
+      }
+    }
+  },
+  "listOrderRefunds": {
+    "method": "GET",
+    "path": "/orders/{orderId}/refunds",
+    "request": null,
+    "responses": {
+      "200": [
+        {
+          "id": "rf000001-0000-4000-8000-000000000001",
+          "order_id": "a1b2c3d4-0001-4000-8000-000000000001",
+          "payment_id": "pay00001-0000-4000-8000-000000000001",
+          "return_request_id": "rr000001-0000-4000-8000-000000000001",
+          "amount_paise": 74950,
+          "reason": "Return approved – damaged item",
+          "status": "processed",
+          "provider_reference": "RAZORPAY_REFUND_12345",
+          "processed_at": "2024-06-06T10:00:00Z",
+          "created_at": "2024-06-05T14:00:00Z",
+          "updated_at": "2024-06-06T10:00:00Z"
+        }
+      ]
+    }
+  },
+  "listReturnRequests": {
+    "method": "GET",
+    "path": "/return-requests",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "c3d4e5f6-1234-5678-9abc-def012345678",
+            "order_id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+            "order_item_id": "b2c3d4e5-6789-01bc-def0-234567890abc",
+            "requested_by": "f1e2d3c4-b5a6-7890-cdef-1234567890ab",
+            "reason": "Product received was damaged",
+            "status": "pending",
+            "reviewed_by": null,
+            "reviewed_at": null,
+            "rejection_reason": null,
+            "created_at": "2024-06-15T10:30:00Z",
+            "updated_at": "2024-06-15T10:30:00Z"
+          },
+          {
+            "id": "d4e5f6a7-2345-6789-abcd-ef0123456789",
+            "order_id": "b2c3d4e5-6789-01bc-def0-234567890abc",
+            "order_item_id": "c3d4e5f6-7890-12cd-ef01-345678901bcd",
+            "requested_by": "f1e2d3c4-b5a6-7890-cdef-1234567890ab",
+            "reason": "Wrong item delivered",
+            "status": "approved",
+            "reviewed_by": "e5f6a7b8-3456-7890-bcde-f01234567890",
+            "reviewed_at": "2024-06-14T15:00:00Z",
+            "rejection_reason": null,
+            "created_at": "2024-06-13T09:00:00Z",
+            "updated_at": "2024-06-14T15:00:00Z"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 2,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "getReturnRequest": {
+    "method": "GET",
+    "path": "/return-requests/{returnRequestId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "c3d4e5f6-1234-5678-9abc-def012345678",
+        "order_id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+        "order_item_id": "b2c3d4e5-6789-01bc-def0-234567890abc",
+        "requested_by": "f1e2d3c4-b5a6-7890-cdef-1234567890ab",
+        "reason": "Product received was damaged upon delivery. The outer packaging was intact but the item inside had a visible crack.",
+        "status": "pending",
+        "reviewed_by": null,
+        "reviewed_at": null,
+        "rejection_reason": null,
+        "created_at": "2024-06-15T10:30:00Z",
+        "updated_at": "2024-06-15T10:30:00Z"
+      }
+    }
+  },
+  "reviewReturnRequest": {
+    "method": "POST",
+    "path": "/return-requests/{returnRequestId}/review",
+    "request": {
+      "status": "approved",
+      "rejection_reason": null
+    },
+    "responses": {
+      "200": {
+        "id": "c3d4e5f6-1234-5678-9abc-def012345678",
+        "order_id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+        "order_item_id": "b2c3d4e5-6789-01bc-def0-234567890abc",
+        "requested_by": "f1e2d3c4-b5a6-7890-cdef-1234567890ab",
+        "reason": "Product received was damaged upon delivery. The outer packaging was intact but the item inside had a visible crack.",
+        "status": "approved",
+        "reviewed_by": "e5f6a7b8-3456-7890-bcde-f01234567890",
+        "reviewed_at": "2024-06-16T09:45:00Z",
+        "rejection_reason": null,
+        "created_at": "2024-06-15T10:30:00Z",
+        "updated_at": "2024-06-16T09:45:00Z"
+      }
+    }
+  },
+  "initiatePayment": {
+    "method": "POST",
+    "path": "/payments/initiate",
+    "request": {
+      "order_id": "a3f1c2d4-9e8b-4f7a-b6c5-1d2e3f4a5b6c",
+      "payment_method": "upi",
+      "provider": "razorpay",
+      "currency": "INR",
+      "return_url": "https://example.com/checkout/payment-result"
+    },
+    "responses": {
+      "201": {
+        "id": "e7d2a1b3-4c5f-6e7d-8a9b-0c1d2e3f4a5b",
+        "order_id": "a3f1c2d4-9e8b-4f7a-b6c5-1d2e3f4a5b6c",
+        "provider": "razorpay",
+        "provider_reference": "pay_RazorpayABC12345",
+        "amount_paise": 149900,
+        "currency": "INR",
+        "status": "pending",
+        "payment_method": "upi",
+        "failure_reason": null,
+        "initiated_at": "2024-06-15T10:30:00Z",
+        "completed_at": null,
+        "created_at": "2024-06-15T10:30:00Z",
+        "updated_at": "2024-06-15T10:30:00Z"
+      }
+    }
+  },
+  "paymentCallback": {
+    "method": "POST",
+    "path": "/payments/callback",
+    "request": {
+      "provider": "razorpay",
+      "provider_reference": "pay_RazorpayABC12345",
+      "payment_id": "e7d2a1b3-4c5f-6e7d-8a9b-0c1d2e3f4a5b",
+      "order_id": "a3f1c2d4-9e8b-4f7a-b6c5-1d2e3f4a5b6c",
+      "status": "success",
+      "signature": "9ef3a2c1d4b56789f0e1d2c3b4a5f6e7d8c9b0a1",
+      "payment_method": "upi",
+      "amount_paise": 149900,
+      "currency": "INR"
+    },
+    "responses": {
+      "200": {
+        "id": "e7d2a1b3-4c5f-6e7d-8a9b-0c1d2e3f4a5b",
+        "order_id": "a3f1c2d4-9e8b-4f7a-b6c5-1d2e3f4a5b6c",
+        "provider": "razorpay",
+        "provider_reference": "pay_RazorpayABC12345",
+        "amount_paise": 149900,
+        "currency": "INR",
+        "status": "completed",
+        "payment_method": "upi",
+        "failure_reason": null,
+        "initiated_at": "2024-06-15T10:30:00Z",
+        "completed_at": "2024-06-15T10:31:45Z",
+        "created_at": "2024-06-15T10:30:00Z",
+        "updated_at": "2024-06-15T10:31:45Z"
+      }
+    }
+  },
+  "getPayment": {
+    "method": "GET",
+    "path": "/payments/{paymentId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "e7d2a1b3-4c5f-6e7d-8a9b-0c1d2e3f4a5b",
+        "order_id": "a3f1c2d4-9e8b-4f7a-b6c5-1d2e3f4a5b6c",
+        "provider": "razorpay",
+        "provider_reference": "pay_RazorpayABC12345",
+        "amount_paise": 149900,
+        "currency": "INR",
+        "status": "completed",
+        "payment_method": "upi",
+        "failure_reason": null,
+        "initiated_at": "2024-06-15T10:30:00Z",
+        "completed_at": "2024-06-15T10:31:45Z",
+        "created_at": "2024-06-15T10:30:00Z",
+        "updated_at": "2024-06-15T10:31:45Z"
+      }
+    }
+  },
+  "retryPayment": {
+    "method": "POST",
+    "path": "/payments/{paymentId}/retry",
+    "request": {
+      "order_id": "a3f1c2d4-9e8b-4f7a-b6c5-1d2e3f4a5b6c",
+      "payment_method": "card",
+      "provider": "razorpay",
+      "currency": "INR",
+      "return_url": "https://example.com/checkout/payment-result"
+    },
+    "responses": {
+      "201": {
+        "id": "f8e3b2c4-5d6e-7f8a-9b0c-1d2e3f4a5b6c",
+        "order_id": "a3f1c2d4-9e8b-4f7a-b6c5-1d2e3f4a5b6c",
+        "provider": "razorpay",
+        "provider_reference": "pay_RazorpayXYZ67890",
+        "amount_paise": 149900,
+        "currency": "INR",
+        "status": "pending",
+        "payment_method": "card",
+        "failure_reason": null,
+        "initiated_at": "2024-06-15T11:00:00Z",
+        "completed_at": null,
+        "created_at": "2024-06-15T11:00:00Z",
+        "updated_at": "2024-06-15T11:00:00Z"
+      }
+    }
+  },
+  "getRefund": {
+    "method": "GET",
+    "path": "/refunds/{refundId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "e3f1a2b4-7c89-4d56-a123-9f0e1d2c3b4a",
+        "order_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "payment_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "return_request_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+        "amount_paise": 149900,
+        "reason": "Customer returned item within return window; product found defective upon inspection.",
+        "status": "processed",
+        "provider_reference": "rfnd_9XkL2mNpQr4sT7uV",
+        "processed_at": "2024-06-15T10:45:00Z",
+        "created_at": "2024-06-13T08:30:00Z",
+        "updated_at": "2024-06-15T10:45:00Z"
+      }
+    }
+  },
+  "listPromoCodes": {
+    "method": "GET",
+    "path": "/promo-codes",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "a1b2c3d4-0001-4000-8000-000000000001",
+            "code": "SAVE10",
+            "discount_type": "percent",
+            "discount_value": 10,
+            "minimum_order_paise": 50000,
+            "max_uses": 500,
+            "used_count": 123,
+            "expires_at": "2025-12-31T23:59:59Z",
+            "is_active": true,
+            "created_by": "u1b2c3d4-0001-4000-8000-000000000099",
+            "created_at": "2024-01-15T10:00:00Z",
+            "updated_at": "2024-06-01T08:30:00Z"
+          },
+          {
+            "id": "a1b2c3d4-0001-4000-8000-000000000002",
+            "code": "FLAT200",
+            "discount_type": "flat",
+            "discount_value": 20000,
+            "minimum_order_paise": 100000,
+            "max_uses": 200,
+            "used_count": 45,
+            "expires_at": "2025-06-30T23:59:59Z",
+            "is_active": true,
+            "created_by": "u1b2c3d4-0001-4000-8000-000000000099",
+            "created_at": "2024-02-10T09:00:00Z",
+            "updated_at": "2024-05-20T11:00:00Z"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 2,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "createPromoCode": {
+    "method": "POST",
+    "path": "/promo-codes",
+    "request": {
+      "code": "WELCOME15",
+      "discount_type": "percent",
+      "discount_value": 15,
+      "minimum_order_paise": 75000,
+      "max_uses": 1000,
+      "expires_at": "2025-12-31T23:59:59Z",
+      "is_active": true
+    },
+    "responses": {
+      "201": {
+        "id": "a1b2c3d4-0001-4000-8000-000000000003",
+        "code": "WELCOME15",
+        "discount_type": "percent",
+        "discount_value": 15,
+        "minimum_order_paise": 75000,
+        "max_uses": 1000,
+        "used_count": 0,
+        "expires_at": "2025-12-31T23:59:59Z",
+        "is_active": true,
+        "created_by": "u1b2c3d4-0001-4000-8000-000000000099",
+        "created_at": "2024-07-01T12:00:00Z",
+        "updated_at": "2024-07-01T12:00:00Z"
+      }
+    }
+  },
+  "getPromoCode": {
+    "method": "GET",
+    "path": "/promo-codes/{promoCodeId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-0001-4000-8000-000000000001",
+        "code": "SAVE10",
+        "discount_type": "percent",
+        "discount_value": 10,
+        "minimum_order_paise": 50000,
+        "max_uses": 500,
+        "used_count": 123,
+        "expires_at": "2025-12-31T23:59:59Z",
+        "is_active": true,
+        "created_by": "u1b2c3d4-0001-4000-8000-000000000099",
+        "created_at": "2024-01-15T10:00:00Z",
+        "updated_at": "2024-06-01T08:30:00Z"
+      }
+    }
+  },
+  "updatePromoCode": {
+    "method": "PUT",
+    "path": "/promo-codes/{promoCodeId}",
+    "request": {
+      "code": "SAVE10",
+      "discount_type": "percent",
+      "discount_value": 10,
+      "minimum_order_paise": 60000,
+      "max_uses": 750,
+      "expires_at": "2026-03-31T23:59:59Z",
+      "is_active": true
+    },
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-0001-4000-8000-000000000001",
+        "code": "SAVE10",
+        "discount_type": "percent",
+        "discount_value": 10,
+        "minimum_order_paise": 60000,
+        "max_uses": 750,
+        "used_count": 123,
+        "expires_at": "2026-03-31T23:59:59Z",
+        "is_active": true,
+        "created_by": "u1b2c3d4-0001-4000-8000-000000000099",
+        "created_at": "2024-01-15T10:00:00Z",
+        "updated_at": "2024-07-05T14:22:00Z"
+      }
+    }
+  },
+  "deletePromoCode": {
+    "method": "DELETE",
+    "path": "/promo-codes/{promoCodeId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Promo code SAVE10 has been deactivated."
+      }
+    }
+  },
+  "validatePromoCode": {
+    "method": "POST",
+    "path": "/promo-codes/validate",
+    "request": {
+      "code": "SAVE10",
+      "cart_id": "c1b2c3d4-0001-4000-8000-000000000011",
+      "cart_total_paise": 125000
+    },
+    "responses": {
+      "200": {
+        "is_valid": true,
+        "promo_code_id": "a1b2c3d4-0001-4000-8000-000000000001",
+        "code": "SAVE10",
+        "discount_type": "percent",
+        "discount_value": 10,
+        "discount_amount_paise": 12500,
+        "final_total_paise": 112500,
+        "message": "Promo code applied successfully."
+      }
+    }
+  },
+  "listNotifications": {
+    "method": "GET",
+    "path": "/notifications",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "user_id": "c3d4e5f6-a1b2-3456-cdef-012345678901",
+            "guest_email": null,
+            "type": "string",
+            "title": "Your order has been shipped",
+            "body": "Order #ORD-20240115-001 has been shipped and is on its way to you.",
+            "related_entity_type": "order",
+            "related_entity_id": "f7e8d9c0-b1a2-3456-7890-abcdef123456",
+            "is_read": false,
+            "created_at": "2024-01-15T10:30:00Z",
+            "read_at": null
+          },
+          {
+            "id": "b2c3d4e5-f6a7-8901-bcde-f01234567891",
+            "user_id": "c3d4e5f6-a1b2-3456-cdef-012345678901",
+            "guest_email": null,
+            "type": "string",
+            "title": "Return request approved",
+            "body": "Your return request for Order #ORD-20240110-005 has been approved.",
+            "related_entity_type": "return_request",
+            "related_entity_id": "e6f7a8b9-c0d1-2345-6789-abcdef012345",
+            "is_read": true,
+            "created_at": "2024-01-14T08:00:00Z",
+            "read_at": "2024-01-14T09:15:00Z",
+            "format": "date"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 2,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "getNotification": {
+    "method": "GET",
+    "path": "/notifications/{notificationId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "user_id": "c3d4e5f6-a1b2-3456-cdef-012345678901",
+        "guest_email": null,
+        "type": "string",
+        "title": "Your order has been shipped",
+        "body": "Order #ORD-20240115-001 has been shipped and is on its way to you. Estimated delivery: Jan 18, 2024.",
+        "related_entity_type": "order",
+        "related_entity_id": "f7e8d9c0-b1a2-3456-7890-abcdef123456",
+        "is_read": false,
+        "created_at": "2024-01-15T10:30:00Z",
+        "read_at": null
+      }
+    }
+  },
+  "markNotificationRead": {
+    "method": "POST",
+    "path": "/notifications/{notificationId}/read",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "user_id": "c3d4e5f6-a1b2-3456-cdef-012345678901",
+        "guest_email": null,
+        "type": "string",
+        "title": "Your order has been shipped",
+        "body": "Order #ORD-20240115-001 has been shipped and is on its way to you. Estimated delivery: Jan 18, 2024.",
+        "related_entity_type": "order",
+        "related_entity_id": "f7e8d9c0-b1a2-3456-7890-abcdef123456",
+        "is_read": true,
+        "created_at": "2024-01-15T10:30:00Z",
+        "read_at": "2024-01-15T11:05:00Z"
+      }
+    }
+  },
+  "markAllNotificationsRead": {
+    "method": "POST",
+    "path": "/notifications/read-all",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "All notifications marked as read",
+        "updated_count": 7
+      }
+    }
+  },
+  "getReports": {
+    "method": "GET",
+    "path": "/admin/reports",
+    "request": null,
+    "responses": {
+      "200": {
+        "period": {
+          "from": "2024-06-01",
+          "to": "2024-06-30"
+        },
+        "orders": {
+          "total": 1250,
+          "placed": 980,
+          "cancelled": 45,
+          "returned": 30,
+          "revenue_paise": 124500000
+        },
+        "payments": {
+          "total_collected_paise": 118275000,
+          "total_refunded_paise": 3200000,
+          "pending_paise": 6225000
+        },
+        "products": {
+          "total_active": 320,
+          "out_of_stock": 18
+        },
+        "users": {
+          "total_registered": 4500,
+          "new_this_period": 210
+        },
+        "top_selling_skus": [
+          {
+            "sku_id": "a1b2c3d4-0000-0000-0000-000000000001",
+            "sku_code": "TSHIRT-RED-L",
+            "units_sold": 340,
+            "revenue_paise": 5100000
+          }
+        ]
+      }
+    }
+  },
+  "listServiceablePinCodes": {
+    "method": "GET",
+    "path": "/admin/serviceable-pin-codes",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "b2c3d4e5-0000-0000-0000-000000000001",
+            "pin_code": "560001",
+            "city": "Bangalore",
+            "state": "Karnataka",
+            "is_active": true,
+            "created_at": "2024-01-10T08:00:00Z",
+            "updated_at": "2024-06-01T10:00:00Z"
+          },
+          {
+            "id": "b2c3d4e5-0000-0000-0000-000000000002",
+            "pin_code": "400001",
+            "city": "Mumbai",
+            "state": "Maharashtra",
+            "is_active": true,
+            "created_at": "2024-01-11T08:00:00Z",
+            "updated_at": "2024-06-01T10:00:00Z"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 150,
+          "total_pages": 8
+        }
+      }
+    }
+  },
+  "createServiceablePinCode": {
+    "method": "POST",
+    "path": "/admin/serviceable-pin-codes",
+    "request": {
+      "pin_code": "110001",
+      "city": "New Delhi",
+      "state": "Delhi",
+      "is_active": true
+    },
+    "responses": {
+      "201": {
+        "id": "c3d4e5f6-0000-0000-0000-000000000001",
+        "pin_code": "110001",
+        "city": "New Delhi",
+        "state": "Delhi",
+        "is_active": true,
+        "created_at": "2024-06-15T09:30:00Z",
+        "updated_at": "2024-06-15T09:30:00Z"
+      }
+    }
+  },
+  "updateServiceablePinCode": {
+    "method": "PUT",
+    "path": "/admin/serviceable-pin-codes/{pinCodeId}",
+    "request": {
+      "pin_code": "110001",
+      "city": "New Delhi",
+      "state": "Delhi",
+      "is_active": false
+    },
+    "responses": {
+      "200": {
+        "id": "c3d4e5f6-0000-0000-0000-000000000001",
+        "pin_code": "110001",
+        "city": "New Delhi",
+        "state": "Delhi",
+        "is_active": false,
+        "created_at": "2024-06-15T09:30:00Z",
+        "updated_at": "2024-06-20T14:00:00Z"
+      }
+    }
+  },
+  "deleteServiceablePinCode": {
+    "method": "DELETE",
+    "path": "/admin/serviceable-pin-codes/{pinCodeId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Serviceable PIN code deleted successfully."
+      }
+    }
+  },
+  "listRoles": {
+    "method": "GET",
+    "path": "/admin/roles",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "d4e5f6a7-0000-0000-0000-000000000001",
+            "name": "admin",
+            "description": "Full administrative access",
+            "created_at": "2024-01-01T00:00:00Z"
+          },
+          {
+            "id": "d4e5f6a7-0000-0000-0000-000000000002",
+            "name": "staff",
+            "description": "Operational staff with limited access",
+            "created_at": "2024-01-01T00:00:00Z"
+          },
+          {
+            "id": "d4e5f6a7-0000-0000-0000-000000000003",
+            "name": "customer",
+            "description": "Registered customer",
+            "created_at": "2024-01-01T00:00:00Z"
+          }
+        ],
+        "pagination": {
+          "page": 1,
+          "limit": 20,
+          "total": 3,
+          "total_pages": 1
+        }
+      }
+    }
+  },
+  "createRole": {
+    "method": "POST",
+    "path": "/admin/roles",
+    "request": {
+      "name": "warehouse_manager",
+      "description": "Manages warehouse operations and stock levels"
+    },
+    "responses": {
+      "201": {
+        "id": "e5f6a7b8-0000-0000-0000-000000000001",
+        "name": "warehouse_manager",
+        "description": "Manages warehouse operations and stock levels",
+        "created_at": "2024-06-15T10:00:00Z"
+      }
+    }
+  },
+  "getRole": {
+    "method": "GET",
+    "path": "/admin/roles/{roleId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "id": "d4e5f6a7-0000-0000-0000-000000000001",
+        "name": "admin",
+        "description": "Full administrative access",
+        "created_at": "2024-01-01T00:00:00Z",
+        "permissions": [
+          {
+            "id": "f6a7b8c9-0000-0000-0000-000000000001",
+            "name": "orders:read",
+            "description": "Read all orders"
+          },
+          {
+            "id": "f6a7b8c9-0000-0000-0000-000000000002",
+            "name": "orders:write",
+            "description": "Create and update orders"
+          },
+          {
+            "id": "f6a7b8c9-0000-0000-0000-000000000003",
+            "name": "users:manage",
+            "description": "Create, update, and deactivate users"
+          }
+        ]
+      }
+    }
+  },
+  "updateRole": {
+    "method": "PUT",
+    "path": "/admin/roles/{roleId}",
+    "request": {
+      "name": "inventory_manager",
+      "description": "Manages product inventory and stock levels"
+    },
+    "responses": {
+      "200": {
+        "id": "b2e3c4d5-e6f7-8901-bcde-f01234567890",
+        "name": "inventory_manager",
+        "description": "Manages product inventory and stock levels",
+        "created_at": "2024-01-15T10:00:00Z"
+      }
+    }
+  },
+  "deleteRole": {
+    "method": "DELETE",
+    "path": "/admin/roles/{roleId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Role deleted successfully"
+      }
+    }
+  },
+  "listRolePermissions": {
+    "method": "GET",
+    "path": "/admin/roles/{roleId}/permissions",
+    "request": null,
+    "responses": {
+      "200": [
+        {
+          "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "name": "products:read",
+          "description": "Allows reading product catalog data"
+        },
+        {
+          "id": "b2c3d4e5-f6a7-8901-bcde-f01234567891",
+          "name": "orders:manage",
+          "description": "Allows viewing and updating orders"
+        }
+      ]
+    }
+  },
+  "assignPermissionToRole": {
+    "method": "POST",
+    "path": "/admin/roles/{roleId}/permissions",
+    "request": {
+      "permission_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    },
+    "responses": {
+      "201": {
+        "role_id": "b2e3c4d5-e6f7-8901-bcde-f01234567890",
+        "permission_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      }
+    }
+  },
+  "removePermissionFromRole": {
+    "method": "DELETE",
+    "path": "/admin/roles/{roleId}/permissions/{permissionId}",
+    "request": null,
+    "responses": {
+      "200": {
+        "message": "Permission removed from role successfully"
+      }
+    }
+  },
+  "listPermissions": {
+    "method": "GET",
+    "path": "/admin/permissions",
+    "request": null,
+    "responses": {
+      "200": {
+        "data": [
+          {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "name": "products:read",
+            "description": "Allows reading product catalog data"
+          },
+          {
+            "id": "b2c3d4e5-f6a7-8901-bcde-f01234567891",
+            "name": "products:write",
+            "description": "Allows creating and updating products"
+          },
+          {
+            "id": "c3d4e5f6-a7b8-9012-cdef-012345678912",
+            "name": "orders:manage",
+            "description": "Allows viewing and updating orders"
+          },
+          {
+            "id": "d4e5f6a7-b8c9-0123-def0-123456789023",
+            "name": "users:read",
+            "description": "Allows viewing user accounts"
+          }
+        ],
+        "meta": {
+          "page": 1,
+          "limit": 50,
+          "total": 4,
+          "total_pages": 1
+        }
+      }
+    }
+  }
+}

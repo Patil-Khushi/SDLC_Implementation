@@ -1,0 +1,510 @@
+screen,ui_field,direction,api_endpoint,api_field
+Home,Search input,send,GET /search,data
+Home,Product name,receive,GET /products,data.name
+Home,Product brand,receive,GET /products,data.brand_id
+Home,Product price,receive,GET /products,data.base_price_paise
+Home,Product rating,receive,GET /products,data.average_rating
+Home,Product image,receive,GET /products,data.images
+Product Listing,Brand filter,send,GET /products,facets.brands
+Product Listing,Price range (Min),send,GET /products,facets.price_ranges
+Product Listing,Price range (Max),send,GET /products,facets.price_ranges
+Product Listing,Rating filter,send,GET /products,facets.ratings
+Product Listing,Brand filter options,receive,GET /products,facets.brands
+Product Listing,Price range options,receive,GET /products,facets.price_ranges
+Product Listing,Rating filter options,receive,GET /products,facets.ratings
+Product Listing,Product name,receive,GET /products,data.name
+Product Listing,Product brand,receive,GET /products,data.brand_id
+Product Listing,Product price,receive,GET /products,data.base_price_paise
+Product Listing,Product rating,receive,GET /products,data.average_rating
+Product Listing,Product image,receive,GET /products,data.images
+Product Listing,Total products count,receive,GET /products,pagination.total_items
+Product Listing By Category,Category name (page title),receive,GET /categories/{categoryId},name
+Product Listing By Category,Brand filter,send,GET /categories/{categoryId}/products,facets.brands
+Product Listing By Category,Price range Min,send,GET /categories/{categoryId}/products,facets.price_ranges
+Product Listing By Category,Price range Max,send,GET /categories/{categoryId}/products,facets.price_ranges
+Product Listing By Category,Customer rating filter,send,GET /categories/{categoryId}/products,facets.ratings
+Product Listing By Category,Brand filter options,receive,GET /categories/{categoryId}/products,facets.brands
+Product Listing By Category,Price range options,receive,GET /categories/{categoryId}/products,facets.price_ranges
+Product Listing By Category,Customer rating options,receive,GET /categories/{categoryId}/products,facets.ratings
+Product Listing By Category,Product name,receive,GET /categories/{categoryId}/products,data.name
+Product Listing By Category,Product brand,receive,GET /categories/{categoryId}/products,data.brand_id
+Product Listing By Category,Product price,receive,GET /categories/{categoryId}/products,data.base_price_paise
+Product Listing By Category,Product rating,receive,GET /categories/{categoryId}/products,data.average_rating
+Product Listing By Category,Product image,receive,GET /categories/{categoryId}/products,data.images
+Product Listing By Category,Total products count,receive,GET /categories/{categoryId}/products,pagination.total_items
+Search Results,Search query input,send,GET /search,data
+Search Results,Brand filter,send,GET /search,facets.brands
+Search Results,Price range filter,send,GET /search,facets.price_ranges
+Search Results,Customer rating filter,send,GET /search,facets.ratings
+Search Results,Total results count,receive,GET /search,pagination.total_items
+Search Results,Brand filter options,receive,GET /search,facets.brands
+Search Results,Price range options,receive,GET /search,facets.price_ranges
+Search Results,Rating filter options,receive,GET /search,facets.ratings
+Search Results,Product name,receive,GET /search,data.name
+Search Results,Product brand,receive,GET /search,data.brand_id
+Search Results,Product price,receive,GET /search,data.base_price_paise
+Search Results,Product rating,receive,GET /search,data.average_rating
+Search Results,Product image,receive,GET /search,data.images
+Search Results,Search suggest label,receive,GET /search/suggest,label
+Search Results,Search suggest type,receive,GET /search/suggest,type
+Search Results,Search suggest slug,receive,GET /search/suggest,slug
+Product Detail,Product name,receive,GET /products/{productId},name
+Product Detail,Brand,receive,GET /products/{productId},brand_id
+Product Detail,Product description,receive,GET /products/{productId},description
+Product Detail,Price,receive,GET /products/{productId},skus.price_paise
+Product Detail,Tax rate,receive,GET /products/{productId},tax_rate_pct
+Product Detail,Average rating,receive,GET /products/{productId},average_rating
+Product Detail,SKU code,receive,GET /products/{productId},skus.sku_code
+Product Detail,Size selector,receive,GET /products/{productId},skus.variant_attributes
+Product Detail,Colour selector,receive,GET /products/{productId},skus.variant_attributes
+Product Detail,Stock availability,receive,GET /products/{productId},skus.stock_qty
+Product Detail,Product image,receive,GET /products/{productId},images.url
+Product Detail,Image alt text,receive,GET /products/{productId},images.alt_text
+Product Detail,Return window,receive,GET /products/{productId},return_window_days
+Product Detail,Is returnable,receive,GET /products/{productId},is_returnable
+Product Detail,Specifications / Attributes,receive,GET /products/{productId},attributes
+Product Detail,Qty selector,send,POST /carts/{cartId}/items,quantity
+Product Detail,Add to cart (SKU),send,POST /carts/{cartId}/items,sku_id
+Cart,Product name,receive,GET /carts/{cartId},items.sku_id
+Cart,Item quantity,receive,GET /carts/{cartId},items.quantity
+Cart,Unit price,receive,GET /carts/{cartId},items.unit_price_paise
+Cart,Quantity stepper (update),send,PATCH /carts/{cartId}/items/{itemId},quantity
+Cart,Remove item,send,DELETE /carts/{cartId}/items/{itemId},message
+Cart,Promo code,send,POST /carts/{cartId}/promo,code
+Cart,Subtotal,receive,GET /checkout/review,subtotal_paise
+Cart,Discount,receive,GET /checkout/review,discount_paise
+Cart,Shipping,receive,GET /checkout/review,shipping_paise
+Cart,GST (18%),receive,GET /checkout/review,tax_paise
+Cart,Total,receive,GET /checkout/review,total_paise
+Cart,Free shipping threshold,receive,GET /checkout/review,free_shipping_threshold_paise
+Checkout Address,Use a saved address,receive,GET /users/me/addresses,id
+Checkout Address,Use a saved address,send,POST /checkout/address,address_id
+Checkout Address,Full name,send,POST /checkout/address,address.full_name
+Checkout Address,Address line 1,send,POST /checkout/address,address.line1
+Checkout Address,Address line 2,send,POST /checkout/address,address.line2
+Checkout Address,City,send,POST /checkout/address,address.city
+Checkout Address,State,send,POST /checkout/address,address.state
+Checkout Address,PIN code,send,POST /checkout/address,address.pin_code
+Checkout Address,Phone number,send,POST /checkout/address,address.phone
+Checkout Address,PIN code serviceability,receive,GET /serviceability,serviceable
+Checkout Address,PIN code serviceability message,receive,GET /serviceability,message
+Checkout Address,Subtotal,receive,GET /checkout/review,subtotal_paise
+Checkout Address,Shipping,receive,GET /checkout/review,shipping_paise
+Checkout Address,GST (18%),receive,GET /checkout/review,tax_paise
+Checkout Address,Total,receive,GET /checkout/review,total_paise
+Checkout Address,Order item product name,receive,GET /checkout/review,items.product_name
+Checkout Address,Order item quantity,receive,GET /checkout/review,items.quantity
+Checkout Address,Order item line total,receive,GET /checkout/review,items.line_total_paise
+Checkout Payment,Delivering to (address summary),receive,POST /checkout/address,full_name
+Checkout Payment,Delivering to (address line),receive,POST /checkout/address,line1
+Checkout Payment,Payment method,send,POST /checkout/place-order,payment_method
+Checkout Payment,Test scenario (simulate outcome),send,POST /payments/initiate,test_scenario
+Checkout Payment,Promo code,send,POST /carts/{cartId}/promo,code
+Checkout Payment,Order item product name,receive,GET /checkout/review,items.product_name
+Checkout Payment,Order item quantity,receive,GET /checkout/review,items.quantity
+Checkout Payment,Order item line total,receive,GET /checkout/review,items.line_total_paise
+Checkout Payment,Subtotal,receive,GET /checkout/review,subtotal_paise
+Checkout Payment,Discount,receive,GET /checkout/review,discount_paise
+Checkout Payment,Shipping,receive,GET /checkout/review,shipping_paise
+Checkout Payment,GST (18%),receive,GET /checkout/review,tax_paise
+Checkout Payment,Total (Pay button amount),receive,GET /checkout/review,total_paise
+Checkout Payment,Promo code applied (discount label),receive,GET /checkout/review,promo_code
+Checkout Payment,Cart ID (place order),send,POST /checkout/place-order,cart_id
+Checkout Review,Delivery address — Full name,receive,GET /checkout/review,delivery_address.full_name
+Checkout Review,Delivery address — Full name,receive,POST /checkout/address,full_name
+Checkout Review,Delivery address — Line 1,receive,POST /checkout/address,line1
+Checkout Review,Delivery address — City,receive,POST /checkout/address,city
+Checkout Review,Delivery address — State,receive,POST /checkout/address,state
+Checkout Review,Delivery address — PIN code,receive,POST /checkout/address,pin_code
+Checkout Review,Delivery address — Phone,receive,POST /checkout/address,phone
+Checkout Review,Order item — Product name,receive,GET /checkout/review,items.product_name
+Checkout Review,Order item — Variant attributes,receive,GET /checkout/review,items.variant_attributes
+Checkout Review,Order item — Quantity,receive,GET /checkout/review,items.quantity
+Checkout Review,Order item — Unit price,receive,GET /checkout/review,items.unit_price_paise
+Checkout Review,Order item — Line total,receive,GET /checkout/review,items.line_total_paise
+Checkout Review,Subtotal,receive,GET /checkout/review,subtotal_paise
+Checkout Review,Shipping,receive,GET /checkout/review,shipping_paise
+Checkout Review,GST (18%),receive,GET /checkout/review,tax_paise
+Checkout Review,Promo discount,receive,GET /checkout/review,discount_paise
+Checkout Review,Grand total,receive,GET /checkout/review,total_paise
+Checkout Review,Free shipping threshold,receive,GET /checkout/review,free_shipping_threshold_paise
+Checkout Review,Promo code input,send,POST /carts/{cartId}/promo,code
+Checkout Review,Applied promo code,receive,GET /checkout/review,promo_code
+Checkout Review,Cart ID (confirm order),send,POST /checkout/place-order,cart_id
+Checkout Confirmation,Order number,receive,POST /checkout/place-order,order_number
+Checkout Confirmation,Order status,receive,POST /checkout/place-order,status
+Checkout Confirmation,Order item — Product name,receive,GET /orders/{orderId},items.sku_snapshot
+Checkout Confirmation,Order item — Quantity,receive,GET /orders/{orderId},items.quantity
+Checkout Confirmation,Order item — Line total,receive,GET /orders/{orderId},items.line_total_paise
+Checkout Confirmation,Subtotal,receive,POST /checkout/place-order,subtotal_paise
+Checkout Confirmation,Shipping,receive,POST /checkout/place-order,shipping_paise
+Checkout Confirmation,Tax / VAT,receive,POST /checkout/place-order,tax_paise
+Checkout Confirmation,Total,receive,POST /checkout/place-order,total_paise
+Checkout Confirmation,Delivery address — Ship to,receive,POST /checkout/place-order,delivery_address_snapshot
+Checkout Confirmation,Guest register — Email,send,POST /auth/guest-register,email
+Checkout Confirmation,Guest register — Password,send,POST /auth/guest-register,password
+Checkout Confirmation,Guest register — Full name,send,POST /auth/guest-register,full_name
+Guest Post Checkout Register,Email address,send,POST /auth/guest-register,email
+Guest Post Checkout Register,First name / Last name,send,POST /auth/guest-register,full_name
+Guest Post Checkout Register,Create a password,send,POST /auth/guest-register,password
+Login,Email address,send,POST /auth/login,email
+Login,Password,send,POST /auth/login,password
+Register,First name,send,POST /auth/register,full_name
+Register,Last name,send,POST /auth/register,full_name
+Register,Email address,send,POST /auth/register,email
+Register,Password,send,POST /auth/register,password
+Forgot Password,Email address,send,POST /auth/forgot-password,email
+Reset Password,New password,send,POST /auth/reset-password,password
+Account Overview,Welcome name,receive,GET /users/me,full_name
+Account Overview,Total orders placed,receive,GET /orders,total_items
+Account Overview,Saved addresses count,receive,GET /users/me/addresses,id
+Account Overview,Unread notifications count,receive,GET /notifications,is_read
+Account Overview,Order number,receive,GET /orders,data.order_number
+Account Overview,Order status,receive,GET /orders/{orderId},status
+Account Overview,Order total,receive,GET /orders/{orderId},total_paise
+Account Overview,Order date,receive,GET /orders/{orderId},created_at
+Account Profile,Full name,receive,GET /users/me,full_name
+Account Profile,Email address,receive,GET /users/me,email
+Account Profile,Phone number,receive,GET /users/me,phone
+Account Profile,Account status,receive,GET /users/me,is_active
+Account Profile,Full name,send,PATCH /users/me,full_name
+Account Profile,Phone number,send,PATCH /users/me,phone
+Account Profile,Current password,send,POST /users/me/change-password,current_password
+Account Profile,New password,send,POST /users/me/change-password,new_password
+Account Addresses,Full name,receive,GET /users/me/addresses,full_name
+Account Addresses,Address line 1,receive,GET /users/me/addresses,line1
+Account Addresses,Address line 2,receive,GET /users/me/addresses,line2
+Account Addresses,City,receive,GET /users/me/addresses,city
+Account Addresses,State,receive,GET /users/me/addresses,state
+Account Addresses,PIN code,receive,GET /users/me/addresses,pin_code
+Account Addresses,Phone,receive,GET /users/me/addresses,phone
+Account Addresses,Default badge,receive,GET /users/me/addresses,is_default
+Account Addresses,Set as default,send,PUT /users/me/addresses/{addressId},is_default
+Account Addresses,Delete address,send,DELETE /users/me/addresses/{addressId},message
+Account Add Address,Full name,send,POST /users/me/addresses,full_name
+Account Add Address,Mobile number,send,POST /users/me/addresses,phone
+Account Add Address,Address line 1,send,POST /users/me/addresses,line1
+Account Add Address,Address line 2,send,POST /users/me/addresses,line2
+Account Add Address,City,send,POST /users/me/addresses,city
+Account Add Address,State,send,POST /users/me/addresses,state
+Account Add Address,PIN code,send,POST /users/me/addresses,pin_code
+Account Add Address,Country,send,POST /users/me/addresses,country
+Account Add Address,Set as default address,send,POST /users/me/addresses,is_default
+Account Add Address,PIN code serviceability,receive,GET /serviceability,serviceable
+Account Edit Address,First name / Last name,receive,GET /users/me/addresses/{addressId},full_name
+Account Edit Address,Phone number,receive,GET /users/me/addresses/{addressId},phone
+Account Edit Address,Address line 1,receive,GET /users/me/addresses/{addressId},line1
+Account Edit Address,Address line 2,receive,GET /users/me/addresses/{addressId},line2
+Account Edit Address,City,receive,GET /users/me/addresses/{addressId},city
+Account Edit Address,State,receive,GET /users/me/addresses/{addressId},state
+Account Edit Address,PIN code,receive,GET /users/me/addresses/{addressId},pin_code
+Account Edit Address,Country,receive,GET /users/me/addresses/{addressId},country
+Account Edit Address,Set as default address,receive,GET /users/me/addresses/{addressId},is_default
+Account Edit Address,First name / Last name,send,PUT /users/me/addresses/{addressId},full_name
+Account Edit Address,Phone number,send,PUT /users/me/addresses/{addressId},phone
+Account Edit Address,Address line 1,send,PUT /users/me/addresses/{addressId},line1
+Account Edit Address,Address line 2,send,PUT /users/me/addresses/{addressId},line2
+Account Edit Address,City,send,PUT /users/me/addresses/{addressId},city
+Account Edit Address,State,send,PUT /users/me/addresses/{addressId},state
+Account Edit Address,PIN code,send,PUT /users/me/addresses/{addressId},pin_code
+Account Edit Address,Country,send,PUT /users/me/addresses/{addressId},country
+Account Edit Address,Set as default address,send,PUT /users/me/addresses/{addressId},is_default
+Account Edit Address,Delete address,send,DELETE /users/me/addresses/{addressId},message
+Account Edit Address,PIN code serviceability,receive,GET /serviceability,serviceable
+Order History,Order number,receive,GET /orders,data.order_number
+Order History,Order number,receive,GET /orders/{orderId},order_number
+Order History,Placed on date,receive,GET /orders/{orderId},created_at
+Order History,Order status,receive,GET /orders/{orderId},status
+Order History,Total,receive,GET /orders/{orderId},total_paise
+Order History,Page,receive,GET /orders,page
+Order History,Total pages,receive,GET /orders,total_pages
+Order Detail,Order number,receive,GET /orders/{orderId},order_number
+Order Detail,Placed on date,receive,GET /orders/{orderId},created_at
+Order Detail,Order status badge,receive,GET /orders/{orderId},status
+Order Detail,Customer email,receive,GET /orders/{orderId},guest_email
+Order Detail,Timeline status,receive,GET /orders/{orderId}/timeline,status
+Order Detail,Timeline date,receive,GET /orders/{orderId}/timeline,created_at
+Order Detail,Timeline notes,receive,GET /orders/{orderId}/timeline,notes
+Order Detail,Tracking event,receive,GET /orders/{orderId}/tracking,tracking_event
+Order Detail,Tracking description,receive,GET /orders/{orderId}/tracking,description
+Order Detail,Tracking location,receive,GET /orders/{orderId}/tracking,location
+Order Detail,Tracking event date,receive,GET /orders/{orderId}/tracking,event_at
+Order Detail,Product name,receive,GET /orders/{orderId},items.sku_snapshot
+Order Detail,SKU,receive,GET /orders/{orderId},items.sku_id
+Order Detail,Qty,receive,GET /orders/{orderId},items.quantity
+Order Detail,Unit price,receive,GET /orders/{orderId},items.unit_price_paise
+Order Detail,Tax,receive,GET /orders/{orderId},items.tax_paise
+Order Detail,Line total,receive,GET /orders/{orderId},items.line_total_paise
+Order Detail,Subtotal,receive,GET /orders/{orderId},subtotal_paise
+Order Detail,Discount,receive,GET /orders/{orderId},discount_paise
+Order Detail,Promo code,receive,GET /orders/{orderId},promo_code_snapshot
+Order Detail,Shipping,receive,GET /orders/{orderId},shipping_paise
+Order Detail,Tax (GST),receive,GET /orders/{orderId},tax_paise
+Order Detail,Total paid,receive,GET /orders/{orderId},total_paise
+Order Detail,Delivery address name,receive,GET /orders/{orderId},delivery_address_snapshot
+Order Detail,Return request reason,receive,GET /return-requests/{returnRequestId},reason
+Order Detail,Return request status,receive,GET /return-requests/{returnRequestId},status
+Order Detail,Return request date,receive,GET /return-requests/{returnRequestId},created_at
+Order Detail,Approve/Reject return,send,POST /return-requests/{returnRequestId}/review,action
+Order Detail,Cancel order,send,POST /orders/{orderId}/cancel,reason
+Order Detail,Advance status,send,POST /orders/{orderId}/advance,status
+Order Detail,Refund ID,receive,GET /orders/{orderId}/refunds,id
+Order Detail,Refund reason,receive,GET /orders/{orderId}/refunds,reason
+Order Detail,Refund amount,receive,GET /orders/{orderId}/refunds,amount_paise
+Order Detail,Refund status,receive,GET /orders/{orderId}/refunds,status
+Order Detail,Refund date,receive,GET /orders/{orderId}/refunds,processed_at
+Return Request,Order item selection,send,POST /orders/{orderId}/return-requests,order_item_id
+Return Request,Reason for return,send,POST /orders/{orderId}/return-requests,reason
+Return Request,Item returnable status,receive,GET /orders/{orderId},items.is_returnable
+Return Request,Return window days,receive,GET /orders/{orderId},items.return_window_days
+Return Request,Item name,receive,GET /orders/{orderId},items.sku_snapshot
+Return Request,Item quantity,receive,GET /orders/{orderId},items.quantity
+Return Request,Item unit price,receive,GET /orders/{orderId},items.unit_price_paise
+Return Request,Order number,receive,GET /orders/{orderId},order_number
+Return Request,Order placed date,receive,GET /orders/{orderId},created_at
+Notifications,Notification title,receive,GET /notifications,title
+Notifications,Notification body,receive,GET /notifications,body
+Notifications,Notification date,receive,GET /notifications,created_at
+Notifications,Read status,receive,GET /notifications,is_read
+Notifications,Mark all as read,send,POST /notifications/read-all,message
+Notifications,Mark notification as read,send,POST /notifications/{notificationId}/read,is_read
+Notifications,Related entity type,receive,GET /notifications,related_entity_type
+Admin Dashboard,Total Orders,receive,GET /admin/reports,total_orders
+Admin Dashboard,Gross Revenue,receive,GET /admin/reports,total_revenue_paise
+Admin Dashboard,Pending Returns,receive,GET /return-requests,status
+Admin Dashboard,Active Promo Codes,receive,GET /promo-codes,is_active
+Admin Dashboard,Recent order number,receive,GET /orders,data.order_number
+Admin Dashboard,Recent order number,receive,GET /orders/{orderId},order_number
+Admin Dashboard,Recent order customer,receive,GET /orders/{orderId},guest_email
+Admin Dashboard,Recent order status,receive,GET /orders/{orderId},status
+Admin Dashboard,Recent order amount,receive,GET /orders/{orderId},total_paise
+Admin Dashboard,Recent order date,receive,GET /orders/{orderId},created_at
+Admin Dashboard,Total refunds,receive,GET /admin/reports,total_refunds_paise
+Admin Dashboard,Orders by status,receive,GET /admin/reports,orders_by_status
+Admin Dashboard,Top products,receive,GET /admin/reports,top_products
+Admin Order List,Order #,receive,GET /orders,data.order_number
+Admin Order List,Order #,receive,GET /orders/{orderId},order_number
+Admin Order List,Customer,receive,GET /orders/{orderId},guest_email
+Admin Order List,Status,receive,GET /orders/{orderId},status
+Admin Order List,Total,receive,GET /orders/{orderId},total_paise
+Admin Order List,Date,receive,GET /orders/{orderId},created_at
+Admin Order List,Advance Status (Ship/Deliver/Pack),send,POST /orders/{orderId}/advance,status
+Admin Order List,Advance Status notes,send,POST /orders/{orderId}/advance,notes
+Admin Order Detail,Order #,receive,GET /orders/{orderId},order_number
+Admin Order Detail,Order Status,receive,GET /orders/{orderId},status
+Admin Order Detail,Placed on (date),receive,GET /orders/{orderId},created_at
+Admin Order Detail,Customer,receive,GET /orders/{orderId},guest_email
+Admin Order Detail,Timeline status,receive,GET /orders/{orderId}/timeline,status
+Admin Order Detail,Timeline date,receive,GET /orders/{orderId}/timeline,created_at
+Admin Order Detail,Product (order item),receive,GET /orders/{orderId},items.sku_snapshot
+Admin Order Detail,SKU,receive,GET /orders/{orderId},items.sku_id
+Admin Order Detail,Qty,receive,GET /orders/{orderId},items.quantity
+Admin Order Detail,Unit Price,receive,GET /orders/{orderId},items.unit_price_paise
+Admin Order Detail,Tax,receive,GET /orders/{orderId},items.tax_paise
+Admin Order Detail,Total (line),receive,GET /orders/{orderId},items.line_total_paise
+Admin Order Detail,Tracking event description,receive,GET /orders/{orderId}/tracking,description
+Admin Order Detail,Tracking location,receive,GET /orders/{orderId}/tracking,location
+Admin Order Detail,Tracking event time,receive,GET /orders/{orderId}/tracking,event_at
+Admin Order Detail,Return request reason,receive,GET /return-requests/{returnRequestId},reason
+Admin Order Detail,Return request status,receive,GET /return-requests/{returnRequestId},status
+Admin Order Detail,Approve/Reject return,send,POST /return-requests/{returnRequestId}/review,action
+Admin Order Detail,Refund ID,receive,GET /orders/{orderId}/refunds,id
+Admin Order Detail,Refund reason,receive,GET /orders/{orderId}/refunds,reason
+Admin Order Detail,Refund amount,receive,GET /orders/{orderId}/refunds,amount_paise
+Admin Order Detail,Refund status,receive,GET /orders/{orderId}/refunds,status
+Admin Order Detail,Refund date,receive,GET /orders/{orderId}/refunds,processed_at
+Admin Order Detail,Subtotal,receive,GET /orders/{orderId},subtotal_paise
+Admin Order Detail,Discount,receive,GET /orders/{orderId},discount_paise
+Admin Order Detail,Promo code,receive,GET /orders/{orderId},promo_code_snapshot
+Admin Order Detail,Shipping,receive,GET /orders/{orderId},shipping_paise
+Admin Order Detail,Tax (GST),receive,GET /orders/{orderId},tax_paise
+Admin Order Detail,Total,receive,GET /orders/{orderId},total_paise
+Admin Order Detail,Delivery address full name,receive,GET /orders/{orderId},delivery_address_snapshot
+Admin Order Detail,PIN code,receive,GET /orders/{orderId},pin_code
+Admin Order Detail,Advance Status,send,POST /orders/{orderId}/advance,status
+Admin Order Detail,Advance Status notes,send,POST /orders/{orderId}/advance,notes
+Admin Order Detail,Cancel Order reason,send,POST /orders/{orderId}/cancel,reason
+Admin Catalogue Products,Product name,receive,GET /products,data.name
+Admin Catalogue Products,SKU code,receive,GET /products,data.skus
+Admin Catalogue Products,Brand,receive,GET /products,data.brand_id
+Admin Catalogue Products,Category,receive,GET /products,data.category_id
+Admin Catalogue Products,Price (incl. tax),receive,GET /products,data.base_price_paise
+Admin Catalogue Products,Rating,receive,GET /products,data.average_rating
+Admin Catalogue Products,Status,receive,GET /products,data.is_active
+Admin Catalogue Products,Product image,receive,GET /products,data.images
+Admin Catalogue Products,Deactivate/Activate product,send,DELETE /products/{productId},message
+Admin Create Product,Product name,send,POST /products,name
+Admin Create Product,Slug,send,POST /products,slug
+Admin Create Product,Description,send,POST /products,description
+Admin Create Product,Base price (₹),send,POST /products,base_price_paise
+Admin Create Product,Tax rate (%),send,POST /products,tax_rate_pct
+Admin Create Product,Is returnable,send,POST /products,is_returnable
+Admin Create Product,Return window (days),send,POST /products,return_window_days
+Admin Create Product,Attributes,send,POST /products,attributes
+Admin Create Product,Image URL,send,POST /products/{productId}/images,url
+Admin Create Product,Alt text,send,POST /products/{productId}/images,alt_text
+Admin Create Product,Sort order,send,POST /products/{productId}/images,sort_order
+Admin Create Product,Brand,send,POST /products,brand_id
+Admin Create Product,Category,send,POST /products,category_id
+Admin Create Product,Brand options,receive,GET /brands/{brandId},name
+Admin Create Product,Category options,receive,GET /categories,name
+Admin Create Product,SKU code,send,POST /products/{productId}/skus,sku_code
+Admin Create Product,SKU variant attributes,send,POST /products/{productId}/skus,variant_attributes
+Admin Create Product,SKU price,send,POST /products/{productId}/skus,price_paise
+Admin Create Product,SKU stock quantity,send,POST /products/{productId}/skus,stock_qty
+Admin Create Product,SKU active,send,POST /products/{productId}/skus,is_active
+Admin Create Product,Product active status,send,POST /products,is_active
+Admin Edit Product,Product name,receive,GET /products/{productId},name
+Admin Edit Product,Product name,send,PUT /products/{productId},name
+Admin Edit Product,Brand,receive,GET /products/{productId},brand_id
+Admin Edit Product,Brand,send,PUT /products/{productId},brand_id
+Admin Edit Product,Category,receive,GET /products/{productId},category_id
+Admin Edit Product,Category,send,PUT /products/{productId},category_id
+Admin Edit Product,Short description,receive,GET /products/{productId},description
+Admin Edit Product,Short description,send,PUT /products/{productId},description
+Admin Edit Product,Full description,receive,GET /products/{productId},description
+Admin Edit Product,Full description,send,PUT /products/{productId},description
+Admin Edit Product,Base price (₹),receive,GET /products/{productId},base_price_paise
+Admin Edit Product,Base price (₹),send,PUT /products/{productId},base_price_paise
+Admin Edit Product,Tax class,receive,GET /products/{productId},tax_rate_pct
+Admin Edit Product,Tax class,send,PUT /products/{productId},tax_rate_pct
+Admin Edit Product,Active status,receive,GET /products/{productId},is_active
+Admin Edit Product,Active status,send,PUT /products/{productId},is_active
+Admin Edit Product,Attributes,receive,GET /products/{productId},attributes
+Admin Edit Product,Attributes,send,PUT /products/{productId},attributes
+Admin Edit Product,Is returnable,receive,GET /products/{productId},is_returnable
+Admin Edit Product,Is returnable,send,PUT /products/{productId},is_returnable
+Admin Edit Product,Return window (days),receive,GET /products/{productId},return_window_days
+Admin Edit Product,Return window (days),send,PUT /products/{productId},return_window_days
+Admin Edit Product,SKU code,receive,GET /products/{productId}/skus,sku_code
+Admin Edit Product,SKU code,send,PUT /products/{productId}/skus/{skuId},sku_code
+Admin Edit Product,SKU variant,receive,GET /products/{productId}/skus,variant_attributes
+Admin Edit Product,SKU variant,send,PUT /products/{productId}/skus/{skuId},variant_attributes
+Admin Edit Product,SKU price adjustment,receive,GET /products/{productId}/skus,price_paise
+Admin Edit Product,SKU price adjustment,send,PUT /products/{productId}/skus/{skuId},price_paise
+Admin Edit Product,Stock,receive,GET /products/{productId}/skus,stock_qty
+Admin Edit Product,Stock,send,PUT /products/{productId}/skus/{skuId},stock_qty
+Admin Edit Product,Reserved (read-only),receive,GET /products/{productId}/skus,reserved_qty
+Admin Edit Product,SKU active,receive,GET /products/{productId}/skus,is_active
+Admin Edit Product,SKU active,send,PUT /products/{productId}/skus/{skuId},is_active
+Admin Edit Product,Product image URL,receive,GET /products/{productId}/images,url
+Admin Edit Product,Product image alt text,receive,GET /products/{productId}/images,alt_text
+Admin Edit Product,Product image sort order,receive,GET /products/{productId}/images,sort_order
+Admin Edit Product,Slug,receive,GET /products/{productId},slug
+Admin Edit Product,Slug,send,PUT /products/{productId},slug
+Admin Edit Product,Brand options,receive,GET /brands/{brandId},name
+Admin Edit Product,Category options,receive,GET /categories,name
+Admin Catalogue Categories,Name,receive,GET /categories,name
+Admin Catalogue Categories,Slug,receive,GET /categories,slug
+Admin Catalogue Categories,Parent Category,receive,GET /categories,parent_id
+Admin Catalogue Categories,Status,receive,GET /categories,is_active
+Admin Catalogue Categories,Created,receive,GET /categories,created_at
+Admin Create Category,Category name,send,POST /categories,name
+Admin Create Category,Slug,send,POST /categories,slug
+Admin Create Category,Description,send,POST /categories,description
+Admin Create Category,Parent category,send,POST /categories,parent_id
+Admin Create Category,Active,send,POST /categories,is_active
+Admin Create Category,Parent category,receive,GET /categories,name
+Admin Edit Category,Category name,receive,GET /categories/{categoryId},name
+Admin Edit Category,Slug,receive,GET /categories/{categoryId},slug
+Admin Edit Category,Description,receive,GET /categories/{categoryId},description
+Admin Edit Category,Parent category,receive,GET /categories/{categoryId},parent_id
+Admin Edit Category,Status,receive,GET /categories/{categoryId},is_active
+Admin Edit Category,Created,receive,GET /categories/{categoryId},created_at
+Admin Edit Category,Last modified,receive,GET /categories/{categoryId},updated_at
+Admin Edit Category,Category name,send,PUT /categories/{categoryId},name
+Admin Edit Category,Slug,send,PUT /categories/{categoryId},slug
+Admin Edit Category,Description,send,PUT /categories/{categoryId},description
+Admin Edit Category,Parent category,send,PUT /categories/{categoryId},parent_id
+Admin Edit Category,Status,send,PUT /categories/{categoryId},is_active
+Admin Edit Category,Delete category,send,DELETE /categories/{categoryId},message
+Admin Catalogue Brands,Brand Name,receive,GET /brands,data.name
+Admin Catalogue Brands,Brand Name,receive,GET /brands/{brandId},name
+Admin Catalogue Brands,Slug,receive,GET /brands/{brandId},slug
+Admin Catalogue Brands,Created,receive,GET /brands/{brandId},created_at
+Admin Create Brand,Brand name,send,POST /brands,name
+Admin Create Brand,Slug,send,POST /brands,slug
+Admin Edit Brand,Brand name,receive,GET /brands/{brandId},name
+Admin Edit Brand,Slug,receive,GET /brands/{brandId},slug
+Admin Edit Brand,Created,receive,GET /brands/{brandId},created_at
+Admin Edit Brand,Last Updated,receive,GET /brands/{brandId},updated_at
+Admin Edit Brand,Brand name,send,PUT /brands/{brandId},name
+Admin Edit Brand,Slug,send,PUT /brands/{brandId},slug
+Admin Promotions,Code,receive,GET /promo-codes,code
+Admin Promotions,Discount Type,receive,GET /promo-codes,discount_type
+Admin Promotions,Value,receive,GET /promo-codes,discount_value
+Admin Promotions,Min. Order,receive,GET /promo-codes,minimum_order_paise
+Admin Promotions,Uses / Limit,receive,GET /promo-codes,used_count
+Admin Promotions,Uses / Limit,receive,GET /promo-codes,max_uses
+Admin Promotions,Expiry Date,receive,GET /promo-codes,expires_at
+Admin Promotions,Status,receive,GET /promo-codes,is_active
+Admin Create Promo Code,Promo code,send,POST /promo-codes,code
+Admin Create Promo Code,Discount type,send,POST /promo-codes,discount_type
+Admin Create Promo Code,Discount value,send,POST /promo-codes,discount_value
+Admin Create Promo Code,Minimum order value,send,POST /promo-codes,minimum_order_paise
+Admin Create Promo Code,Max total uses,send,POST /promo-codes,max_uses
+Admin Create Promo Code,Expiry date,send,POST /promo-codes,expires_at
+Admin Create Promo Code,Active,send,POST /promo-codes,is_active
+Admin Edit Promo Code,Promo code,receive,GET /promo-codes/{promoCodeId},code
+Admin Edit Promo Code,Discount type,receive,GET /promo-codes/{promoCodeId},discount_type
+Admin Edit Promo Code,Discount value,receive,GET /promo-codes/{promoCodeId},discount_value
+Admin Edit Promo Code,Minimum order value,receive,GET /promo-codes/{promoCodeId},minimum_order_paise
+Admin Edit Promo Code,Max uses,receive,GET /promo-codes/{promoCodeId},max_uses
+Admin Edit Promo Code,Used count,receive,GET /promo-codes/{promoCodeId},used_count
+Admin Edit Promo Code,Expiry date,receive,GET /promo-codes/{promoCodeId},expires_at
+Admin Edit Promo Code,Active status,receive,GET /promo-codes/{promoCodeId},is_active
+Admin Edit Promo Code,Promo code,send,PUT /promo-codes/{promoCodeId},code
+Admin Edit Promo Code,Discount type,send,PUT /promo-codes/{promoCodeId},discount_type
+Admin Edit Promo Code,Discount value,send,PUT /promo-codes/{promoCodeId},discount_value
+Admin Edit Promo Code,Minimum order value,send,PUT /promo-codes/{promoCodeId},minimum_order_paise
+Admin Edit Promo Code,Max uses,send,PUT /promo-codes/{promoCodeId},max_uses
+Admin Edit Promo Code,Expiry date,send,PUT /promo-codes/{promoCodeId},expires_at
+Admin Edit Promo Code,Active status,send,PUT /promo-codes/{promoCodeId},is_active
+Admin Returns,Return ID,receive,GET /return-requests,id
+Admin Returns,Order #,receive,GET /return-requests,order_id
+Admin Returns,Reason,receive,GET /return-requests,reason
+Admin Returns,Status,receive,GET /return-requests,status
+Admin Returns,Requested At,receive,GET /return-requests,created_at
+Admin Return Detail,Return Request ID,receive,GET /return-requests/{returnRequestId},id
+Admin Return Detail,Order Number,receive,GET /return-requests/{returnRequestId},order_id
+Admin Return Detail,Customer Name,receive,GET /return-requests/{returnRequestId},requested_by
+Admin Return Detail,Submitted On,receive,GET /return-requests/{returnRequestId},created_at
+Admin Return Detail,Status badge,receive,GET /return-requests/{returnRequestId},status
+Admin Return Detail,Return Reason,receive,GET /return-requests/{returnRequestId},reason
+Admin Return Detail,Item quantity,receive,GET /orders/{orderId},items.quantity
+Admin Return Detail,Unit price,receive,GET /orders/{orderId},items.unit_price_paise
+Admin Return Detail,Return window expires,receive,GET /orders/{orderId},items.return_window_days
+Admin Return Detail,Review notes,send,POST /return-requests/{returnRequestId}/review,rejection_reason
+Admin Return Detail,Approve & Refund,send,POST /return-requests/{returnRequestId}/review,action
+Admin Return Detail,Reject Request,send,POST /return-requests/{returnRequestId}/review,action
+Admin Return Detail,Reviewed by,receive,GET /return-requests/{returnRequestId},reviewed_by
+Admin Return Detail,Reviewed at,receive,GET /return-requests/{returnRequestId},reviewed_at
+Admin Return Detail,Rejection reason,receive,GET /return-requests/{returnRequestId},rejection_reason
+Admin Reports,From date,send,GET /admin/reports,from
+Admin Reports,To date,send,GET /admin/reports,to
+Admin Reports,Total Orders,receive,GET /admin/reports,total_orders
+Admin Reports,Gross Revenue,receive,GET /admin/reports,total_revenue_paise
+Admin Reports,Total Refunds,receive,GET /admin/reports,total_refunds_paise
+Admin Reports,Order status breakdown,receive,GET /admin/reports,orders_by_status
+Admin Reports,Top products,receive,GET /admin/reports,top_products
+Admin Reports,Promo code,receive,GET /promo-codes,code
+Admin Reports,Times used,receive,GET /promo-codes,used_count
+Admin Reports,Promo status,receive,GET /promo-codes,is_active
+Admin User List,Total users,receive,GET /users,total_items
+Admin User List,Full name,receive,GET /users/{userId},full_name
+Admin User List,Email,receive,GET /users/{userId},email
+Admin User List,Phone,receive,GET /users/{userId},phone
+Admin User List,Roles,receive,GET /users/{userId},role_id
+Admin User List,Status,receive,GET /users/{userId},is_active
+Admin User List,Registered at,receive,GET /users/{userId},created_at
+Admin User Detail,Full name,receive,GET /users/{userId},full_name
+Admin User Detail,Email,receive,GET /users/{userId},email
+Admin User Detail,Phone,receive,GET /users/{userId},phone
+Admin User Detail,User ID,receive,GET /users/{userId},id
+Admin User Detail,Account status badge,receive,GET /users/{userId},is_active
+Admin User Detail,Created,receive,GET /users/{userId},created_at
+Admin User Detail,Last updated,receive,GET /users/{userId},updated_at
+Admin User Detail,Current roles,receive,GET /users/{userId},role_id
+Admin User Detail,Full name,send,PATCH /users/{userId},full_name
+Admin User Detail,Phone,send,PATCH /users/{userId},phone
+Admin User Detail,Deactivate account,send,DELETE /users/{userId},message

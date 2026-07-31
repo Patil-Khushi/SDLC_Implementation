@@ -1,0 +1,78 @@
+{
+  "stack_summary": "React.js + Vite + Tailwind CSS frontend · Node.js + Express REST API · MySQL 8 (primary) + PostgreSQL (notifications) · Elasticsearch (search/autocomplete) · JWT + bcrypt auth · RBAC in-app admin",
+  "categories": [
+    {
+      "name": "Project Structure & Naming",
+      "rules": [
+        "Name React component files and component functions in PascalCase (e.g. ProductCard.jsx); all other JS/TS files in camelCase; directories and non-component assets in kebab-case.",
+        "Organise the frontend as: src/components/, src/pages/, src/hooks/, src/services/, src/store/, src/utils/, src/tokens/; no logic outside these top-level folders.",
+        "Organise the backend as: src/routes/, src/controllers/, src/services/, src/models/, src/middleware/, src/config/; every HTTP route delegates to a controller, every controller delegates to a service.",
+        "Export exactly one component per file; co-locate its CSS module or Tailwind variants in the same directory only if component-scoped styles are needed."
+      ]
+    },
+    {
+      "name": "Components & UI",
+      "rules": [
+        "Write all React components as named arrow-function components with explicit prop destructuring; no class components.",
+        "Consume all design values (colour, spacing, typography, border-radius) exclusively from Tailwind design tokens defined in tailwind.config.js — never hard-code hex values, px numbers, or rem literals inline.",
+        "Use Tailwind utility classes directly in JSX; never write raw CSS or inline style objects except for programmatically computed values that cannot be expressed as tokens.",
+        "Every interactive element (button, input, link, select) must have an accessible label (aria-label, aria-labelledby, or visible <label>); colour contrast must meet WCAG AA (4.5:1 text, 3:1 large text).",
+        "All keyboard-navigable flows (browse → PDP → cart → checkout) must be operable with Tab/Enter/Escape and include visible focus rings — never suppress outline without a replacement.",
+        "Use React.lazy + Suspense for route-level code splitting on all page components; never import page components eagerly in the router.",
+        "Poll the notification REST endpoint with a fixed interval using a custom useNotifications hook; never open a WebSocket or SSE connection for notifications in this release."
+      ]
+    },
+    {
+      "name": "State, Data Fetching & Routing",
+      "rules": [
+        "Use React Query (TanStack Query) for all server-state fetching, caching, and mutations; never store fetched server data in useState or Redux.",
+        "Reserve Zustand (or React Context) for client-only global state (cart, auth session, UI flags); keep stores small and single-responsibility.",
+        "Define all API base URLs, polling intervals, and environment flags in .env files accessed only via a central src/config/env.js — never reference import.meta.env directly in components.",
+        "Use React Router v6 <Routes> with route-level auth guards implemented as wrapper components checking JWT claims; never duplicate RBAC checks inside individual components."
+      ]
+    },
+    {
+      "name": "API & Backend",
+      "rules": [
+        "Every Express route file registers only route definitions; all business logic lives in the corresponding service file; controllers handle request/response mapping only.",
+        "Use parameterised queries via mysql2 prepared statements or an ORM query-builder for every MySQL query — never concatenate user input into SQL strings.",
+        "Use the pg parameterised query interface for every PostgreSQL (notifications) query — same rule as MySQL.",
+        "All Elasticsearch queries must be built as structured query DSL objects — never interpolate user input into query strings.",
+        "Expose a single PaymentService interface (charge, refund, getStatus) that wraps the mock provider; swap the implementation via dependency injection through config — no payment-provider SDK calls outside this service.",
+        "Never log, store, or transmit raw card data anywhere in the codebase; the payment service accepts only tokenised references.",
+        "Apply rate-limiting middleware (express-rate-limit) specifically to POST /auth/login and POST /auth/password-reset before any other middleware on those routes.",
+        "Authenticate all protected routes with a validateJwt middleware that verifies signature and expiry; authorise staff/admin routes with a requireRole(roleName) middleware applied at the router level.",
+        "Password-reset tokens must be stored hashed, tied to an expiry timestamp, and invalidated immediately after first use.",
+        "Hash all passwords with bcrypt at a minimum cost factor of 12 before persistence; never store or log the plaintext password at any point."
+      ]
+    },
+    {
+      "name": "Error Handling, Logging & Security",
+      "rules": [
+        "All Express errors must flow to a single global error-handling middleware (err, req, res, next) that maps domain errors to HTTP status codes and returns a consistent JSON envelope { success, error: { code, message } }.",
+        "Use a structured logger (pino) for all server-side logging; log at info/warn/error levels with a request-id field — never use console.log in production code paths.",
+        "Never log JWT secrets, passwords, raw card data, or PII (email, phone) at any log level.",
+        "Set HTTP security headers via helmet on every Express response; enable CORS only for the configured frontend origin.",
+        "JWT access tokens must include role claims, be short-lived (≤15 min), and be refreshed via a separate httpOnly-cookie refresh-token endpoint."
+      ]
+    },
+    {
+      "name": "Business Logic & Calculations",
+      "rules": [
+        "Perform all monetary arithmetic (GST, discounts, free-shipping threshold) in integer paise on the server; never use floating-point for currency calculations.",
+        "Apply the free-shipping waiver (orders ≥ ₹799) and GST calculation exclusively inside the OrderService — never in the frontend or controller layer.",
+        "Enforce SKU-level stock checks atomically inside a MySQL transaction before confirming any order; never confirm an order without a successful payment callback."
+      ]
+    }
+  ],
+  "headline_rules": [
+    "Consume all design values exclusively from Tailwind design tokens in tailwind.config.js — never hard-code hex, px, or rem literals.",
+    "Use parameterised queries (mysql2 / pg) for every database query — never concatenate user input into SQL strings.",
+    "Never log, store, or transmit raw card data; the PaymentService accepts only tokenised references and is the sole payment-provider abstraction.",
+    "Apply express-rate-limit to POST /auth/login and POST /auth/password-reset; authenticate all protected routes with validateJwt; authorise staff routes with requireRole middleware.",
+    "Hash passwords with bcrypt (cost ≥ 12); never store or log plaintext passwords at any point.",
+    "All business logic lives in service files; controllers handle only request/response mapping; routes contain only route definitions.",
+    "Use React Query for all server state; never store fetched data in useState or Redux.",
+    "Perform all monetary arithmetic in integer paise on the server; apply GST and free-shipping logic exclusively inside OrderService."
+  ]
+}

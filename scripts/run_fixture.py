@@ -36,6 +36,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # so `app.*` imports work
 
+from app.config.settings import get_settings  # noqa: E402
 from app.graph.graph import workflow  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_executor  # noqa: E402
@@ -182,6 +183,24 @@ def main() -> None:
              "(matches backend-loginUser + frontend-login). Cheap way to test one feature.",
     )
     parser.add_argument(
+        "--resume-from", default=None,
+        help="LEGACY workaround for a crash with no usable checkpoint (e.g. before --resume "
+             "existed, or a corrupt checkpoint DB): drop every work item BEFORE this exact id "
+             "from the plan, so already-committed items aren't regenerated. Point "
+             "--project/--out-dir at the SAME existing product repo. Combine with --only to also "
+             "cap how far it goes. Prefer --resume when the crash happened AFTER this fix — it's "
+             "exact (resumes the graph itself, not just the work-item loop) and free of re-work.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="resume a run that crashed mid-graph, from its last completed node (via the "
+             "graph's SQLite checkpointer, keyed by --project as thread_id) — no re-read of the "
+             "pack, no rebuilt work_items, no redone LLM calls. Only works for a crash that "
+             "happened with this checkpointer in place; a run whose checkpoint predates it (or "
+             "used --dry-run/FakeExecutor, whose in-memory files don't survive a restart) has "
+             "nothing to resume from — use --resume-from instead.",
+    )
+    parser.add_argument(
         "--out-dir", type=Path, default=None,
         help=f"--real: base dir for the product repo (<out-dir>/<project>), OUTSIDE the repo "
              f"(default: {_DEFAULT_OUT_DIR}); --dry-run: dump in-memory files here",
@@ -200,9 +219,48 @@ def main() -> None:
     # configured the root logger yet — without this, Python suppresses INFO lines.
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    if args.resume:
+        _resume(args, mode=mode, make_public=make_public)
+        return
+
+    # Every fresh (non --resume) invocation below calls new_state() + workflow.invoke(initial,
+    # config) with thread_id == --project. new_state() only sets ~20 core fields and leaves
+    # downstream ones (security_verdict, unit_tests, repo_url, review_report, ...) UNSET; LangGraph
+    # merges an invoke() input onto the EXISTING checkpoint for that thread_id rather than clearing
+    # it, so any field new_state() omits silently keeps its value from a PRIOR run under this same
+    # --project name. Concretely: a stale security_verdict makes route_after_refactoring (which
+    # tells its two callers apart ONLY via "security_verdict" in state) skip the entire
+    # Debugging<->Unit-Test<->Documentation phase on the very first pass. This bites --resume-from
+    # too (it also calls new_state()+invoke fresh) — the only safe paths once a checkpoint exists
+    # are --resume (continues the SAME state) or a --project name that has never run before.
+    _existing_thread_state = workflow.get_state(
+        {"configurable": {"thread_id": args.project}}
+    ).values
+    if _existing_thread_state:
+        print(
+            f"A checkpoint already exists for --project {args.project!r} "
+            f"(workflow_status={_existing_thread_state.get('workflow_status')!r}). Starting a "
+            f"FRESH run under this same name would silently inherit stale fields (security_verdict, "
+            f"unit_tests, repo_url, ...) from that prior run and can skip whole phases of the "
+            f"pipeline without any error.\n\n"
+            f"Pick one:\n"
+            f"  --resume                    continue that run from its last completed node\n"
+            f"  --project <a-new-name>       start a genuinely fresh run\n\n"
+            f"Aborting — no work done."
+        )
+        return
+
     pack_dir = args.pack_dir.resolve()
     design_package = _load_pack(pack_dir)
     work_items = build_plan(pack_dir)
+    if args.resume_from:
+        ids = [w.id for w in work_items]
+        if args.resume_from not in ids:
+            print(f"--resume-from {args.resume_from!r} matches no work item id.\nAvailable ids: {', '.join(ids)}")
+            return
+        work_items = work_items[ids.index(args.resume_from):]
+        print(f"--resume-from {args.resume_from!r}: skipping {ids.index(args.resume_from)} already-completed "
+              f"item(s) ahead of it.")
     if args.only:
         needle = args.only.lower()
         work_items = [w for w in work_items if needle in w.id.lower()]
@@ -266,6 +324,61 @@ def main() -> None:
     workflow.invoke(initial, config)
     state = workflow.get_state(config).values  # runs to completion (auto-commit, no HITL)
 
+    _report(state, args, executor, push_enabled=push_enabled, git_remote=git_remote)
+
+
+def _resume(args: argparse.Namespace, *, mode: str, make_public: bool) -> None:
+    """Continue a run that crashed mid-graph, from its last completed node.
+
+    Needs no pack/work_items — the checkpointed ``WorkflowState`` already has them; only the
+    executor is process-local and must be reconnected to the SAME product repo before the graph
+    can proceed (``workflow.invoke(None, config)`` resumes exactly where the last completed
+    checkpoint left off — see ``app/graph/graph.py``'s SQLite checkpointer).
+    """
+    run_id = args.project
+    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 1000}
+    existing = workflow.get_state(config).values
+    if not existing:
+        print(
+            f"--resume: no checkpoint found for project {run_id!r} (thread_id={run_id!r}) in "
+            f"{get_settings().checkpoint_db_path!r}. Either this project never ran with the "
+            f"SQLite checkpointer, or the run already finished and its checkpoint was read once "
+            f"already. Nothing to resume — start a fresh run instead."
+        )
+        return
+    print(
+        f"--resume: found checkpoint for {run_id!r} (workflow_status="
+        f"{existing.get('workflow_status')!r}, {len(existing.get('generated_code', []))} file(s) "
+        f"on record) — reconnecting the executor and continuing from the last completed node."
+    )
+
+    executor: Executor
+    if mode == "dry-run":
+        print("--resume: --dry-run keeps files in-memory only (FakeExecutor) — nothing to "
+              "reconnect to across a process restart. Re-run without --resume instead.")
+        return
+    if mode == "sandbox":
+        executor = asyncio.run(MCPExecutor.connect(args.sandbox_url))
+    else:
+        out_base = (args.out_dir or _DEFAULT_OUT_DIR).resolve()
+        executor = LocalDiskExecutor(out_base, private=not make_public)
+        print(f"Reconnected to product repo at {out_base / args.project}")
+    set_executor(executor)
+
+    workflow.invoke(None, config)
+    state = workflow.get_state(config).values
+
+    _report(
+        state, args, executor,
+        push_enabled=bool(existing.get("push_enabled")), git_remote=existing.get("git_remote") or "",
+    )
+
+
+def _report(
+    state: dict[str, Any], args: argparse.Namespace, executor: Executor, *,
+    push_enabled: bool, git_remote: str,
+) -> None:
+    """Shared tail: print the run's outcome, dump in-memory files (dry-run), and report publish status."""
     print("\n--- generation_summary ---")
     print(state.get("generation_summary", "(empty)"))
     print("--- workflow_status:", state.get("workflow_status"), "---")

@@ -51,11 +51,37 @@ from app.integrations.executor import CheckResult, CommitResult, Executor, RunRe
 _NPM = shutil.which("npm") or "npm"
 _NPX = shutil.which("npx") or "npx"
 
+# Hard cap on captured command output. Real incident: a project-wide `npm test` across 4000+
+# tests (verbose reporter + full stack traces for ~140 failing suites) produced 7.5M characters
+# of stderr; that then went STRAIGHT into the Debugging agent's fix prompt unbounded and the LLM
+# call failed outright ("prompt is too long: 3080868 tokens > 1000000 maximum") — the whole
+# repair round wasted, not just degraded. This is a safety net independent of any one config fix
+# (e.g. jest's `verbose` setting): keeps a chunk of the HEAD (the detail a repair agent reads
+# first) plus the TAIL (where test runners conventionally print the summary line), rather than a
+# naive head-only truncation that would silently drop the "N failed, M passed" summary too.
+_OUTPUT_CAP = 40_000
+_HEAD_KEEP = 32_000
+_TAIL_KEEP = 6_000
+
+
+def _cap(text: str) -> str:
+    if len(text) <= _OUTPUT_CAP:
+        return text
+    dropped = len(text) - _HEAD_KEEP - _TAIL_KEEP
+    return (
+        text[:_HEAD_KEEP]
+        + f"\n\n... [truncated {dropped} chars — output was {len(text)} chars total] ...\n\n"
+        + text[-_TAIL_KEEP:]
+    )
+
 
 def _global_git_identity() -> tuple[str, str]:
     """The developer's global git identity (user.name, user.email), or ('','') if unset."""
     def _g(key: str) -> str:
-        r = subprocess.run(["git", "config", "--global", key], capture_output=True, text=True)
+        r = subprocess.run(
+            ["git", "config", "--global", key],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
         return r.stdout.strip() if r.returncode == 0 else ""
     return _g("user.name"), _g("user.email")
 
@@ -97,9 +123,10 @@ class LocalDiskExecutor(Executor):
         workdir.mkdir(parents=True, exist_ok=True)
         try:
             proc = subprocess.run(
-                list(cmd), cwd=str(workdir), capture_output=True, text=True, timeout=timeout or 120, env=env
+                list(cmd), cwd=str(workdir), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout or 120, env=env,
             )
-            return RunResult(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+            return RunResult(stdout=_cap(proc.stdout), stderr=_cap(proc.stderr), exit_code=proc.returncode)
         except subprocess.TimeoutExpired:
             return RunResult(stdout="", stderr="[timed out]", exit_code=124, timed_out=True)
         except FileNotFoundError as exc:
