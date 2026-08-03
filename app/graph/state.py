@@ -70,6 +70,12 @@ class WorkflowState(TypedDict, total=False):
     # The failure count the debug/test loop last observed, used to decide whether a round made
     # progress. -1 = "no round has been measured yet" (a real count can legitimately be 0).
     debug_last_failure_count: int
+    # Which check ("compile/build" | "test" | "unknown") debug_last_failure_count was measured
+    # from. A lower count only counts as progress when this round's check_name matches — comparing
+    # counts ACROSS kinds compares different units (a compile failure is always reported as a bare
+    # "1"), so a test suite regressing from "30 failing" to a broken build would otherwise read as
+    # "1 < 30 -> progress" and wrongly reset the stall counter. "" = nothing measured yet.
+    debug_last_failure_kind: str
     # TOTAL debugging rounds this run, regardless of progress — the absolute backstop against an
     # oscillating loop that keeps resetting debug_attempt forever (debugging.DEBUG_ROUNDS_CEILING).
     debug_rounds: int
@@ -113,11 +119,14 @@ class WorkflowState(TypedDict, total=False):
     refactoring_report: str        # Refactoring: the Markdown report content
     refactoring_report_path: str   # Refactoring: where the report .md was saved (reports/…)
     # Relative imports the deterministic reconcile pass could not resolve against the generated
-    # file set (app/services/wiring.py::find_unresolved_imports). Report-only — deliberately NOT
-    # auto-fixed, because "create the missing module" vs "rename the importer" is a judgement call.
-    # Passed into the Debugging agent's prompt so it starts from the full list instead of
-    # rediscovering them one build error at a time.
-    unresolved_imports: list[str]
+    # file set (app/services/wiring.py::find_unresolved_imports), as plain dicts (see
+    # UnresolvedImport.to_dict()) — not pre-rendered strings, so the Debugging agent can both
+    # render them into its prompt AND prune an entry once a later round resolves it (see
+    # app/agents/debugging.py::_prune_unresolved). Report-only — deliberately NOT auto-fixed,
+    # because "create the missing module" vs "rename the importer" is a judgement call. Passed into
+    # the Debugging agent's prompt so it starts from the full list instead of rediscovering them one
+    # build error at a time.
+    unresolved_imports: list[dict[str, Any]]
     unit_tests: list[str]                  # workspace-relative paths of test files written
     debugging_report: str        # Debugging: the Markdown report content (what each round changed)
     debugging_report_path: str   # Debugging: where the report .md was saved (reports/…)
@@ -180,6 +189,7 @@ def new_state(
         "repair_attempt": 0,
         "debug_attempt": 0,
         "debug_last_failure_count": -1,  # -1 = nothing measured yet (0 is a legitimate count)
+        "debug_last_failure_kind": "",
         "debug_rounds": 0,
         "debug_result": None,
         "generation_summary": "",

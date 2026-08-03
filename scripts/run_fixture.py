@@ -183,22 +183,13 @@ def main() -> None:
              "(matches backend-loginUser + frontend-login). Cheap way to test one feature.",
     )
     parser.add_argument(
-        "--resume-from", default=None,
-        help="LEGACY workaround for a crash with no usable checkpoint (e.g. before --resume "
-             "existed, or a corrupt checkpoint DB): drop every work item BEFORE this exact id "
-             "from the plan, so already-committed items aren't regenerated. Point "
-             "--project/--out-dir at the SAME existing product repo. Combine with --only to also "
-             "cap how far it goes. Prefer --resume when the crash happened AFTER this fix — it's "
-             "exact (resumes the graph itself, not just the work-item loop) and free of re-work.",
-    )
-    parser.add_argument(
         "--resume", action="store_true",
         help="resume a run that crashed mid-graph, from its last completed node (via the "
              "graph's SQLite checkpointer, keyed by --project as thread_id) — no re-read of the "
              "pack, no rebuilt work_items, no redone LLM calls. Only works for a crash that "
              "happened with this checkpointer in place; a run whose checkpoint predates it (or "
              "used --dry-run/FakeExecutor, whose in-memory files don't survive a restart) has "
-             "nothing to resume from — use --resume-from instead.",
+             "nothing to resume from — start a fresh run under a new --project name instead.",
     )
     parser.add_argument(
         "--out-dir", type=Path, default=None,
@@ -230,9 +221,9 @@ def main() -> None:
     # it, so any field new_state() omits silently keeps its value from a PRIOR run under this same
     # --project name. Concretely: a stale security_verdict makes route_after_refactoring (which
     # tells its two callers apart ONLY via "security_verdict" in state) skip the entire
-    # Debugging<->Unit-Test<->Documentation phase on the very first pass. This bites --resume-from
-    # too (it also calls new_state()+invoke fresh) — the only safe paths once a checkpoint exists
-    # are --resume (continues the SAME state) or a --project name that has never run before.
+    # Debugging<->Unit-Test<->Documentation phase on the very first pass. The only safe paths once
+    # a checkpoint exists are --resume (continues the SAME state) or a --project name that has
+    # never run before.
     _existing_thread_state = workflow.get_state(
         {"configurable": {"thread_id": args.project}}
     ).values
@@ -253,14 +244,6 @@ def main() -> None:
     pack_dir = args.pack_dir.resolve()
     design_package = _load_pack(pack_dir)
     work_items = build_plan(pack_dir)
-    if args.resume_from:
-        ids = [w.id for w in work_items]
-        if args.resume_from not in ids:
-            print(f"--resume-from {args.resume_from!r} matches no work item id.\nAvailable ids: {', '.join(ids)}")
-            return
-        work_items = work_items[ids.index(args.resume_from):]
-        print(f"--resume-from {args.resume_from!r}: skipping {ids.index(args.resume_from)} already-completed "
-              f"item(s) ahead of it.")
     if args.only:
         needle = args.only.lower()
         work_items = [w for w in work_items if needle in w.id.lower()]

@@ -33,6 +33,7 @@ import json
 import posixpath
 import re
 from dataclasses import dataclass
+from typing import Any
 
 _ROUTER_RE = re.compile(r"\.(routes|router)\.(js|ts|mjs|cjs)$", re.IGNORECASE)
 _SOURCE_EXT_RE = re.compile(r"\.(js|ts|mjs|cjs)$", re.IGNORECASE)
@@ -610,6 +611,17 @@ class UnresolvedImport:
         hint = f" (did you mean {', '.join(self.candidates)}?)" if self.candidates else ""
         return f"{self.importer} imports '{self.specifier}' -> no such module {self.target}{hint}"
 
+    def to_dict(self) -> dict[str, Any]:
+        """Plain-dict form for storage in ``WorkflowState.unresolved_imports`` — a TypedDict that
+        flows through the LangGraph checkpointer, which is not obliged to round-trip an arbitrary
+        dataclass. ``candidates`` becomes a list (not a tuple) for the same reason."""
+        return {
+            "importer": self.importer,
+            "specifier": self.specifier,
+            "target": self.target,
+            "candidates": list(self.candidates),
+        }
+
 
 def _basename_matches(target: str, files_by_stem: dict[str, list[str]]) -> tuple[str, ...]:
     """Existing files whose basename-stem equals the missing module's last segment (case-insensitive
@@ -658,6 +670,20 @@ def find_unresolved_imports(files: dict[str, str]) -> list[UnresolvedImport]:
                 candidates=_basename_matches(target, files_by_stem),
             )
     return [found[k] for k in sorted(found)]
+
+
+def target_resolves(target: str, paths: "set[str] | list[str]") -> bool:
+    """True if ``target`` (an :class:`UnresolvedImport`'s ``target`` field) now resolves against
+    ``paths`` — a plain path collection, normalized here exactly like :func:`find_unresolved_imports`
+    normalizes its own file set.
+
+    Lets a caller that only has a growing list of paths (not full file contents — e.g. the
+    Debugging agent's ``generated_code``) cheaply re-check a single finding after a round writes a
+    new file, without re-scanning every generated file's imports (see
+    ``app.agents.debugging._prune_unresolved``).
+    """
+    normalized = {_norm(p) for p in paths}
+    return _resolve_module(_norm(target), normalized) is not None
 
 
 def reconcile_wiring(files: dict[str, str]) -> dict[str, str]:

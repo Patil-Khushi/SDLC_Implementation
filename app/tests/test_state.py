@@ -7,7 +7,7 @@ ALL_FIELDS = {
     "project_id", "run_id", "attempt", "design_package", "repo_url", "branch", "commit_sha",
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
     "codegen_ok", "gate_result", "repair_attempt", "debug_attempt", "debug_last_failure_count",
-    "debug_rounds", "debug_result", "tests_ok",
+    "debug_last_failure_kind", "debug_rounds", "debug_result", "tests_ok",
     "test_result", "generation_summary", "generation_metrics",
     "push_enabled", "git_remote", "git_token",
     "review_report", "review_report_path", "review_findings_path", "refactored_code",
@@ -22,7 +22,8 @@ ALL_FIELDS = {
 INITIALIZED_FIELDS = {
     "project_id", "run_id", "attempt", "design_package",
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
-    "gate_result", "repair_attempt", "debug_attempt", "debug_last_failure_count", "debug_rounds",
+    "gate_result", "repair_attempt", "debug_attempt", "debug_last_failure_count",
+    "debug_last_failure_kind", "debug_rounds",
     "debug_result", "generation_summary",
     "generation_metrics",
     "push_enabled", "git_remote", "git_token", "security_loop_attempt", "workflow_status",

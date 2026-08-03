@@ -38,6 +38,7 @@ from app.config.settings import get_settings
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.services.llm_gateway import LLMGateway
+from app.services.wiring import UnresolvedImport, target_resolves
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,66 @@ DEBUG_MAX_ITERS = 16
 #: termination, not to bound normal work.
 DEBUG_ROUNDS_CEILING = 40
 
+#: Ceiling on how many unresolved-import findings get listed in one prompt. The list is only ever
+#: pruned by THIS agent fixing an entry (see ``_prune_unresolved``), so an unusually large finding
+#: set would otherwise inject an unbounded, ever-growing block into every round's prompt.
+_MAX_UNRESOLVED_IN_PROMPT = 50
+
+
+def _render_unresolved(item: dict[str, Any]) -> str:
+    """Render one ``WorkflowState.unresolved_imports`` entry (a plain dict) via
+    ``UnresolvedImport.as_note()`` — the single source of truth for that note's wording — rather
+    than re-implementing the format string here."""
+    return UnresolvedImport(
+        importer=str(item.get("importer", "")),
+        specifier=str(item.get("specifier", "")),
+        target=str(item.get("target", "")),
+        candidates=tuple(item.get("candidates") or ()),
+    ).as_note()
+
+
+def _prune_unresolved(
+    unresolved: list[dict[str, Any]],
+    *,
+    project_dir: str,
+    generated_code: list[str],
+    fixes: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Drop an unresolved-import finding once THIS round plausibly resolved it, so the next round
+    isn't handed a fix-this instruction for an import that's already fixed.
+
+    Two repair shapes, matching the two the reconcile pass itself documents (wiring.py):
+      - "create the missing module": the finding's ``target`` now resolves against the current
+        ``generated_code`` path set (the round wrote the missing file, or a PRIOR round did and
+        nothing has pruned it yet).
+      - "rename the importer": the round rewrote the importer, and the specifier text is no longer
+        present in what it wrote.
+
+    Conservative both ways: an entry is kept unless one of these is a clean hit, so a partial or
+    failed fix simply resurfaces next round rather than being silently dropped.
+    """
+    prefix = f"{project_dir}/"
+    existing = {p[len(prefix):] if p.startswith(prefix) else p for p in generated_code}
+    rewritten = {entry["path"]: entry["content"] for entry in fixes}
+
+    kept: list[dict[str, Any]] = []
+    for item in unresolved:
+        target = str(item.get("target", ""))
+        if target_resolves(target, existing):
+            continue  # the missing module now exists
+        importer = str(item.get("importer", ""))
+        # `rewritten` keys are exactly the paths the model returned, which may not share the
+        # reconcile pass's project-relative prefix convention byte-for-byte — match by suffix so
+        # a minor path-form difference doesn't defeat the check.
+        new_content = next(
+            (c for p, c in rewritten.items() if p == importer or importer.endswith(p) or p.endswith(importer)),
+            None,
+        )
+        if new_content is not None and str(item.get("specifier", "")) not in new_content:
+            continue  # importer was rewritten and no longer imports the missing specifier
+        kept.append(item)
+    return kept
+
 
 def _failure_count(state: WorkflowState) -> int:
     """How many things are currently failing — the progress signal for the debug/test loop.
@@ -92,8 +153,10 @@ def _failure_count(state: WorkflowState) -> int:
     parses — coarse (usually 1), but still monotonic enough to distinguish "fixed it" from "didn't",
     which is all the caller needs.
 
-    Returns a LARGE sentinel rather than 0 when there is a failure it cannot quantify, so an
-    unparseable failure is never mistaken for progress.
+    A count from THIS function is only ever compared against a PREVIOUS count of the SAME check
+    kind (see ``execute``'s kind-gating) — comparing a quantified test-failure count against the
+    coarse "1" a compile failure falls back to would misread a regression (test -> compile break)
+    as dramatic progress, since both numbers come from unrelated scales.
     """
     result = state.get("debug_result")
     if not (result and not result.get("passed", True)):
@@ -106,9 +169,11 @@ def _failure_count(state: WorkflowState) -> int:
         f"{c.get('stdout', '')}\n{c.get('stderr', '')}" for c in checks if not c.get("passed", True)
     )
     # Most specific first: the individual-test count is a finer-grained progress signal than the
-    # suite count (fixing one assertion inside a still-failing suite is real progress).
-    for pattern in (r"Tests:\s+(\d+)\s+failed", r"Test Suites:\s+(\d+)\s+failed", r"(\d+)\s+failed"):
-        match = re.search(pattern, blob)
+    # suite count (fixing one assertion inside a still-failing suite is real progress). Anchored to
+    # line start (MULTILINE) so a bare "N failed" doesn't latch onto an unrelated number quoted
+    # inside a stack trace or a snapshot diff — jest/pytest both print their summary as its own line.
+    for pattern in (r"Tests:\s+(\d+)\s+failed", r"Test Suites:\s+(\d+)\s+failed", r"^\s*(\d+)\s+failed"):
+        match = re.search(pattern, blob, re.MULTILINE)
         if match:
             return int(match.group(1))
 
@@ -129,27 +194,6 @@ class DebuggingAgent(BaseAgent):
         return self._executor if self._executor is not None else get_executor()
 
     def execute(self, state: WorkflowState) -> WorkflowState:
-        # LOCAL, PROGRESS-SENSITIVE debug counter (NOT the same as repair_attempt or the
-        # orchestrator's attempt). Measured against the failure count the PREVIOUS round left
-        # behind: a round that reduced it resets the stall counter, a round that did not (or made
-        # things worse, or wrote nothing at all) advances it toward the cap. See the module
-        # docstring for why a flat per-entry counter was wrong here.
-        failures_now = _failure_count(state)
-        failures_before = int(state.get("debug_last_failure_count", -1))
-        made_progress = failures_before < 0 or failures_now < failures_before
-        state["debug_attempt"] = 0 if made_progress else int(state.get("debug_attempt", 0)) + 1
-        state["debug_last_failure_count"] = failures_now
-        state["debug_rounds"] = int(state.get("debug_rounds", 0)) + 1
-        logger.info(
-            "[debugging] run=%s | round %s: %s failing (was %s) — %s, stall counter now %s",
-            state.get("run_id") or "-",
-            state["debug_rounds"],
-            failures_now,
-            "n/a" if failures_before < 0 else failures_before,
-            "progress" if made_progress else "NO progress",
-            state["debug_attempt"],
-        )
-
         executor = self._resolve_executor()
         # The debug path is entered only on a post-commit check failure: propose corrected file
         # content for the failing check's stderr. debug_result is always fresh (debug_check_node
@@ -158,10 +202,41 @@ class DebuggingAgent(BaseAgent):
         check_name, stderr, stdout = _current_failure(state)
         manifest = list(state.get("generated_code", []))
 
-        system = self._load_prompt("debugging")
-        prompt = self._build_prompt(
-            check_name, stderr, stdout, manifest, list(state.get("unresolved_imports", []))
+        # LOCAL, PROGRESS-SENSITIVE debug counter (NOT the same as repair_attempt or the
+        # orchestrator's attempt). Measured against the failure count the PREVIOUS round left
+        # behind: a round that reduced it resets the stall counter, a round that did not (or made
+        # things worse, or wrote nothing at all) advances it toward the cap. See the module
+        # docstring for why a flat per-entry counter was wrong here.
+        #
+        # KIND-GATED: a lower count only counts as progress when this round's check_name matches
+        # the PREVIOUS round's — comparing counts across kinds compares different units (a compile
+        # failure is always reported as a bare "1"), so a test suite regressing from "30 failing"
+        # to a broken build would otherwise read as "1 < 30 -> progress" and wrongly reset the
+        # stall counter right when the loop actually got worse. DEBUG_ROUNDS_CEILING still bounds
+        # the case where the kind keeps flip-flopping (kind-gating alone can't terminate that).
+        failures_now = _failure_count(state)
+        failures_before = int(state.get("debug_last_failure_count", -1))
+        kind_before = state.get("debug_last_failure_kind") or ""
+        made_progress = failures_before < 0 or (check_name == kind_before and failures_now < failures_before)
+        state["debug_attempt"] = 0 if made_progress else int(state.get("debug_attempt", 0)) + 1
+        state["debug_last_failure_count"] = failures_now
+        state["debug_last_failure_kind"] = check_name
+        state["debug_rounds"] = int(state.get("debug_rounds", 0)) + 1
+        logger.info(
+            "[debugging] run=%s | round %s: %s failing [%s] (was %s%s) — %s, stall counter now %s",
+            state.get("run_id") or "-",
+            state["debug_rounds"],
+            failures_now,
+            check_name,
+            "n/a" if failures_before < 0 else failures_before,
+            "" if failures_before < 0 else f" [{kind_before}]",
+            "progress" if made_progress else "NO progress",
+            state["debug_attempt"],
         )
+
+        system = self._load_prompt("debugging")
+        unresolved = list(state.get("unresolved_imports", []))
+        prompt = self._build_prompt(check_name, stderr, stdout, manifest, unresolved)
         # Tools are bound to the model inside the gateway; the model may inspect/install/diff.
         # Own iteration budget, not the gateway's generic default — see DEBUG_MAX_ITERS.
         raw = self.llm.complete_with_tools(
@@ -190,6 +265,14 @@ class DebuggingAgent(BaseAgent):
                 "debugging: no valid fix parsed for run %s (attempt %s) — wrote nothing",
                 state.get("run_id"),
                 state.get("debug_attempt"),
+            )
+        if unresolved:
+            # Re-check the reconcile pass's findings against what THIS round changed, so a later
+            # round isn't handed the same "fix this" list for an import that was already fixed —
+            # see _prune_unresolved for exactly what counts as resolved.
+            state["unresolved_imports"] = _prune_unresolved(
+                unresolved, project_dir=_project_dir(state),
+                generated_code=state.get("generated_code", []), fixes=fixes or [],
             )
         self._record_round(
             state,
@@ -276,7 +359,7 @@ class DebuggingAgent(BaseAgent):
         stderr: str,
         stdout: str,
         manifest: list[str],
-        unresolved_imports: list[str] | None = None,
+        unresolved_imports: list[dict[str, Any]] | None = None,
     ) -> str:
         """Point the model at the failure + what exists, and let it pull content on demand.
 
@@ -291,15 +374,23 @@ class DebuggingAgent(BaseAgent):
         failing assertions/stack traces to stdout, with stderr carrying only warnings or nothing at
         all — stderr alone can leave the model with no real signal to act on.
 
-        ``unresolved_imports`` (from the deterministic reconcile pass) is included because a
-        bundler reports only the FIRST unresolvable import and then stops: fixing it just reveals
-        the next one, so N broken imports cost N build-fail/fix rounds. Handing over the whole
-        pre-computed list lets one round fix all of them.
+        ``unresolved_imports`` (plain dicts from ``WorkflowState`` — see
+        ``UnresolvedImport.to_dict()``) is included because a bundler reports only the FIRST
+        unresolvable import and then stops: fixing it just reveals the next one, so N broken
+        imports cost N build-fail/fix rounds. Handing over the whole pre-computed list lets one
+        round fix all of them. Capped at ``_MAX_UNRESOLVED_IN_PROMPT`` entries — the list is
+        state that only ever grows within a run (nothing prunes an entry except this agent fixing
+        it), and an uncapped one is the same unbounded-prompt hazard ``scripts/local_executor.py``
+        caps for captured command output.
         """
         files_list = "\n".join(f"- {path}" for path in manifest) or "(none on record)"
         unresolved_block = ""
         if unresolved_imports:
-            listed = "\n".join(f"- {note}" for note in unresolved_imports)
+            shown = unresolved_imports[:_MAX_UNRESOLVED_IN_PROMPT]
+            listed = "\n".join(f"- {_render_unresolved(item)}" for item in shown)
+            overflow = len(unresolved_imports) - len(shown)
+            if overflow > 0:
+                listed += f"\n- ... and {overflow} more (fix these first; the rest resurface next round)"
             unresolved_block = (
                 f"\nA deterministic pre-pass found {len(unresolved_imports)} relative import(s) that "
                 "resolve to NO generated file. The check above may only be reporting the first one; "

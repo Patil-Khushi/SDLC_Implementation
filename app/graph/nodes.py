@@ -621,8 +621,12 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
     # renaming the importer, and choosing between them is a judgement call that belongs to the LLM
     # debugging agent. Surfacing them here means that agent is handed the list up front instead of
     # rediscovering them one crash at a time from test stack traces.
+    #
+    # Scanned over ``{**files, **changed}`` (the wiring fixer's OWN output), not the pre-fix
+    # ``files`` — the router fixer above can un-comment a require it just wired in, and analyzing
+    # the pre-fix set would miss whatever import that newly-live line introduces.
     try:
-        unresolved = find_unresolved_imports(files)
+        unresolved = find_unresolved_imports({**files, **changed})
     except Exception:  # noqa: BLE001 - an analysis bug must never crash a finished plan
         logger.exception("unresolved-import analysis failed for run %s", state.get("run_id"))
         unresolved = []
@@ -632,14 +636,15 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
             state.get("run_id") or "-",
             len(unresolved),
         )
-        notes = [item.as_note() for item in unresolved]
-        # Stored on state (not just logged) so DebuggingAgent._build_prompt can hand the agent the
-        # WHOLE list at once. Without this the agent only ever sees the single import the build
-        # happened to trip over first, and rediscovers the rest one failed round at a time.
-        state["unresolved_imports"] = notes
+        # Stored as plain dicts (not the dataclass, not pre-rendered strings) so the Debugging
+        # agent can both RENDER them (UnresolvedImport.as_note()) and PRUNE them once a later round
+        # resolves one — see app.agents.debugging._prune_unresolved. Without a structured form the
+        # agent could only ever hand back the identical note text, with no way to tell "still
+        # broken" from "fixed two rounds ago".
+        state["unresolved_imports"] = [item.to_dict() for item in unresolved]
         state["generation_summary"] = (state.get("generation_summary") or "") + (
             f"[reconcile] {len(unresolved)} unresolved import(s) (not auto-fixed):\n"
-            + "".join(f"    - {note}\n" for note in notes)
+            + "".join(f"    - {item.as_note()}\n" for item in unresolved)
         )
 
     if not changed:
