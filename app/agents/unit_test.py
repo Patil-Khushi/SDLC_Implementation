@@ -48,10 +48,11 @@ from app.services.llm_gateway import LLMGateway
 logger = logging.getLogger(__name__)
 
 #: Char budget for the assembled ``files_block`` (ALL readable sources concatenated), mirroring
-#: scripts/local_executor.py's ``_cap`` (same order of magnitude as its ``_OUTPUT_CAP``). Applied
-#: to the WHOLE block, not per file — inlining is this agent's only option (no tools to fetch
-#: content on demand), so an uncapped block on a large work item's already-generated files can
-#: blow well past the model's context budget silently.
+#: ``app.integrations.executor.cap_output`` (same order of magnitude as its ``OUTPUT_CAP``) — a
+#: separate, smaller-scoped cap of our own rather than a direct reuse, since this bounds a PROMPT's
+#: inlined source, not captured subprocess output. Applied to the WHOLE block, not per file —
+#: inlining is this agent's only option (no tools to fetch content on demand), so an uncapped block
+#: on a large work item's already-generated files can blow well past the model's context silently.
 _PROMPT_SOURCE_CAP = 40_000
 _PROMPT_HEAD_KEEP = 32_000
 _PROMPT_TAIL_KEEP = 6_000
@@ -107,8 +108,9 @@ def _runner_fact_line(runner: str) -> str:
 
 def _cap_files_block(text: str) -> str:
     """Head+tail-preserved truncation for the assembled source block — mirrors
-    ``scripts/local_executor.py``'s ``_cap`` so a truncation marker and the trailing content both
-    survive, rather than a naive head-only cut that silently drops whatever sits at the end."""
+    ``app.integrations.executor.cap_output``'s shape so a truncation marker and the trailing
+    content both survive, rather than a naive head-only cut that silently drops whatever sits at
+    the end."""
     if len(text) <= _PROMPT_SOURCE_CAP:
         return text
     dropped = len(text) - _PROMPT_HEAD_KEEP - _PROMPT_TAIL_KEEP
