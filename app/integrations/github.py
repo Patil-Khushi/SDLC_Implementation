@@ -14,16 +14,74 @@ Design notes:
 - ``http_request`` is injectable so tests exercise this without a live GitHub token or network.
 - Never raises — a GitHub API failure degrades to ``PRResult(ok=False, error=...)`` so a flaky
   API/network blip doesn't crash a run that otherwise passed Security.
+
+Credential resolution (why more than one token):
+    Opening a PR needs WRITE access to the product repo — but the product repo is created and
+    pushed by the Executor via the ``gh`` CLI (``gh repo create`` / ``gh auth setup-git``), which
+    authenticates as whoever is logged into ``gh``. That is frequently a DIFFERENT identity from
+    ``$GITHUB_PAT``. When it is, the PAT has read-only access to a repo it does not own and
+    ``POST /pulls`` fails 403 — the run finished green but silently produced no PR (observed live:
+    PAT identity ``Patil-Khushi`` = ``pull`` only vs. repo owner ``Gaurav-Patil-1695`` = ``push``).
+    So every distinct available credential is tried in turn — run token, configured PAT, then the
+    ``gh`` CLI's own token — and only permission-shaped failures (401/403/404) advance to the next
+    one. A real validation error (422 "No commits between …") is reported as-is, never retried.
 """
 
 from __future__ import annotations
 
+import logging
+import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from app.config.settings import get_settings
+
+logger = logging.getLogger(__name__)
+
+#: HTTP statuses that mean "this credential cannot do this", not "this request was wrong" — the
+#: only ones worth re-attempting with a different token. 401 bad/expired, 403 no write access,
+#: 404 repo not visible to this identity (GitHub hides private/foreign repos behind 404).
+_CREDENTIAL_STATUSES = (401, 403, 404)
+
+#: …and the status that does NOT look like a permission failure but is one. Verified live against a
+#: read-only PAT on someone else's repo: ``POST /pulls`` answers **422 "Validation Failed"** with
+#: ``errors: [{"resource": "Issue", "code": "custom", "message": "must be a collaborator"}]`` — not
+#: 403. A status-only rule therefore gives up on the first credential and never tries the one that
+#: owns the repo, which is the whole bug this fallback exists to fix. 422 is only retried when its
+#: ``errors[]`` detail carries one of these hints; a genuine 422 ("No commits between main and dev",
+#: "A pull request already exists") must be reported as-is, since no other token would change it.
+_PERMISSION_HINTS = ("must be a collaborator", "not accessible", "permission", "forbidden")
+
+
+def _error_detail(payload: Any) -> str:
+    """GitHub's ``message`` PLUS the ``errors[]`` entries it hides the real reason in.
+
+    Without the array, the caller sees only "Validation Failed" — true but useless; the actionable
+    text ("must be a collaborator") lives one level down.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    parts = [str(payload.get("message", "")).strip()]
+    for err in payload.get("errors") or []:
+        if isinstance(err, dict):
+            text = str(err.get("message") or err.get("code") or "").strip()
+        else:
+            text = str(err).strip()
+        if text:
+            parts.append(text)
+    return "; ".join(p for p in parts if p)
+
+
+def _is_credential_problem(status: int, detail: str) -> bool:
+    """True when another credential could plausibly succeed where this one failed."""
+    if status in _CREDENTIAL_STATUSES:
+        return True
+    if status == 422:
+        low = detail.lower()
+        return any(hint in low for hint in _PERMISSION_HINTS)
+    return False
 
 #: A minimal seam over the HTTP layer: (method, url, params, json_body, headers, timeout) ->
 #: (status_code, parsed JSON body). Lets tests exercise this integration without the network.
@@ -32,12 +90,20 @@ HttpRequest = Callable[[str, str, dict[str, Any], dict[str, Any] | None, dict[st
 
 @dataclass(frozen=True)
 class PRResult:
-    """Outcome of create_or_update_pull_request (never raises)."""
+    """Outcome of create_or_update_pull_request (never raises).
+
+    ``status`` carries the GitHub HTTP status when there was one, so a caller (and the retry logic
+    here) can tell a credential problem apart from a genuine validation error.
+    """
 
     ok: bool
     number: int | None = None
     url: str = ""
     error: str = ""
+    status: int | None = None
+    #: Set when the failure looks like "this credential lacks access" rather than "this request was
+    #: invalid" — i.e. worth re-attempting with a different token (see ``_is_credential_problem``).
+    retryable: bool = False
 
 
 class GitHubClient(ABC):
@@ -91,17 +157,48 @@ class RealGitHubClient(GitHubClient):
 
     _API = "https://api.github.com"
 
-    def __init__(self, *, token: str, timeout: float = 30.0, http_request: HttpRequest | None = None) -> None:
+    def __init__(self, *, token: str, fallback_tokens: tuple[str, ...] = (),
+                 timeout: float = 30.0, http_request: HttpRequest | None = None) -> None:
         self._token = token
+        self._fallback_tokens = fallback_tokens
         self._timeout = timeout
         self._http_request = http_request  # injected in tests; real httpx built lazily otherwise
+
+    def _credentials(self) -> list[str]:
+        """Every distinct non-empty credential to try, in preference order (see module docstring)."""
+        ordered: list[str] = []
+        for token in (self._token, *self._fallback_tokens):
+            if token and token not in ordered:
+                ordered.append(token)
+        return ordered
 
     def create_or_update_pull_request(
         self, owner: str, repo: str, head: str, base: str, title: str, body: str
     ) -> PRResult:
-        if not self._token:
-            return PRResult(ok=False, error="github_pat not configured")
-        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/vnd.github+json"}
+        credentials = self._credentials()
+        if not credentials:
+            return PRResult(
+                ok=False,
+                error="no GitHub credential available (github_pat unset and `gh auth token` empty)",
+            )
+        result = PRResult(ok=False, error="no attempt made")
+        for i, token in enumerate(credentials):
+            result = self._attempt(owner, repo, head, base, title, body, token)
+            if result.ok or not result.retryable:
+                return result  # success, or a real error that another token would not fix
+            if i + 1 < len(credentials):
+                # The identity that pushed the repo is often not the identity in $GITHUB_PAT; say
+                # so explicitly, because a silent 403 here is exactly how a run ends with no PR.
+                logger.warning(
+                    "[github] credential %d/%d cannot open the PR (%s) — retrying with the next "
+                    "available credential", i + 1, len(credentials), result.error,
+                )
+        return result
+
+    def _attempt(self, owner: str, repo: str, head: str, base: str, title: str, body: str,
+                 token: str) -> PRResult:
+        """One full find-then-create pass with a single credential."""
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         try:
             existing = self._find_open_pr(owner, repo, head, base, headers)
             if existing is not None:
@@ -114,9 +211,14 @@ class RealGitHubClient(GitHubClient):
         except Exception as exc:  # noqa: BLE001 - a GitHub API failure must not crash the run
             return PRResult(ok=False, error=f"github request failed: {exc}")
         if status not in (200, 201):
-            message = payload.get("message", "") if isinstance(payload, dict) else ""
-            return PRResult(ok=False, error=f"github create PR failed ({status}): {message}".strip())
-        return PRResult(ok=True, number=payload.get("number"), url=payload.get("html_url", ""))
+            detail = _error_detail(payload)
+            return PRResult(
+                ok=False, status=status,
+                error=f"github create PR failed ({status}): {detail}".strip(),
+                retryable=_is_credential_problem(status, detail),
+            )
+        return PRResult(ok=True, number=payload.get("number"), url=payload.get("html_url", ""),
+                        status=status)
 
     def _find_open_pr(self, owner: str, repo: str, head: str, base: str,
                        headers: dict[str, str]) -> PRResult | None:
@@ -146,7 +248,33 @@ class RealGitHubClient(GitHubClient):
 # --------------------------------------------------------------------------- provider
 
 
-def get_github_client() -> GitHubClient:
-    """Build a client from settings (real, PAT-authenticated)."""
+def gh_cli_token() -> str:
+    """The ``gh`` CLI's own token — the SAME credential the Executor uses to create and push the
+    product repo (``gh repo create`` / ``gh auth setup-git``), hence the one guaranteed to have
+    write access to it. Empty string when ``gh`` is absent or not logged in."""
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("[github] `gh auth token` unavailable: %s", exc)
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def get_github_client(*, token: str | None = None) -> GitHubClient:
+    """Build a real client that tries every credential available to this run, in order:
+
+    1. ``token`` — the credential THIS run pushed with (``state["git_token"]``), when set;
+    2. ``settings.github_pat`` — the configured PAT;
+    3. the ``gh`` CLI's token — whoever owns the repo the Executor just created.
+
+    Opening the PR needs write access, and (1)/(2) belong to whoever configured the service while
+    (3) belongs to whoever ``gh`` created the repo as. Those differ often enough that trying only
+    one is why a green run could end with no PR at all — see the module docstring.
+    """
     settings = get_settings()
-    return RealGitHubClient(token=settings.github_pat)
+    return RealGitHubClient(
+        token=(token or "").strip() or settings.github_pat,
+        fallback_tokens=(settings.github_pat, gh_cli_token()),
+    )

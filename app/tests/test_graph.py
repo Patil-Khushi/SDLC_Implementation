@@ -246,7 +246,7 @@ def test_security_approve_opens_pr_and_builds_package(monkeypatch) -> None:
         lambda: FakeReviewSandbox(files={"main.py": "x = 1\n"}),  # semgrep finds nothing by default
     )
     fake_github = FakeGitHubClient()
-    monkeypatch.setattr(nodes_module, "get_github_client", lambda: fake_github)
+    monkeypatch.setattr(nodes_module, "get_github_client", lambda **_kw: fake_github)
 
     executor = FakeExecutor()
     final = _invoke(executor, [LOGIN_ITEM], "t-approve-finalize", repo_url="https://github.com/acme/generated-app")
@@ -309,7 +309,7 @@ def test_security_loop_exits_via_finalize_once_a_rescan_approves(monkeypatch) ->
     monkeypatch.setattr(llm_gateway.llm_gateway, "complete", dispatch_complete)
     monkeypatch.setattr(security_module, "get_review_sandbox", sandbox_factory)
     fake_github = FakeGitHubClient()
-    monkeypatch.setattr(nodes_module, "get_github_client", lambda: fake_github)
+    monkeypatch.setattr(nodes_module, "get_github_client", lambda **_kw: fake_github)
 
     executor = FakeExecutor()
     final = _invoke(executor, [LOGIN_ITEM], "t-loop-fix", repo_url="https://github.com/acme/generated-app")
