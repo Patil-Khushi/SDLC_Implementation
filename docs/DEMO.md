@@ -62,7 +62,8 @@ Useful variations:
 | `--project <name>` | pick a specific run (default: the most recent recording) |
 
 Pacing keeps the *shape* of the real run — code generation is visibly the long stretch — but no
-single pause exceeds ~1.2s, so the screen never appears frozen. `Ctrl-C` stops it cleanly and still
+single pause exceeds 1.2s (a hard invariant, verified at ~1800-event scale), so the screen never
+appears frozen. `Ctrl-C` stops it cleanly and still
 prints the artifacts panel.
 
 ## 3. Suggested 3-minute narrative

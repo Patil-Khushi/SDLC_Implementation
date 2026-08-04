@@ -108,32 +108,60 @@ def test_replay_lasts_as_long_as_requested_and_emits_everything() -> None:
     slept: list[float] = []
     written: list[str] = []
 
-    count = replay(events, duration=30.0, write=lambda _s, t: written.append(t),
+    # 20 events => 19 gaps; at the 1.2s cap those hold up to 22.8s, so 15s is satisfiable exactly.
+    # (test_replay_runs_short_rather_than_breaking_the_cap covers the other side of that ceiling.)
+    count = replay(events, duration=15.0, write=lambda _s, t: written.append(t),
                    sleep=slept.append)
 
     assert count == 20
     assert len(written) == 20                       # nothing dropped
-    assert abs(sum(slept) - 30.0) < 0.01            # ...and it took the duration asked for
+    assert abs(sum(slept) - 15.0) < 0.01            # ...and it took the duration asked for
 
 
 def test_one_huge_gap_cannot_freeze_the_screen() -> None:
     # A single 40-minute stage (one big LLM call, an npm install) scaled proportionally would eat
-    # the whole replay. Gaps are capped, then re-normalized so the total is still correct.
+    # the whole replay. The cap is a HARD invariant, not a pre-normalization suggestion.
     events = [
         Event(t=0.0, stream="out", text="a\n"),
         Event(t=1.0, stream="out", text="b\n"),
         Event(t=2400.0, stream="out", text="c\n"),   # 40 min later
     ]
-    delays = pace(events, duration=60.0)
-    assert abs(sum(delays) - 60.0) < 0.01
-    assert max(delays) <= 60.0                      # no single pause dominates the replay
+    delays = pace(events, duration=6.0, max_gap=1.2)
+    assert max(delays) <= 1.2 + 1e-9                # nobody stares at a frozen screen
     assert delays[1] > 0                            # the short gap is still visible
+
+
+def test_cap_holds_at_real_run_scale_without_finishing_early() -> None:
+    # Regression for a bug found by scale-testing a run-shaped transcript: clamping and then
+    # re-scaling by a single factor pushed pauses back over the cap (measured 2.18s vs a 1.2s cap).
+    # With ~1800 events there is ample room, so BOTH properties must hold at once.
+    events, t = [], 0.0
+    for item in range(59):
+        t += 90.0                                    # the LLM call: a long silent gap
+        events.append(Event(t=t, stream="err", text=f"AGENT: item {item}\n"))
+        for f in range(20):                          # then a burst, milliseconds apart
+            t += 0.01
+            events.append(Event(t=t, stream="err", text=f"[FILE {f}] item {item}\n"))
+
+    delays = pace(events, duration=150.0, max_gap=1.2)
+    assert abs(sum(delays) - 150.0) < 0.01           # lasts exactly as long as asked
+    assert max(delays) <= 1.2 + 1e-9                 # and never freezes
+
+
+def test_replay_runs_short_rather_than_breaking_the_cap() -> None:
+    # Not enough gaps to hold the requested duration: the cap wins (a demo that stalls is worse
+    # than one that ends early), and the shortfall is arithmetic, not a surprise.
+    events = [Event(t=float(i), stream="out", text=f"{i}\n") for i in range(3)]
+    delays = pace(events, duration=100.0, max_gap=1.2)
+    assert max(delays) <= 1.2 + 1e-9
+    assert sum(delays) <= 2 * 1.2 + 1e-9
 
 
 def test_same_instant_events_are_spread_evenly() -> None:
     events = [Event(t=5.0, stream="out", text=f"{i}\n") for i in range(4)]
-    delays = pace(events, duration=8.0)
-    assert abs(sum(delays) - 8.0) < 0.01
+    delays = pace(events, duration=3.0)          # 3 gaps, within the 1.2s-per-gap ceiling
+    assert abs(sum(delays) - 3.0) < 0.01
+    assert delays[1] == delays[2] == delays[3]   # evenly: the real gaps carry no information here
 
 
 def test_pace_of_empty_input_is_empty() -> None:

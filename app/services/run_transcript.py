@@ -57,13 +57,31 @@ _SECRET_RE = re.compile(
 )
 
 #: Lines worth keeping in ``--highlights``: the stage banners and each agent's headline outcome.
-#: Everything else (per-file writes, HTTP request lines, tool chatter) is detail that a 2-minute
-#: narrative does not need.
 _HIGHLIGHT_MARKERS = (
     "AGENT:", "   -> ", "[plan]", "[code_generator]", "[publish]", "[gate]", "[commit]",
     "[code_review]", "[refactoring]", "[debug", "[unit_test", "[documentation]", "[security]",
     "[finalize]", "[package]", "BUILD PLAN", "SHARED STATE", "workflow_status", "===",
 )
+
+#: ...minus the per-item CHATTER that shares those prefixes. Without this the include-list alone is
+#: no filter at all: measured on a run-shaped transcript it kept 927 of 927 lines, because every
+#: "[FILE 3/22] generating ..." line also carries "[code_generator]". A 2-minute narrative wants one
+#: line per work item, not one per file.
+_HIGHLIGHT_NOISE = (
+    "[FILE ",            # per-file progress within one work item
+    "[BOILERPLATE]",     # which context slices were assembled
+    "HTTP Request",      # httpx per-call logging
+    "Ignoring path",     # semgrep/eslint walker noise
+    "none matching by path",
+    "not produced",
+)
+
+
+def is_highlight(text: str) -> bool:
+    """Whether a line belongs in the condensed (``--highlights``) narrative."""
+    if any(noise in text for noise in _HIGHLIGHT_NOISE):
+        return False
+    return any(marker in text for marker in _HIGHLIGHT_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -241,18 +259,24 @@ def load_manifest(target: Path | str) -> dict[str, Any]:
 
 
 def filter_highlights(events: Sequence[Event]) -> list[Event]:
-    """Keep only stage banners and headline outcomes (see :data:`_HIGHLIGHT_MARKERS`)."""
-    return [e for e in events if any(m in e.text for m in _HIGHLIGHT_MARKERS)]
+    """Keep only stage banners and headline outcomes (see :func:`is_highlight`)."""
+    return [e for e in events if is_highlight(e.text)]
 
 
 def pace(events: Sequence[Event], *, duration: float = DEFAULT_REPLAY_SECONDS,
          max_gap: float = MAX_GAP_SECONDS) -> list[float]:
     """Delays to sleep BEFORE each event so the replay lasts ``duration`` seconds.
 
-    Two passes on purpose: scale the real gaps (so the shape of the run survives — generation is
-    visibly the long stretch), clamp any single pause to ``max_gap`` (so one slow work item cannot
-    freeze the screen), then re-normalize, because clamping removes time that the requested
-    duration still has to account for.
+    Two competing goals: the replay must last as long as asked, and no single pause may exceed
+    ``max_gap`` (one work item's LLM call can be minutes; scaled proportionally it would freeze the
+    screen mid-demo). So the real gaps are scaled — keeping the shape of the run, generation stays
+    visibly the long stretch — then clamped, and the leftover budget is redistributed into the gaps
+    that still have room UNDER the cap. Scaling the clamped values by a single factor instead (the
+    obvious approach) pushes them back over the cap: measured 2.18s against a 1.2s cap.
+
+    Both properties hold on exit: ``sum(...) == duration`` and ``max(...) <= max_gap`` — as long as
+    ``duration <= max_gap * (len(events) - 1)``, i.e. there are enough gaps to hold the time. When
+    there are not, the cap wins and the replay simply runs shorter than requested.
     """
     if not events:
         return []
@@ -261,18 +285,28 @@ def pace(events: Sequence[Event], *, duration: float = DEFAULT_REPLAY_SECONDS,
     def _even() -> list[float]:
         if len(events) == 1:
             return [0.0]
-        return [0.0] + [duration / (len(events) - 1)] * (len(events) - 1)
+        return [0.0] + [min(duration / (len(events) - 1), max_gap)] * (len(events) - 1)
 
     span = events[-1].t - events[0].t
     gaps = [0.0] + [max(0.0, events[i].t - events[i - 1].t) for i in range(1, len(events))]
     if span <= 0:  # everything landed in the same instant — spread it evenly instead
         return _even()
-    clamped = [min(g * (duration / span), max_gap) for g in gaps]
-    total = sum(clamped)
+    delays = [min(g * (duration / span), max_gap) for g in gaps]
+    total = sum(delays)
     if total <= 0:
         return _even()
-    factor = duration / total
-    return [g * factor for g in clamped]
+    if total > duration:  # clamping cannot cause this, but scaling DOWN is always safe
+        return [d * (duration / total) for d in delays]
+
+    # Fill the deficit proportionally to each gap's remaining headroom, so the cap is respected by
+    # construction and the relative pacing of the run is preserved.
+    room = [max_gap - d for d in delays[1:]]  # index 0 is the immediate first event
+    available = sum(room)
+    deficit = duration - total
+    if deficit <= 0 or available <= 0:
+        return delays
+    share = min(1.0, deficit / available)
+    return [delays[0]] + [d + r * share for d, r in zip(delays[1:], room)]
 
 
 def format_banner(manifest: dict[str, Any], *, event_count: int, replay_seconds: float,
