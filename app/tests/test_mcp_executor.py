@@ -76,3 +76,84 @@ def test_repair_run_command_is_scoped_against_git_writes() -> None:
         executor._repair_run_command(["git", "commit", "-m", "sneaky"])
     # a read-only git command is allowed through (delegates to the underlying tool)
     assert executor._repair_run_command(["git", "status"])["exit_code"] == 0
+
+
+# --- present-but-null payload fields must never become the literal string "None" ----------------
+
+def test_run_command_coalesces_null_stdout_stderr_not_stringifies_them() -> None:
+    # A sandbox payload with the key PRESENT but JSON null (e.g. a command that wrote nothing to
+    # stderr) must not turn into the 4-char string "None" — that corrupted string would otherwise
+    # be persisted into WorkflowState and fed to the Debugging agent as if it were real output.
+    tool = _FakeTool("run_command", {"stdout": None, "stderr": None, "exit_code": 0, "timed_out": False})
+    result = MCPExecutor(client=None, tools=[tool]).run_command(["true"])
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert "None" not in result.stdout and "None" not in result.stderr
+
+
+def test_run_command_null_exit_code_falls_back_not_crashes() -> None:
+    # exit_code needs an explicit None-check, not `d.get(...) or -1`: 0 is falsy in Python, so a
+    # legitimate successful run must not be misread as -1 — but a genuinely absent/null exit_code
+    # (malformed sandbox payload) must fall back to -1 rather than `int(None)` raising.
+    tool = _FakeTool("run_command", {"stdout": "", "stderr": "", "exit_code": 0, "timed_out": False})
+    assert MCPExecutor(client=None, tools=[tool]).run_command(["true"]).exit_code == 0
+
+    tool_null = _FakeTool("run_command", {"stdout": "", "stderr": "", "exit_code": None, "timed_out": False})
+    assert MCPExecutor(client=None, tools=[tool_null]).run_command(["true"]).exit_code == -1
+
+
+def test_install_package_coalesces_null_fields() -> None:
+    tool = _FakeTool("install_package", {"stdout": None, "stderr": None, "exit_code": None, "timed_out": False})
+    result = MCPExecutor(client=None, tools=[tool]).install_package("proj", "left-pad", manager="npm")
+    assert result.stdout == "" and result.stderr == ""
+    assert result.exit_code == -1
+
+
+def test_git_commit_coalesces_null_stdout_stderr_and_exit_code() -> None:
+    # git_commit predates the run_command/install_package null-handling fix and was missed the
+    # first time round. Worse than the "None"-string case elsewhere: `int(d.get("exit_code", -1))`
+    # on a PRESENT-but-null exit_code is `int(None)`, which raises — and git_commit is a FIXED,
+    # non-retryable step, so that crash takes down the whole run rather than just one repair round.
+    tool = _FakeTool(
+        "git_commit",
+        {"committed": True, "sha": None, "stdout": None, "stderr": None, "exit_code": None},
+    )
+    result = MCPExecutor(client=None, tools=[tool]).git_commit("proj", "a commit message")
+    assert result.committed is True
+    assert result.sha is None            # a null sha is a legitimate value, not corruption
+    assert result.stdout == "" and "None" not in result.stdout
+    assert result.stderr == "" and "None" not in result.stderr
+    assert result.exit_code == -1        # falls back cleanly instead of raising
+
+
+def test_git_commit_zero_exit_code_is_not_misread_as_failure() -> None:
+    tool = _FakeTool(
+        "git_commit",
+        {"committed": True, "sha": "abc123", "stdout": "", "stderr": "", "exit_code": 0},
+    )
+    result = MCPExecutor(client=None, tools=[tool]).git_commit("proj", "msg")
+    assert result.exit_code == 0
+    assert result.sha == "abc123"
+
+
+# --- output capping must protect the sandbox path too, not just the local-disk one ---------------
+
+def test_run_command_caps_oversized_output() -> None:
+    # Real incident this guards against: a project-wide `npm test` produced 7.5M chars of stderr,
+    # which then blew straight past the LLM's context limit and wasted an entire repair round. The
+    # cap originally shipped only in scripts/local_executor.py, leaving MCPExecutor (the actual
+    # sandbox path used in production) exposed to the same failure mode.
+    huge = "x" * 50_000
+    tool = _FakeTool("run_command", {"stdout": huge, "stderr": huge, "exit_code": 1, "timed_out": False})
+    result = MCPExecutor(client=None, tools=[tool]).run_command(["npm", "test"])
+    assert len(result.stdout) < 50_000
+    assert len(result.stderr) < 50_000
+    assert "truncated" in result.stdout and "truncated" in result.stderr
+
+
+def test_install_package_caps_oversized_output() -> None:
+    huge = "y" * 50_000
+    tool = _FakeTool("install_package", {"stdout": huge, "stderr": huge, "exit_code": 1, "timed_out": False})
+    result = MCPExecutor(client=None, tools=[tool]).install_package("proj", "some-pkg", manager="npm")
+    assert len(result.stdout) < 50_000
+    assert "truncated" in result.stdout

@@ -48,11 +48,52 @@ __all__ = [
     "Executor",
     "FakeExecutor",
     "MCPExecutor",
+    "cap_output",
     "get_executor",
     "set_executor",
 ]
 
 StrPath = str | Path
+
+
+# --------------------------------------------------------------------------- output capping
+
+# Hard cap on captured command output. Real incident: a project-wide `npm test` across 4000+
+# tests (verbose reporter + full stack traces for ~140 failing suites) produced 7.5M characters
+# of stderr; that then went STRAIGHT into the Debugging agent's fix prompt unbounded and the LLM
+# call failed outright ("prompt is too long: 3080868 tokens > 1000000 maximum") — the whole
+# repair round wasted, not just degraded. This is a safety net independent of any one config fix
+# (e.g. jest's `verbose` setting): keeps a chunk of the HEAD (the detail a repair agent reads
+# first) plus the TAIL (where test runners conventionally print the summary line), rather than a
+# naive head-only truncation that would silently drop the "N failed, M passed" summary too.
+#
+# Lives HERE, not in scripts/local_executor.py, because EVERY executor that captures command
+# output needs it: the cap originally shipped only on the local-disk path, leaving the sandbox
+# (MCPExecutor) exposed to the very incident above. `app/` is the library and `scripts/` is its
+# caller, so the shared helper has to sit on this side of that boundary — scripts/local_executor.py
+# imports it from here rather than keeping a second copy that could drift.
+OUTPUT_CAP = 40_000
+_HEAD_KEEP = 32_000
+_TAIL_KEEP = 6_000
+
+
+def cap_output(text: str) -> str:
+    """Truncate captured output to :data:`OUTPUT_CAP` chars, keeping the head AND the tail.
+
+    Head-plus-tail rather than head-only on purpose: test runners print their ``N failed, M
+    passed`` summary at the very END, and that summary is exactly what
+    ``app/agents/debugging.py``'s progress detection parses to decide whether a repair round made
+    progress. A naive head-only cut would silently strip the one line the loop's termination logic
+    depends on.
+    """
+    if len(text) <= OUTPUT_CAP:
+        return text
+    dropped = len(text) - _HEAD_KEEP - _TAIL_KEEP
+    return (
+        text[:_HEAD_KEEP]
+        + f"\n\n... [truncated {dropped} chars — output was {len(text)} chars total] ...\n\n"
+        + text[-_TAIL_KEEP:]
+    )
 
 
 # --------------------------------------------------------------------------- results
@@ -480,10 +521,23 @@ class MCPExecutor(Executor):
     # shared primitives
     def run_command(self, cmd: Sequence[str], cwd: StrPath = ".", timeout: float | None = None) -> RunResult:
         d = _as_dict(self._invoke("run_command", {"cmd": list(cmd), "cwd": str(cwd), "timeout": timeout}))
+        # `.get(key, default)` only substitutes the default when the KEY IS ABSENT — a sandbox
+        # payload with the key present but JSON null (e.g. {"stderr": null}) passes straight
+        # through as None, and str(None) silently becomes the literal 4-char string "None". That
+        # corrupted "None" then gets persisted into WorkflowState (test_result/debug_result) and
+        # fed verbatim into the Debugging agent's fix prompt as if it were real captured output.
+        # `or default` coalesces None (and "") to the same safe default either way.
+        # NOTE: exit_code uses an explicit None-check, not `or` — 0 (success) is falsy in Python,
+        # so `d.get("exit_code") or -1` would silently turn a legitimate exit_code=0 into -1.
+        raw_exit_code = d.get("exit_code")
         return RunResult(
-            stdout=str(d.get("stdout", "")),
-            stderr=str(d.get("stderr", "")),
-            exit_code=int(d.get("exit_code", -1)),
+            # Capped for the same reason the local-disk executor caps: an oversized failure dump
+            # flows straight into the Debugging agent's prompt and can exceed the model's context
+            # outright, wasting the whole repair round. The sandbox path is no less exposed than
+            # the local one — see cap_output.
+            stdout=cap_output(str(d.get("stdout") or "")),
+            stderr=cap_output(str(d.get("stderr") or "")),
+            exit_code=int(raw_exit_code) if raw_exit_code is not None else -1,
             timed_out=bool(d.get("timed_out", False)),
         )
 
@@ -501,10 +555,15 @@ class MCPExecutor(Executor):
 
     def install_package(self, project_dir: StrPath, package: str, manager: str = "pip") -> RunResult:
         d = _as_dict(self._invoke("install_package", {"name": package, "manager": manager, "cwd": str(project_dir)}))
+        # Same null-coalescing AND capping as run_command above: a present-but-null field must not
+        # become the literal string "None", and exit_code needs an explicit None-check (0 is falsy).
+        # An `npm install` resolution failure (ERESOLVE dependency-tree dump) is a genuinely large
+        # output too, and it reaches the same repair prompt.
+        raw_exit_code = d.get("exit_code")
         return RunResult(
-            stdout=str(d.get("stdout", "")),
-            stderr=str(d.get("stderr", "")),
-            exit_code=int(d.get("exit_code", -1)),
+            stdout=cap_output(str(d.get("stdout") or "")),
+            stderr=cap_output(str(d.get("stderr") or "")),
+            exit_code=int(raw_exit_code) if raw_exit_code is not None else -1,
             timed_out=bool(d.get("timed_out", False)),
         )
 
@@ -531,50 +590,100 @@ class MCPExecutor(Executor):
     def _npm_install(self, project_dir: StrPath) -> RunResult:
         return self.run_command(["npm", "install", "--no-audit", "--no-fund"], cwd=project_dir)
 
+    @staticmethod
+    def _candidate_roots(project_dir: StrPath) -> list[tuple[str, str]]:
+        """(label-prefix, root) pairs to probe for a manifest.
+
+        The ADAPTIVE ``plan_builder`` path unconditionally re-roots every generated file under
+        exactly ``backend/`` and ``frontend/`` when both sides are enabled, so a split-root
+        project's manifests (``requirements.txt`` / ``package.json`` / ``tsconfig.json``) live
+        one level below ``project_dir``, not at it. Checking ``backend``/``frontend`` is
+        ADDITIVE to checking ``project_dir`` itself — never a replacement — so a combined-
+        manifest project, a legacy pack, or a backend-only/frontend-only project (manifest
+        directly at ``project_dir``) keeps working exactly as before.
+        """
+        base = str(project_dir)
+        return [
+            ("", base),
+            ("backend/", f"{base}/backend"),
+            ("frontend/", f"{base}/frontend"),
+        ]
+
     def compile(self, project_dir: StrPath) -> CheckResult:
         results = [("py", self.run_command(["python", "-m", "compileall", "-q", "."], cwd=project_dir))]
-        if self._exists(project_dir, "tsconfig.json"):  # frontend
-            # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all — unlike
-            # compileall (syntax-only, no import resolution), so node_modules must exist first.
-            results.append(("npm-install", self._npm_install(project_dir)))
-            results.append(("tsc", self.run_command(["npx", "tsc", "--noEmit"], cwd=project_dir)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "tsconfig.json"):  # frontend
+                # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all —
+                # unlike compileall (syntax-only, no import resolution), so node_modules must
+                # exist first.
+                results.append((f"{prefix}npm-install", self._npm_install(root)))
+                results.append((f"{prefix}tsc", self.run_command(["npx", "tsc", "--noEmit"], cwd=root)))
         return self._aggregate("compile", results)
 
     def build(self, project_dir: StrPath) -> CheckResult:
         results: list[tuple[str, RunResult]] = []
-        if self._exists(project_dir, "requirements.txt"):
-            results.append(("pip", self.run_command(
-                ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
-                cwd=project_dir,
-            )))
-        if self._exists(project_dir, "package.json"):
-            # Mirrors the pip branch above: install before building. Without this, `npm run
-            # build` always fails on a fresh checkout (no node_modules) — a repro found by
-            # running the real fixed checks against a real generated project (fixture-run-dev).
-            results.append(("npm-install", self._npm_install(project_dir)))
-            results.append(("npm", self.run_command(["npm", "run", "build", "--if-present"], cwd=project_dir)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "requirements.txt"):
+                results.append((f"{prefix}pip", self.run_command(
+                    ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
+                    cwd=root,
+                )))
+            if self._exists(root, "package.json"):
+                # Mirrors the pip branch above: install before building. Without this, `npm run
+                # build` always fails on a fresh checkout (no node_modules) — a repro found by
+                # running the real fixed checks against a real generated project (fixture-run-dev).
+                results.append((f"{prefix}npm-install", self._npm_install(root)))
+                results.append((f"{prefix}npm", self.run_command(["npm", "run", "build", "--if-present"], cwd=root)))
         return self._aggregate("build", results) if results else CheckResult(name="build", passed=True)
 
     def test(self, project_dir: StrPath) -> CheckResult:
-        results = [("pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=project_dir))]
-        if self._exists(project_dir, "package.json"):
-            results.append(("npm-test", self.run_command(["npm", "test", "--if-present"], cwd=project_dir)))
+        # `pytest` at `project_dir` itself runs UNCONDITIONALLY — unlike every other branch here
+        # (and unlike LocalDiskExecutor's gated version), this is pre-existing sandbox-executor
+        # behavior that predates the backend/frontend split-root probing added below, and is kept
+        # exactly as-is for backward compatibility. The newly-added `backend`/`frontend`
+        # candidates have no such precedent, so they're gated on `requirements.txt` like
+        # everywhere else — additive only, never replacing the unconditional root check.
+        results: list[tuple[str, RunResult]] = [
+            ("pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=project_dir))
+        ]
+        for prefix, root in self._candidate_roots(project_dir):
+            if prefix and self._exists(root, "requirements.txt"):
+                results.append((f"{prefix}pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=root)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "package.json"):
+                results.append((f"{prefix}npm-test", self.run_command(["npm", "test", "--if-present"], cwd=root)))
         return self._aggregate("test", results)
 
     def lint(self, project_dir: StrPath) -> CheckResult:
-        results = [("ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=project_dir))]
-        if self._exists(project_dir, "package.json"):
-            results.append(("eslint", self.run_command(["npx", "eslint", "."], cwd=project_dir)))
+        # `ruff` at `project_dir` itself runs UNCONDITIONALLY, same pre-existing rationale as
+        # `test` above — preserved exactly; only the new backend/frontend candidates are gated.
+        results: list[tuple[str, RunResult]] = [
+            ("ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=project_dir))
+        ]
+        for prefix, root in self._candidate_roots(project_dir):
+            if prefix and self._exists(root, "requirements.txt"):
+                results.append((f"{prefix}ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=root)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "package.json"):
+                results.append((f"{prefix}eslint", self.run_command(["npx", "eslint", "."], cwd=root)))
         return self._aggregate("lint", results)
 
     def git_commit(self, project_dir: StrPath, message: str) -> CommitResult:
         d = _as_dict(self._invoke("git_commit", {"project_dir": str(project_dir), "message": message}))
+        # Same null-coalescing as run_command/install_package above (this method predates that
+        # fix and was missed the first time round): `sha` is legitimately `str | None`, so a null
+        # `sha` needs no special-casing, but `stdout`/`stderr` must not stringify a JSON null into
+        # the literal "None", and `exit_code` needs an explicit None-check (`or -1` would turn a
+        # real `exit_code=0` into -1, and `int(None)` would raise outright) — the latter is worse
+        # here than elsewhere: git_commit is a FIXED, non-retryable step, so a crash here takes
+        # down the whole run instead of just failing one repair round.
+        raw_exit_code = d.get("exit_code")
         return CommitResult(
             committed=bool(d.get("committed", False)),
             sha=d.get("sha"),
-            stdout=str(d.get("stdout", "")),
-            stderr=str(d.get("stderr", "")),
-            exit_code=int(d.get("exit_code", -1)),
+            stdout=str(d.get("stdout") or ""),
+            stderr=str(d.get("stderr") or ""),
+            exit_code=int(raw_exit_code) if raw_exit_code is not None else -1,
         )
 
     # NOTE — deliberately NO publish_scaffold / publish_feature / publish_sweep here (unlike

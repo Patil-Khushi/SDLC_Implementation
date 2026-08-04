@@ -1,0 +1,654 @@
+{
+  "functional": [
+    {
+      "id": "REQ-1",
+      "text": "The system shall provide simulated tracking for orders.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-2",
+      "text": "The system shall allow customers to cancel an order.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-3",
+      "text": "When an order is cancelled before shipment, the system shall release the reserved stock.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-4",
+      "text": "The system shall allow staff to advance the status of orders from the same unified interface.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-5",
+      "text": "The system shall provide an order-detail page for each order.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-6",
+      "text": "The system shall support a returns flow consisting of a customer request step followed by an approval step.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-7",
+      "text": "The system shall allow a customer to request a return for eligible items within the return window.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-8",
+      "text": "The system shall provide customers with self-service capabilities to manage their orders.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-9",
+      "text": "The system shall support order cancellation.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-10",
+      "text": "Customers shall be able to view order status from their order page.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-11",
+      "text": "The order-detail page shall display a status timeline showing the stages: Confirmed, Packed, Shipped, and Delivered.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-12",
+      "text": "The system shall display order history to the user.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-13",
+      "text": "A refund shall be recorded against the originating order.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-14",
+      "text": "The system shall provide customers with an order history that includes a status timeline.",
+      "feature": "Orders & Fulfilment"
+    },
+    {
+      "id": "REQ-15",
+      "text": "The system shall reserve stock when checkout starts.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-16",
+      "text": "The system shall check whether a given PIN code is serviceable for delivery.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-17",
+      "text": "The system shall release the stock reservation if payment does not complete within approximately 15 minutes of checkout starting.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-18",
+      "text": "The system shall display a clear message to the user when checkout is blocked due to an unserviceable PIN code.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-19",
+      "text": "The checkout flow shall collect the customer's delivery address as the first step.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-20",
+      "text": "The checkout flow shall present a review step displaying order totals and taxes as the third step.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-21",
+      "text": "The add-to-cart action shall resolve to a specific SKU based on the selected variant.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-22",
+      "text": "The system shall guide the customer through a short checkout flow to place an order.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-23",
+      "text": "The system shall allow a shopper to add items to the cart.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-24",
+      "text": "The system should allow guests to check out using only an email address and a delivery address, without requiring account creation.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-25",
+      "text": "The system shall allow a shopper to enter a promo code at checkout.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-26",
+      "text": "The entire checkout and order flow shall be fully buildable and testable without live payment keys, using only the test-mode mock.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-27",
+      "text": "The system shall display all charges (including totals and taxes) to the shopper before the payment step.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-28",
+      "text": "The system shall calculate and apply the correct shipping charge (₹49 or ₹0) to an order based on whether the order total meets the ₹799 free-shipping threshold.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-29",
+      "text": "After a guest completes checkout, the system should offer the guest an option to create an account.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-30",
+      "text": "The system shall provide a shorter checkout flow.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-31",
+      "text": "The system shall reflect the discount from an entered promo code in the order totals before the shopper completes payment.",
+      "feature": "Cart & Checkout"
+    },
+    {
+      "id": "REQ-32",
+      "text": "If payment fails, times out, or is pending, the customer's cart shall be preserved and the customer shall be able to retry payment.",
+      "feature": "Payments"
+    },
+    {
+      "id": "REQ-33",
+      "text": "The platform shall include a provider-agnostic payment module.",
+      "feature": "Payments"
+    },
+    {
+      "id": "REQ-34",
+      "text": "The payment module shall include a built-in test-mode mock that simulates success, failure, and pending payment outcomes.",
+      "feature": "Payments"
+    },
+    {
+      "id": "REQ-35",
+      "text": "The system shall allow a customer to log in to their account securely.",
+      "feature": "Account & Authentication"
+    },
+    {
+      "id": "REQ-36",
+      "text": "The system shall allow a new customer to register for an account using an email address and a password.",
+      "feature": "Account & Authentication"
+    },
+    {
+      "id": "REQ-37",
+      "text": "The product detail page shall provide a variant selector where each variant is its own SKU.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-38",
+      "text": "The product listing page shall allow users to apply multiple filters simultaneously, combining brand, price, and rating filters at once.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-39",
+      "text": "The product page shall display the price inclusive of tax.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-40",
+      "text": "The product listing page shall display the result count for each filter option.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-41",
+      "text": "The search functionality shall provide autocomplete suggestions as the user types.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-42",
+      "text": "The product detail page shall display a product image.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-43",
+      "text": "The variant picker on the product page shall resolve the selected size/colour combination to a specific SKU.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-44",
+      "text": "The system shall provide product search functionality.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-45",
+      "text": "The system shall let customers filter the product listing.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-46",
+      "text": "The system shall let customers browse the catalogue by category.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-47",
+      "text": "The system shall provide a product detail page that allows customers to view product information.",
+      "feature": "Catalogue & Browsing"
+    },
+    {
+      "id": "REQ-48",
+      "text": "The system shall provide role-based access control so that staff members can only access the features and data permitted by their assigned role.",
+      "feature": "Admin & Management"
+    },
+    {
+      "id": "REQ-49",
+      "text": "The system shall allow a merchandiser to create promo codes with either a percentage discount or a flat discount.",
+      "feature": "Admin & Management"
+    },
+    {
+      "id": "REQ-50",
+      "text": "The system shall provide consolidated reporting for the business.",
+      "feature": "Admin & Management"
+    },
+    {
+      "id": "REQ-51",
+      "text": "The system shall enforce role-based access control so that each team sees only the orders or order data it is permitted to see.",
+      "feature": "Admin & Management"
+    },
+    {
+      "id": "REQ-52",
+      "text": "The system shall allow a merchandiser to set an expiry date on a promo code.",
+      "feature": "Admin & Management"
+    },
+    {
+      "id": "REQ-53",
+      "text": "The system shall allow authorised staff to update catalogue content (e.g. products) without raising an engineering ticket.",
+      "feature": "Admin & Management"
+    },
+    {
+      "id": "REQ-54",
+      "text": "The system shall provide a promotions engine.",
+      "feature": "Admin & Management"
+    },
+    {
+      "id": "REQ-55",
+      "text": "The system shall provide a catalogue CMS enabling staff to manage product catalogue content.",
+      "feature": "Admin & Management"
+    },
+    {
+      "id": "REQ-56",
+      "text": "The system shall simulate notifications via an in-app notification centre during the build.",
+      "feature": "Notifications"
+    }
+  ],
+  "non_functional": [
+    {
+      "id": "NFR-4",
+      "text": "Passwords shall be stored using a strong one-way hashing algorithm (bcrypt or argon2) and must never be stored in plaintext.",
+      "category": "security"
+    },
+    {
+      "id": "NFR-5",
+      "text": "Password-reset tokens shall expire after a defined period.",
+      "category": "security"
+    },
+    {
+      "id": "NFR-6",
+      "text": "All staff and admin functions shall be protected by role-based access control.",
+      "category": "security"
+    },
+    {
+      "id": "NFR-7",
+      "text": "Login and password-reset endpoints shall be rate-limited.",
+      "category": "security"
+    },
+    {
+      "id": "NFR-8",
+      "text": "The platform shall not store any card data.",
+      "category": "security"
+    },
+    {
+      "id": "NFR-9",
+      "text": "Login and logout shall be performed securely.",
+      "category": "security"
+    },
+    {
+      "id": "NFR-10",
+      "text": "The site shall be usable and user-friendly on mobile devices.",
+      "category": "software_quality"
+    },
+    {
+      "id": "NFR-11",
+      "text": "Application errors shall be logged so that issues can be diagnosed.",
+      "category": "software_quality"
+    },
+    {
+      "id": "NFR-12",
+      "text": "The key user flows — browse, product detail, cart, and checkout — shall meet basic WCAG AA accessibility requirements, including appropriate labels, sufficient colour contrast, and keyboard navigability.",
+      "category": "software_quality"
+    }
+  ],
+  "performance": [
+    {
+      "id": "NFR-1",
+      "text": "The site shall load and respond at a speed that users perceive as fast.",
+      "category": "performance"
+    },
+    {
+      "id": "NFR-2",
+      "text": "Product listing and detail pages shall respond within approximately 2 seconds at the 95th percentile on a typical connection.",
+      "category": "performance"
+    },
+    {
+      "id": "NFR-3",
+      "text": "The system shall provide faster browse performance.",
+      "category": "performance"
+    }
+  ],
+  "business_rules": [
+    {
+      "id": "BR-1",
+      "text": "Only eligible items may be available for return requests."
+    },
+    {
+      "id": "BR-2",
+      "text": "The system shall waive the shipping charge (free shipping) for orders with a total value of ₹799 or above."
+    },
+    {
+      "id": "BR-3",
+      "text": "Each size/colour combination on the product page shall be represented as its own distinct SKU with its own independent stock level."
+    },
+    {
+      "id": "BR-4",
+      "text": "An order shall not be confirmed until a payment callback explicitly confirms success."
+    },
+    {
+      "id": "BR-5",
+      "text": "The system shall apply GST tax calculations during checkout."
+    },
+    {
+      "id": "BR-6",
+      "text": "Vantage shall onboard the payment provider and perform KYC internally."
+    },
+    {
+      "id": "BR-7",
+      "text": "Prices displayed to the customer must be tax-inclusive."
+    }
+  ],
+  "constraints": [
+    "Live payment provider keys, merchant account, KYC, and PCI configuration are out of scope for the build; payments go live through configuration after the build is complete.",
+    "The in-app search with autocomplete shall be included in the launch scope.",
+    "Live payment keys, the merchant account, and real email/SMS delivery credentials are out of scope for the build and shall not be required to build, run, or test the system; they are supplied by Vantage post-build via configuration.",
+    "Real email/SMS notification delivery is out of scope for the build; it is to be configured post-build only.",
+    "Payments and tax are out of scope for this workstream and are handled as a separate thread with Finance and the vendor.",
+    "Post-build configuration items handled by Vantage must not block implementation of the platform build.",
+    "The payment module shall be provider-agnostic and expose a single unified interface."
+  ],
+  "external_interfaces": [],
+  "ui_token_source": [
+    {
+      "section": "",
+      "text": "The customer-facing interface provides a product listing page with filters and result counts, a product detail page with variant selector and tax-inclusive pricing, a cart, a multi-step checkout flow, an order history and detail page with status timeline, and an in-app notification centre. The staff-facing interface is a unified admin panel providing catalogue CMS, promotions management, order management, and reporting, all gated by role-based access control. All interfaces must be mobile-responsive and keyboard-navigable with sufficient colour contrast."
+    },
+    {
+      "section": "3.1.1 Overall Visual Theme",
+      "text": "_Proposed design system — generated from the requirements; the raw inputs specify no visual design, so Design/UX to confirm before build._"
+    },
+    {
+      "section": "3.1.1 Overall Visual Theme",
+      "text": "The product's visual personality is trustworthy, efficient, modern, approachable, clear. Indigo conveys the trust and reliability essential for a commerce platform handling secure accounts, payments, and role-based access, while orange injects the energy and warmth needed to drive conversions and create an approachable shopping experience across mobile and desktop. The design system is the single source of truth for the interface: every colour, type step and spacing value below is a NAMED token (never a hard-coded literal), so the look is consistent and re-themeable. The brand hue is used as an accent (~60/30/10 neutral/secondary/brand), not a flood, and status is always conveyed by an icon or label as well as colour."
+    },
+    {
+      "section": "3.1.2 Colour Tokens",
+      "text": "_Proposed design system — generated from the requirements; the raw inputs specify no visual design, so Design/UX to confirm before build._"
+    },
+    {
+      "section": "3.1.3 Typography Tokens",
+      "text": "_Proposed design system — generated from the requirements; the raw inputs specify no visual design, so Design/UX to confirm before build._"
+    },
+    {
+      "section": "3.1.4 Spacing, Radius, and Elevation Tokens",
+      "text": "_Proposed design system — generated from the requirements; the raw inputs specify no visual design, so Design/UX to confirm before build._"
+    },
+    {
+      "section": "3.1.5 Layout and Interaction Standards",
+      "text": "_Proposed design system — generated from the requirements; the raw inputs specify no visual design, so Design/UX to confirm before build._"
+    },
+    {
+      "section": "3.1.5 Layout and Interaction Standards",
+      "text": "Accessibility: all text meets WCAG 2.1 AA contrast (≥ 4.5:1 body, ≥ 3:1 large text / UI / borders); the token palette above is generated to satisfy this."
+    },
+    {
+      "section": "3.1.5 Layout and Interaction Standards",
+      "text": "Status is never colour alone: success/warning/error are always paired with an icon and a text label so colour-blind users are not excluded."
+    },
+    {
+      "section": "3.1.5 Layout and Interaction Standards",
+      "text": "Touch targets: interactive controls are at least 44 × 44 px with adequate spacing."
+    },
+    {
+      "section": "3.1.5 Layout and Interaction Standards",
+      "text": "Focus: every interactive element has a visible keyboard-focus indicator using color-primary."
+    },
+    {
+      "section": "3.1.5 Layout and Interaction Standards",
+      "text": "Responsive: layouts use the spacing scale and reflow from a single-column mobile view to multi-column desktop; content width is capped for readability."
+    },
+    {
+      "section": "3.1.5 Layout and Interaction Standards",
+      "text": "Motion: transitions are subtle and respect prefers-reduced-motion."
+    }
+  ],
+  "ui_tokens": {
+    "colour": [
+      {
+        "token": "color-primary",
+        "hex": "#4c6ef5",
+        "usage": "Primary brand colour — key actions, active states, links."
+      },
+      {
+        "token": "color-primary-dark",
+        "hex": "#3b5bdb",
+        "usage": "Darker primary — button text-on-fill and hover/pressed states (AA)."
+      },
+      {
+        "token": "color-secondary",
+        "hex": "#fd7e14",
+        "usage": "Secondary/accent — supporting highlights and secondary actions."
+      },
+      {
+        "token": "color-success",
+        "hex": "#37b24d",
+        "usage": "Success status — confirmations, positive badges (with an icon/label)."
+      },
+      {
+        "token": "color-warning",
+        "hex": "#fd7e14",
+        "usage": "Warning status — cautions (never colour alone)."
+      },
+      {
+        "token": "color-error",
+        "hex": "#f03e3e",
+        "usage": "Error status — validation errors, destructive actions."
+      },
+      {
+        "token": "color-ink",
+        "hex": "#212529",
+        "usage": "Primary text / headings on light surfaces."
+      },
+      {
+        "token": "color-body",
+        "hex": "#343a40",
+        "usage": "Body text on light surfaces."
+      },
+      {
+        "token": "color-muted",
+        "hex": "#495057",
+        "usage": "Secondary/muted text — captions, hints (AA-verified)."
+      },
+      {
+        "token": "color-surface",
+        "hex": "#ffffff",
+        "usage": "Card / panel surface."
+      },
+      {
+        "token": "color-canvas",
+        "hex": "#f8f9fa",
+        "usage": "Page background (warm off-white)."
+      },
+      {
+        "token": "color-border",
+        "hex": "#868e96",
+        "usage": "Borders, dividers, input outlines (AA 3:1 vs canvas)."
+      }
+    ],
+    "typography": [
+      {
+        "token": "type-display",
+        "size / line-height": "32px / 40px",
+        "weight": "700",
+        "usage": "Page or hero titles."
+      },
+      {
+        "token": "type-h1",
+        "size / line-height": "24px / 32px",
+        "weight": "700",
+        "usage": "Section headings."
+      },
+      {
+        "token": "type-h2",
+        "size / line-height": "20px / 28px",
+        "weight": "600",
+        "usage": "Sub-section headings."
+      },
+      {
+        "token": "type-h3",
+        "size / line-height": "16px / 24px",
+        "weight": "600",
+        "usage": "Card / group headings."
+      },
+      {
+        "token": "type-body",
+        "size / line-height": "16px / 24px",
+        "weight": "400",
+        "usage": "Default body text."
+      },
+      {
+        "token": "type-small",
+        "size / line-height": "14px / 20px",
+        "weight": "400",
+        "usage": "Secondary text, metadata."
+      },
+      {
+        "token": "type-caption",
+        "size / line-height": "12px / 16px",
+        "weight": "400",
+        "usage": "Captions, helper text, labels."
+      }
+    ],
+    "spacing_radius_and_elevation": [
+      {
+        "token": "space-1",
+        "value": "4px",
+        "usage": "Tight gaps (icon-to-label)."
+      },
+      {
+        "token": "space-2",
+        "value": "8px",
+        "usage": "Compact padding, chips."
+      },
+      {
+        "token": "space-3",
+        "value": "12px",
+        "usage": "Control padding."
+      },
+      {
+        "token": "space-4",
+        "value": "16px",
+        "usage": "Default element spacing."
+      },
+      {
+        "token": "space-6",
+        "value": "24px",
+        "usage": "Card padding, group spacing."
+      },
+      {
+        "token": "space-8",
+        "value": "32px",
+        "usage": "Section spacing."
+      },
+      {
+        "token": "radius-sm",
+        "value": "6px",
+        "usage": "Inputs, chips."
+      },
+      {
+        "token": "radius-md",
+        "value": "10px",
+        "usage": "Buttons, cards."
+      },
+      {
+        "token": "radius-lg",
+        "value": "16px",
+        "usage": "Modals, sheets."
+      },
+      {
+        "token": "elevation-1",
+        "value": "0 1px 2px rgba(0,0,0,.06)",
+        "usage": "Cards at rest."
+      },
+      {
+        "token": "elevation-2",
+        "value": "0 4px 12px rgba(0,0,0,.10)",
+        "usage": "Dropdowns, popovers."
+      },
+      {
+        "token": "elevation-3",
+        "value": "0 12px 28px rgba(0,0,0,.14)",
+        "usage": "Modals, dialogs."
+      }
+    ]
+  },
+  "tech_stack": [
+    {
+      "section": "7 Technology Stack",
+      "text": "Proposed technology stack — generated from the requirements; to be confirmed by Design / Engineering. Each layer names the option selected on the review screen (the recommended default unless a reviewer changed it)."
+    },
+    {
+      "section": "7 Technology Stack",
+      "text": "Selected stack: React.js + Vite + Tailwind CSS · Node.js + Express · MySQL 8 · JWT + bcrypt · In-app admin module · Elasticsearch · In-app notification store (PostgreSQL + REST polling)."
+    },
+    {
+      "section": "7.1 Client Applications",
+      "text": "React.js + Vite + Tailwind CSS — Needs fast page loads, mobile usability, autocomplete search, multi-filter PLP, SKU variant picker, short checkout flow, and an in-app notification centre. Specified by the reviewer (custom entry)."
+    },
+    {
+      "section": "7.2 Backend Architecture",
+      "text": "Node.js + Express — Needs a REST API covering orders, cart, checkout, returns, promotions engine, RBAC, payment abstraction with test-mode mock, and guest checkout logic. Widely known, minimal-overhead HTTP framework that shares the JavaScript ecosystem with the Next.js frontend, making it easy to hire for and build the full feature set quickly."
+    },
+    {
+      "section": "7.3 Data Storage",
+      "text": "MySQL 8 — Relational data model is required for orders, SKUs (size/colour combinations with independent stock), refunds linked to orders, promotions, and RBAC roles. Equally mainstream relational database with wide hosting support and good performance, but PostgreSQL's JSONB and full-text capabilities are more useful for product catalogue flexibility."
+    },
+    {
+      "section": "7.4 Third-Party Integrations",
+      "text": "In-app admin module — Staff must update product catalogue content without raising engineering tickets, requiring a headless CMS with a staff-friendly UI that feeds the API. Specified by the reviewer (custom entry)."
+    },
+    {
+      "section": "7.4 Third-Party Integrations",
+      "text": "Elasticsearch — Requires autocomplete suggestions, multi-filter PLP (brand, price, rating) with per-option result counts, and category browsing — all within the ~2s response target. Purpose-built distributed search engine with native faceted aggregations and autocomplete, but adds significant operational overhead that is only justified if catalogue size or query complexity outgrows PostgreSQL."
+    },
+    {
+      "section": "7.4 Third-Party Integrations",
+      "text": "In-app notification store (PostgreSQL + REST polling) — Live email/SMS delivery is out of scope for the build; the system must simulate notifications via an in-app notification centre during the build phase. A notifications table in PostgreSQL with a REST endpoint polled by the frontend delivers the in-app notification centre with zero additional infrastructure and is trivially swappable for real email/SMS post-build."
+    },
+    {
+      "section": "7.5 Security Technologies",
+      "text": "JWT + bcrypt — Requires customer registration with email/password (bcrypt/argon2), guest checkout, RBAC for staff roles, and secure session management. Stateless JWT access tokens with bcrypt password hashing is a simple, well-understood pattern that directly satisfies the password storage requirement and RBAC claims without additional infrastructure."
+    },
+    {
+      "section": "7.6 Device Capabilities",
+      "text": "The client experiences are responsive web applications, so no native device capabilities (camera, GPS, push, biometrics) are required for this release beyond standard browser APIs. Native-app device features are out of scope until dedicated mobile apps are introduced."
+    }
+  ]
+}

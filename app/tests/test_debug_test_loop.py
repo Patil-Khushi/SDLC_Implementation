@@ -135,7 +135,10 @@ def test_compile_build_fails_once_then_passes(stub_llm) -> None:
     final = _invoke(executor, "dtl-compile-once")
 
     assert stub_llm.debug_calls == 1                              # debugging invoked exactly once
-    assert final["debug_attempt"] == 1
+    # debug_attempt counts CONSECUTIVE STALLED rounds, not raw calls: the first round has no
+    # earlier failure count to compare against, so it never counts as a stall.
+    assert final["debug_attempt"] == 0
+    assert final["debug_rounds"] == 1                             # total rounds still counts it
     assert final["workflow_status"] == "completed"               # ...debug/test loop -> debug_publish -> ... -> package (terminal)
     assert final["test_result"]["passed"] is True
     assert final["unit_tests"]
@@ -148,7 +151,7 @@ def test_test_run_fails_once_then_passes_debugging_fixes_source_not_tests(stub_l
     final = _invoke(executor, "dtl-test-once")
 
     assert stub_llm.debug_calls == 1                              # debugging fixed the SOURCE once
-    assert final["debug_attempt"] == 1
+    assert final["debug_attempt"] == 0                            # first round is never a "stall"
     # Unit tests were generated exactly once — NOT regenerated after the debugging round-trip.
     assert stub_llm.test_gen_calls == 1
     unit_tests_after = final["unit_tests"]
@@ -159,13 +162,16 @@ def test_test_run_fails_once_then_passes_debugging_fixes_source_not_tests(stub_l
 
 
 def test_cap_exhaustion_escalates_to_needs_human_review(stub_llm) -> None:
-    # compile keeps failing across every debug_check call (initial + one per debugging attempt),
-    # so debug_attempt climbs to DEBUG_CAP without ever passing -> escalate, never loops forever.
-    executor = FakeExecutor(compile_results=[False] * (DEBUG_CAP + 3))
+    # compile keeps failing across every debug_check call (initial + one per debugging attempt) and
+    # the failure count never drops, so every round after the first is a stall: debug_attempt
+    # climbs to DEBUG_CAP without ever passing -> escalate, never loops forever.
+    executor = FakeExecutor(compile_results=[False] * (DEBUG_CAP + 5))
     final = _invoke(executor, "dtl-cap")
 
     assert final["workflow_status"] == "needs_human_review"
     assert final["debug_attempt"] == DEBUG_CAP
-    assert stub_llm.debug_calls == DEBUG_CAP                      # debugging invoked exactly CAP times
+    # One MORE call than the cap: the first round establishes the baseline failure count and is not
+    # counted as a stall, so rounds 2..CAP+1 are the ones that drive the counter to CAP.
+    assert stub_llm.debug_calls == DEBUG_CAP + 1
     assert stub_llm.test_gen_calls == 0                           # never reached test generation
     assert final.get("test_result") is None                       # never reached the test-run node

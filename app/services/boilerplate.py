@@ -1,11 +1,13 @@
 """Deterministic project-scaffold renderer (no LLM).
 
 Renders the repo-root boilerplate a generated project needs (Dockerfile, .gitignore, README.md,
-docker-compose.yml, .env.example, requirements.txt, package.json) once per run, before any work
-item is generated — so the LLM is never asked to produce files whose shape is already known. Most
-files come from the Jinja2 templates in ``app/templates/``; the ``README.md`` is instead built by
-:mod:`app.services.readme`, which mines the Design Package to emit a real, application-specific
-README (features, tech stack, project structure, API, screens, data model) rather than a stub.
+docker-compose.yml, .env.example, requirements.txt, package.json, and — for a project that runs
+jest — the whole test harness: jest.config.cjs, babel.config.cjs, jest.setup.cjs, test-utils/)
+once per run, before any work item is generated — so the LLM is never asked to produce files whose
+shape is already known. Most files come from the Jinja2 templates in ``app/templates/``; the
+``README.md`` is instead built by :mod:`app.services.readme`, which mines the Design Package to
+emit a real, application-specific README (features, tech stack, project structure, API, screens,
+data model) rather than a stub.
 
 INPUT-AWARE, not stack-aware. Two levels of input-drivenness:
 
@@ -34,6 +36,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from jinja2 import Environment, FileSystemLoader
+
+from app.services.design_pack import has_rich_api_mapping
 
 try:  # PyYAML is available in this service; fall back gracefully if a slim env drops it.
     import yaml
@@ -111,6 +115,32 @@ _BACKEND_AUTH_DEPS_NODE = {"jsonwebtoken": "^9.0.2", "bcryptjs": "^2.4.3"}
 _BACKEND_VALIDATION_DEPS_NODE = {"joi": "^17.13.3"}
 _BACKEND_TEST_DEPS_NODE = {"jest": "^29.7.0", "supertest": "^7.0.0"}
 
+# The devDependencies the DETERMINISTIC Jest harness (jest.config.cjs / babel.config.cjs /
+# jest.setup.cjs) needs to actually run. Emitting the config files without these would ship a
+# harness that cannot start ("Cannot find module 'babel-jest'"), so they travel together.
+#
+# BASE is what ANY jest run needs; DOM is added only where a React frontend shares the harness root
+# (a server-only project has no use for jsdom or a JSX transform).
+#
+# Babel is pinned to the ^7 line ON PURPOSE: babel-jest peer-depends on @babel/core ^7, so letting
+# an ^8 resolve makes `npm install` fail outright with ERESOLVE.
+_JS_TEST_HARNESS_DEPS = {
+    "jest": "^29.7.0",
+    "babel-jest": "^29.7.0",
+    "@babel/core": "^7.25.2",
+    "@babel/preset-env": "^7.25.3",
+}
+_JS_TEST_HARNESS_DEPS_DOM = {
+    "@babel/preset-react": "^7.24.7",
+    "jest-environment-jsdom": "^29.7.0",
+    # jest-dom supplies the matchers jest.setup.cjs requires; react/dom supply the renderer the
+    # component tests use. @testing-library/react ^16 peer-depends on @testing-library/dom, which
+    # is why the latter is listed explicitly rather than left to hoisting.
+    "@testing-library/jest-dom": "^6.4.8",
+    "@testing-library/react": "^16.0.1",
+    "@testing-library/dom": "^10.4.0",
+}
+
 #: Directory names that are a project's SOURCE root, not a project WRAPPER — so a tree rooted at
 #: ``src/`` means "files at the repo root", while a tree rooted at ``quickbite-backend/`` means that
 #: dir IS the backend project root (where its manifest/Dockerfile belong).
@@ -174,6 +204,11 @@ _SCAFFOLD: list[tuple[str, str, Callable[[ScaffoldConfig], bool]]] = [
     ("requirements.txt.j2", "requirements.txt", lambda c: c.enabled("backend")),
     ("package.json.j2", "package.json", lambda c: c.enabled("frontend")),
 ]
+# NOT listed above: the per-project-root files, whose OUTPUT PATH is computed rather than fixed —
+# the stack-aware manifests/Dockerfile (``package.backend.json.j2``, ``package.combined.json.j2``,
+# ``Dockerfile.node.j2``) and the JS test harness (``jest.config.cjs.j2``, ``babel.config.cjs.j2``,
+# ``jest.setup.cjs.j2``, ``fileMock.cjs.j2``, ``styleMock.cjs.j2``). A ``_SCAFFOLD`` row can only
+# carry a constant path, so ``render_scaffold`` emits those directly; see ``_jest_harness_plan``.
 
 # Design Package keys under which a capabilities config may travel (case-insensitive).
 _CAPABILITY_ARTIFACT_NAMES = (
@@ -371,6 +406,71 @@ def _normalize(cfg: dict[str, Any], project_id: str) -> dict[str, Any]:
     return cfg
 
 
+@dataclass(frozen=True)
+class _JestHarness:
+    """One deterministic Jest harness: where its files go and whether it needs the DOM stack."""
+
+    root: str    # project root the harness files are written under ("" = repo root)
+    dom: bool    # True when a React frontend shares this root -> jsdom + JSX + DOM matchers
+    owner: str   # capabilities section whose devDependencies carry the base packages
+
+
+def _jest_harness_plan(data: dict[str, Any]) -> list[_JestHarness]:
+    """Which generated manifests get a deterministic Jest harness, and of which flavour.
+
+    INPUT-DRIVEN, like the rest of this module: a harness is emitted for a project root whose
+    manifest actually lists ``jest`` as a devDependency — the runner the project really uses is the
+    input, not an assumption. So a Vite/vitest frontend gets nothing, while a Node backend (whose
+    ``_BACKEND_TEST_DEPS_NODE`` bring jest in) gets one.
+
+    ``dom`` is decided by WHO SHARES THE ROOT, not by who owns the manifest: in a shared-root
+    full-stack app one jest config serves the Express backend AND the React frontend, so it needs
+    jsdom + a JSX transform. That is precisely the fact a backend-framed work item cannot know —
+    the reason this file is scaffolded rather than generated.
+    """
+    backend = data.get("backend") if isinstance(data.get("backend"), dict) else {}
+    frontend = data.get("frontend") if isinstance(data.get("frontend"), dict) else {}
+    backend_root = data.get("_backend_root", "") or ""
+    frontend_root = data.get("_frontend_root", "") or ""
+    node_backend = _enabled(data, "backend") and backend.get("language") == "node"
+    frontend_on = _enabled(data, "frontend")
+
+    plan: list[_JestHarness] = []
+    if node_backend and "jest" in (backend.get("devDependencies") or {}):
+        plan.append(_JestHarness(backend_root, frontend_on and frontend_root == backend_root, "backend"))
+    # A frontend that states jest itself gets its own harness — unless it already shares the root of
+    # the backend one (a single root can only carry a single jest.config).
+    if (
+        frontend_on
+        and "jest" in (frontend.get("devDependencies") or {})
+        and not any(h.root == frontend_root for h in plan)
+    ):
+        plan.append(_JestHarness(frontend_root, True, "frontend"))
+    return plan
+
+
+def _add_jest_harness_deps(data: dict[str, Any]) -> None:
+    """Merge the harness's devDependencies into the manifest(s) that will carry it (in place).
+
+    ``setdefault`` per package: an explicit version from the Design Package always wins, so this
+    only fills what the pack didn't state. The DOM packages go to the FRONTEND section because that
+    is the side that needs them and, in the shared-root case, ``package.combined.json.j2`` merges
+    both sides' devDependencies into the one manifest anyway.
+    """
+    for harness in _jest_harness_plan(data):
+        owner = data.setdefault(harness.owner, {})
+        base = dict(owner.get("devDependencies") or {})
+        for name, spec in _JS_TEST_HARNESS_DEPS.items():
+            base.setdefault(name, spec)
+        owner["devDependencies"] = base
+        if harness.dom:
+            fe = data.setdefault("frontend", {})
+            dom = dict(fe.get("devDependencies") or {})
+            for name, spec in _JS_TEST_HARNESS_DEPS_DOM.items():
+                dom.setdefault(name, spec)
+            fe["devDependencies"] = dom
+
+
 def resolve_scaffold_config(
     project_id: str, design_package: dict[str, Any] | None = None
 ) -> ScaffoldConfig:
@@ -401,6 +501,29 @@ def resolve_scaffold_config(
     # root) and the render step collapses to a single combined manifest to avoid a collision.
     merged["_backend_root"] = _single_top_dir(backend_tree)
     merged["_frontend_root"] = _single_top_dir(frontend_tree)
+    # BUT: when this pack will actually be planned by app.services.plan_builder's ADAPTIVE path
+    # (no legacy flat-CSV mapping — the same "rich_api_mapping absent" signal build_plan() uses),
+    # that path unconditionally re-roots every generated leaf under canonical backend/ / frontend/
+    # folders regardless of what the structure trees themselves are named or wrapped in (see
+    # plan_builder._reroot, which discards wrapper names like "quickbite-backend/" outright). This
+    # module's own _single_top_dir has no way to know that — it answers "what does this tree call
+    # its own wrapper?", not "where will build_plan() actually put the generated files?" — so left
+    # alone the two disagree on the project's layout for every adaptive pack. That's not
+    # cosmetic: a scaffold-owned jest.config's rootDir and its "@/" alias are computed from
+    # _backend_root/_frontend_root, so a wrong root makes them point at a namespace nothing was
+    # ever generated under (e.g. "src/" when the code actually landed at "frontend/src/"), and it
+    # decides whether backend+frontend collapse into ONE combined manifest — correct only when
+    # both sides truly end up at the same root, which never happens once build_plan reroots them
+    # to two DIFFERENT canonical folders. Override per side (only where that side has an actual
+    # tree to reroot — an empty tree has nothing for plan_builder to touch either).
+    if not has_rich_api_mapping(package):
+        if backend_tree:
+            merged["_backend_root"] = "backend/"
+        if frontend_tree:
+            merged["_frontend_root"] = "frontend/"
+    # Runs AFTER the roots are known: whether the harness needs the DOM stack depends on which
+    # sides share a project root, which _normalize (root-blind by design) cannot decide.
+    _add_jest_harness_deps(merged)
     return ScaffoldConfig(merged)
 
 
@@ -464,9 +587,21 @@ def render_scaffold(
     # package.json files, so collapse to ONE combined manifest — otherwise the backend would have no
     # manifest at all (issue 1b). Separated packs (distinct wrapper roots) get a manifest per side.
     if backend_on and frontend_on and language == "node" and be_root == fe_root:
+        scripts = {**(config.option("backend", "scripts", {}) or {}),
+                   **(config.option("frontend", "scripts", {}) or {})}
+        # A shared root can carry only ONE jest.config, so at most one side actually owns the
+        # rendered harness (see _jest_harness_plan) — that side's "test" script must win, not
+        # whichever side's scripts happened to be spread into the dict last. Real bug this
+        # guards against: a React frontend declaring "test": "vitest" silently overwrote a Node
+        # backend's "test": "jest" here purely by merge order, even though the harness this
+        # module actually renders at this root was the backend's jest.config.
+        harness_owner = next((h.owner for h in _jest_harness_plan(config.data) if h.root == be_root), None)
+        if harness_owner:
+            owner_test = (config.option(harness_owner, "scripts", {}) or {}).get("test")
+            if owner_test:
+                scripts["test"] = owner_test
         combined = {
-            "scripts": {**(config.option("backend", "scripts", {}) or {}),
-                        **(config.option("frontend", "scripts", {}) or {})},
+            "scripts": scripts,
             "dependencies": {**(config.option("frontend", "dependencies", {}) or {}),
                              **(config.option("backend", "dependencies", {}) or {})},
             "devDependencies": {**(config.option("frontend", "devDependencies", {}) or {}),
@@ -482,4 +617,21 @@ def render_scaffold(
                 entries.append({"path": be_root + "requirements.txt", "content": _render("requirements.txt.j2")})
         if frontend_on:
             entries.append({"path": fe_root + "package.json", "content": _render("package.json.j2")})
+
+    # JS test harness, emitted next to the manifest that declares jest. Deterministic on purpose:
+    # the LLM used to write jest.config.js from inside a BACKEND work item, blind to the React
+    # frontend sharing the same config — shipping testEnvironment:'node', a testMatch that skipped
+    # every .jsx/.ts/.tsx suite, and no Babel config at all. plan_builder keeps these paths OUT of
+    # every work item's target_files so the version rendered here is the one that survives.
+    for harness in _jest_harness_plan(config.data):
+        entries.append({"path": harness.root + "jest.config.cjs",
+                        "content": _render("jest.config.cjs.j2", dom=harness.dom)})
+        entries.append({"path": harness.root + "babel.config.cjs",
+                        "content": _render("babel.config.cjs.j2", dom=harness.dom)})
+        entries.append({"path": harness.root + "jest.setup.cjs",
+                        "content": _render("jest.setup.cjs.j2", dom=harness.dom)})
+        entries.append({"path": harness.root + "test-utils/fileMock.cjs",
+                        "content": _render("fileMock.cjs.j2")})
+        entries.append({"path": harness.root + "test-utils/styleMock.cjs",
+                        "content": _render("styleMock.cjs.j2")})
     return entries

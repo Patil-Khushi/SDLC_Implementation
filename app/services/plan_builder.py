@@ -11,6 +11,9 @@ Two builders, chosen by input shape:
   ``frontend-structure.json`` trees are authoritative — one item is emitted PER DIRECTORY so every
   file leaf is produced exactly once, and endpoints/tables/screens/req_ids are ATTACHED to those
   items as traceability + prompt-grounding context (they no longer decide which items exist).
+  Leaves the deterministic scaffold already renders (the jest/babel test harness — see
+  ``_SCAFFOLD_OWNED_RE``) are held back: they are produced by ``scaffold_node``, and letting a work
+  item target them would only let the LLM overwrite a known-correct file with a guess.
 * LEGACY (self-contained flat-CSV packs): per-operation/per-screen item generation is
   unchanged — one BACKEND item per operationId and one FRONTEND item per screen, grouped by
   (screen, layer) — but when structure trees are present, the overall output also runs the same
@@ -42,6 +45,7 @@ from typing import Any
 
 from app.models import WorkItem
 from app.services import design_pack
+from app.services.boilerplate import _jest_harness_plan, resolve_scaffold_config
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,74 @@ _PLAN_OUT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "implem
 def default_fixtures_dir() -> Path:
     """Repo ``fixtures/`` by default; override with the ``FIXTURES_DIR`` env var."""
     return Path(os.environ.get("FIXTURES_DIR", str(_REPO_ROOT / "fixtures")))
+
+
+def _load_pack_artifacts(pack: Path) -> dict[str, Any]:
+    """Top-level pack files as a ``name -> content`` dict (.json parsed, else text) — the same
+    shape :func:`app.services.boilerplate.resolve_scaffold_config` expects. Mirrors
+    ``scripts/run_fixture.py``'s ``_load_pack`` (kept as its own small copy here, rather than
+    imported, since ``scripts/`` depends on ``app/``, never the reverse).
+
+    Used ONLY by :func:`_harness_covered_sides` to answer "will the scaffold actually render a
+    Jest harness for this side of the pack?" — never fatal on its own; a pack this can't read
+    just means that question falls back to its conservative default (see there).
+    """
+    package: dict[str, Any] = {}
+    for path in sorted(pack.iterdir()):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if path.suffix == ".json":
+            try:
+                package[path.name] = json.loads(text)
+                continue
+            except json.JSONDecodeError:
+                pass
+        package[path.name] = text
+    return package
+
+
+def _harness_covered_sides(pack: Path) -> tuple[bool, bool]:
+    """(backend_covered, frontend_covered): whether ``app.services.boilerplate`` will actually
+    render a deterministic Jest test harness for that SIDE of this pack.
+
+    Why this matters here: :func:`_source_leaves` excludes jest.config/babel.config/jest.setup
+    leaves from every work item on the assumption the scaffold produces them instead (see
+    ``_SCAFFOLD_OWNED_RE``). That assumption can be wrong — a structure tree can list a
+    jest.config.js leaf under a side whose resolved capabilities never declare ``jest`` as a
+    devDependency, in which case ``_jest_harness_plan`` renders nothing for it — and until this
+    check existed nothing verified the two decisions agreed, so such a leaf was excluded from work
+    items AND never scaffolded: silently never generated at all.
+
+    Deliberately PER-SIDE, not per-exact-root: ``_jest_harness_plan``'s ``root`` is expressed in
+    the ORIGINAL (pre-rerooting) tree namespace (e.g. ``quickbite-backend/`` or ``""``), while the
+    adaptive builders here re-root every leaf under canonical ``backend/``/``frontend/`` folders
+    (see ``_reroot``) — those are two different path namespaces for the same project, and matching
+    on the exact root string would either never fire (if the scaffold's un-rerooted root doesn't
+    happen to equal ``"backend/"``/``"frontend/"``) or require reconciling that rerooting mismatch
+    too, which is a bigger change than this check. Per-side is the granularity both sides of the
+    mismatch can agree on without touching either one.
+
+    Best-effort and conservative: a resolution failure (unreadable pack, malformed capabilities
+    artifact) returns ``(True, True)`` — i.e. keep today's blanket exclusion — rather than
+    ``(False, False)``, because generating a harness config file with the LLM re-opens the exact
+    bug this exclusion exists to prevent (a single-sided work item guessing a jest.config that
+    breaks the other side). Only a POSITIVELY CONFIRMED absence of a planned harness un-excludes a
+    leaf.
+    """
+    try:
+        cfg = resolve_scaffold_config(pack.name, _load_pack_artifacts(pack))
+        owners = {h.owner for h in _jest_harness_plan(cfg.data)}
+    except Exception:
+        logger.exception(
+            "plan_builder: could not resolve the scaffold's jest-harness plan for %s — "
+            "conservatively treating every scaffold-owned leaf as covered", pack,
+        )
+        return True, True
+    return "backend" in owners, "frontend" in owners
 
 
 # --------------------------------------------------------------------------- helpers
@@ -163,6 +235,12 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
     """
     pack = Path(pack_dir)
     roles = design_pack.detect_roles(pack)
+    # Whether the scaffold will actually render a Jest harness for each side — see
+    # _harness_covered_sides. Resolved ONCE, up front, and threaded through every call below that
+    # decides whether a jest.config/babel.config/jest.setup leaf is scaffold-owned (excluded) or
+    # ordinary (generated): the builders' own exclusion, the completeness sweep, and the final
+    # completeness check must all agree, or a leaf can vanish from both without ever being flagged.
+    backend_covers, frontend_covers = _harness_covered_sides(pack)
 
     # The adaptive path re-roots every file under canonical backend/ , frontend/ folders (a clean
     # two-folder project regardless of how the pack wrapped its trees); the legacy path keeps its
@@ -191,7 +269,10 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
         # catch-all items, exactly like the adaptive path does. (Zero per-operation items is NOT
         # itself suspicious — a pack can legitimately have no REST surface, e.g. a client-only
         # game — so this reconciles on FILE coverage, not on whether any operation matched.)
-        items += _reconcile_uncovered(backend_tree, frontend_tree, items)
+        items += _reconcile_uncovered(
+            backend_tree, frontend_tree, items,
+            backend_covers=backend_covers, frontend_covers=frontend_covers,
+        )
     else:
         # Adaptive path: normalize whatever formats arrived, then build from the neutral view.
         resolved = design_pack.resolve(pack, roles)
@@ -202,12 +283,18 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
             )
         backend_tree, frontend_tree = resolved.backend_tree, resolved.frontend_tree
         reroot_paths = True  # the adaptive builders emit canonical backend/ , frontend/ paths
-        items = _backend_items_adaptive(resolved) + _frontend_items_adaptive(resolved)
-        # Authoritative-manifest guarantee: every non-test file leaf in the structure trees must be
-        # produced by SOME work item. The builders are exhaustive by construction (one item per
-        # directory), so this normally adds nothing — it's a guard that turns any future coverage
-        # gap into an explicit catch-all item instead of a silent omission.
-        items += _reconcile_uncovered(backend_tree, frontend_tree, items, reroot=True)
+        items = (
+            _backend_items_adaptive(resolved, harness_covers=backend_covers)
+            + _frontend_items_adaptive(resolved, harness_covers=frontend_covers)
+        )
+        # Authoritative-manifest guarantee: every non-test, non-scaffold-owned file leaf in the
+        # structure trees must be produced by SOME work item. The builders are exhaustive by
+        # construction (one item per directory), so this normally adds nothing — it's a guard that
+        # turns any future coverage gap into an explicit catch-all item instead of a silent omission.
+        items += _reconcile_uncovered(
+            backend_tree, frontend_tree, items, reroot=True,
+            backend_covers=backend_covers, frontend_covers=frontend_covers,
+        )
 
     # Final completeness check, run for BOTH paths: after the builders AND the reconcile sweep,
     # every non-test structure-tree leaf must be targeted by some item. This should be
@@ -215,7 +302,10 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
     # hit here means a leaf slipped past BOTH stages (a genuinely new, unanticipated gap, not the
     # already-fixed "zero per-operation matches" case, which reconcile already covers). Warn loudly
     # with the exact missing paths rather than silently ship an incomplete app again.
-    still_missing = _missing_after_reconcile(backend_tree, frontend_tree, items, reroot=reroot_paths)
+    still_missing = _missing_after_reconcile(
+        backend_tree, frontend_tree, items, reroot=reroot_paths,
+        backend_covers=backend_covers, frontend_covers=frontend_covers,
+    )
     if still_missing:
         logger.warning(
             "%s: %d design file(s) are not targeted by any work item even after reconciliation — "
@@ -229,20 +319,28 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
 
 
 def _missing_after_reconcile(
-    backend_tree: dict, frontend_tree: dict, items: list[WorkItem], *, reroot: bool = False
+    backend_tree: dict, frontend_tree: dict, items: list[WorkItem], *,
+    reroot: bool = False, backend_covers: bool = True, frontend_covers: bool = True,
 ) -> list[str]:
-    """Non-test structure-tree leaves NOT targeted by any of ``items``, sorted. Empty in normal
-    operation (``_reconcile_uncovered`` already swept everything it found) — a non-empty result
-    means a leaf slipped past both the builders and the sweep, e.g. a future edit to either one.
+    """Generatable structure-tree leaves NOT targeted by any of ``items``, sorted (tests and
+    scaffold-owned harness configs are not generatable — see :func:`_source_leaves`). Empty in
+    normal operation (``_reconcile_uncovered`` already swept everything it found) — a non-empty
+    result means a leaf slipped past both the builders and the sweep, e.g. a future edit to
+    either one.
 
     ``reroot`` compares in the canonical ``backend/`` / ``frontend/`` form the adaptive builders
-    emit; the legacy path leaves it off so its byte-for-byte paths are compared as-is."""
+    emit; the legacy path leaves it off so its byte-for-byte paths are compared as-is.
+    ``backend_covers``/``frontend_covers`` (see :func:`_harness_covered_sides`) must match what the
+    builders themselves used, or a scaffold-owned leaf excluded there but not here would show up
+    as a false "missing" (or the reverse: included there but excluded here would hide a real gap).
+    """
     targeted = {f for item in items for f in item.target_files}
     if reroot:
-        expected = {p for p, _ in _rerooted_source_leaves(backend_tree, "backend")}
-        expected |= {p for p, _ in _rerooted_source_leaves(frontend_tree, "frontend")}
+        expected = {p for p, _ in _rerooted_source_leaves(backend_tree, "backend", harness_covers=backend_covers)}
+        expected |= {p for p, _ in _rerooted_source_leaves(frontend_tree, "frontend", harness_covers=frontend_covers)}
     else:
-        expected = {p for tree in (backend_tree, frontend_tree) for p, _ in _source_leaves(tree)}
+        expected = {p for p, _ in _source_leaves(backend_tree, harness_covers=backend_covers)}
+        expected |= {p for p, _ in _source_leaves(frontend_tree, harness_covers=frontend_covers)}
     return sorted(p for p in expected if p not in targeted)
 
 
@@ -492,11 +590,46 @@ def _frontend_items(rows: list[dict[str, str]], frontend: dict) -> list[WorkItem
 # real structure trees with the same stack-agnostic role classifier used above.
 
 def _is_test_path(path: str) -> bool:
+    """True for a test-file path: colocated JS-style (``*.test.js``/``*.spec.js``), Python's
+    ``test_*.py`` prefix OR ``*_test.py`` suffix convention, or any path under a ``tests/``/
+    ``__tests__/`` directory.
+
+    The suffix form needs the extension stripped before the ``endswith`` check, or it never
+    matches: ``"login_test.py"``'s basename ends in ``".py"``, not ``"_test"``, so the previous
+    ``base.endswith((".test", "_test"))`` (checked against the FULL basename, extension included)
+    only ever matched an extensionless ``foo_test`` — never the actual ``*_test.py`` convention it
+    was meant to catch. The prefix form (``startswith("test_")``) doesn't have this problem — a
+    prefix check is extension-agnostic — so it stays on the full basename, unchanged.
+    """
     base = _basename(path)
-    if ".test." in base or ".spec." in base or base.startswith("test_") or base.endswith((".test", "_test")):
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    if ".test." in base or ".spec." in base or base.startswith("test_") or stem.endswith("_test"):
         return True
     segs = path.lower().split("/")
     return "tests" in segs or "__tests__" in segs
+
+
+#: Test-harness config files the DETERMINISTIC scaffold owns (rendered by
+#: :mod:`app.services.boilerplate` from templates whose correct shape is already known:
+#: ``jest.config.cjs``, ``babel.config.cjs``, ``jest.setup.cjs``).
+#:
+#: They must NOT appear in any work item's ``target_files``. ``scaffold_node`` writes them BEFORE
+#: code generation, so a work item listing one has the LLM silently overwrite the good version with
+#: a guessed one — and the guess is made from inside a single-sided work item that cannot see the
+#: whole project. That is exactly how a full-stack repo shipped a backend-framed jest.config.js
+#: (``testEnvironment: 'node'``, a testMatch catching only ``*.test.js``, no Babel config at all)
+#: over a React frontend: 103 of 235 test files were never collected and every JSX/ESM test failed
+#: to parse. Matching is by NAME, not extension, so a ``.js``/``.cjs``/``.mjs``/``.ts``/``.json``
+#: variant is excluded just the same.
+_SCAFFOLD_OWNED_RE = re.compile(
+    r"^(?:jest\.config|jest\.setup|babel\.config)\.[cm]?[jt]s(?:on)?$"
+    r"|^\.babelrc(?:\.[a-z]+)?$"
+)
+
+
+def _is_scaffold_owned(path: str) -> bool:
+    """True for a file the deterministic scaffold renders, so no work item should target it."""
+    return not _is_dir_leaf(path) and bool(_SCAFFOLD_OWNED_RE.match(_basename(path)))
 
 
 def _is_validator(path: str) -> bool:
@@ -704,17 +837,29 @@ def _normalize_binary_assets(leaves: list[tuple[str, Any]]) -> list[tuple[str, A
     return out
 
 
-def _source_leaves(tree: dict) -> list[tuple[str, Any]]:
+def _source_leaves(tree: dict, *, harness_covers: bool = True) -> list[tuple[str, Any]]:
     """File leaves to generate for a structure tree.
 
-    Excludes test files and directory entries — EXCEPT bulk ``assets/…/`` folders, which are
+    Excludes test files, directory entries, and the test-harness configs the deterministic scaffold
+    already renders (see :data:`_SCAFFOLD_OWNED_RE`) — EXCEPT bulk ``assets/…/`` folders, which are
     expanded into concrete ``.svg`` targets (see :func:`_asset_leaves`) so the assets they stand
     for are actually generated. Binary targets the generator can't emit are normalized to SVG
-    (see :func:`_normalize_binary_assets`). Centralizing both here keeps the builders,
-    ``_reconcile_uncovered`` and ``_missing_after_reconcile`` in agreement.
+    (see :func:`_normalize_binary_assets`). Centralizing all of it here keeps the builders,
+    ``_reconcile_uncovered`` and ``_missing_after_reconcile`` in agreement — and, for the
+    scaffold-owned files, keeps the "every leaf is produced" guarantee honest: they ARE produced,
+    just by ``scaffold_node`` rather than by a work item, so counting them as uncovered would be
+    the false alarm and generating them would be the real bug.
+
+    ``harness_covers`` (default ``True`` = today's behaviour) should be the caller's
+    ``_harness_covered_sides`` result for THIS tree's side: when the scaffold will NOT actually
+    render a harness here (``False``), a scaffold-owned leaf is left in rather than dropped — an
+    unproduced leaf is a worse failure (never generated at all) than letting a work item generate
+    its own best-effort version.
     """
     leaves: list[tuple[str, Any]] = [
-        (p, d) for p, d in _walk(tree) if not _is_dir_leaf(p) and not _is_test_path(p)
+        (p, d)
+        for p, d in _walk(tree)
+        if not _is_dir_leaf(p) and not _is_test_path(p) and not (_is_scaffold_owned(p) and harness_covers)
     ]
     leaves += _asset_leaves(tree)
     return _normalize_binary_assets(leaves)
@@ -772,15 +917,17 @@ def _reroot(path: str, side: str) -> str:
     return "/".join([side, *segs]) if segs else side
 
 
-def _rerooted_source_leaves(tree: dict, side: str) -> list[tuple[str, Any]]:
+def _rerooted_source_leaves(tree: dict, side: str, *, harness_covers: bool = True) -> list[tuple[str, Any]]:
     """Like :func:`_source_leaves` but re-rooted under a single canonical ``side/`` folder
     ('backend'/'frontend'), filtering out non-file metadata leaves (e.g. a bare ``notes`` key).
     Re-rooting happens AFTER asset synthesis + favicon normalization, so those transformations
     are preserved. Dropped (extensionless, non-known) leaves are logged at DEBUG so a later "why
     wasn't this file generated?" is easy to trace — if a real extensionless file (e.g. ``bin/serve``)
-    shows up here, add it to :data:`_KNOWN_EXTENSIONLESS_FILES`."""
+    shows up here, add it to :data:`_KNOWN_EXTENSIONLESS_FILES`.
+
+    ``harness_covers`` passes straight through to :func:`_source_leaves` — see there."""
     out: list[tuple[str, Any]] = []
-    for path, desc in _source_leaves(tree):
+    for path, desc in _source_leaves(tree, harness_covers=harness_covers):
         if _looks_like_file(path):
             out.append((_reroot(path, side), desc))
         else:
@@ -827,8 +974,10 @@ def _items_from_groups(
     return items
 
 
-def _backend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
-    leaves = _rerooted_source_leaves(resolved.backend_tree, "backend")
+def _backend_items_adaptive(
+    resolved: "design_pack.ResolvedPack", *, harness_covers: bool = True
+) -> list[WorkItem]:
+    leaves = _rerooted_source_leaves(resolved.backend_tree, "backend", harness_covers=harness_covers)
     if not leaves:
         return []
     handlers = [p for p, _ in leaves if _is_handler(p)]
@@ -861,8 +1010,10 @@ def _backend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkIt
     )
 
 
-def _frontend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkItem]:
-    leaves = _rerooted_source_leaves(resolved.frontend_tree, "frontend")
+def _frontend_items_adaptive(
+    resolved: "design_pack.ResolvedPack", *, harness_covers: bool = True
+) -> list[WorkItem]:
+    leaves = _rerooted_source_leaves(resolved.frontend_tree, "frontend", harness_covers=harness_covers)
     if not leaves:
         return []
     pages = [p for p, _ in leaves if _is_page(p)]
@@ -891,7 +1042,8 @@ def _frontend_items_adaptive(resolved: "design_pack.ResolvedPack") -> list[WorkI
 
 
 def _reconcile_uncovered(
-    backend_tree: dict, frontend_tree: dict, items: list[WorkItem], *, reroot: bool = False
+    backend_tree: dict, frontend_tree: dict, items: list[WorkItem], *,
+    reroot: bool = False, backend_covers: bool = True, frontend_covers: bool = True,
 ) -> list[WorkItem]:
     """Sweep any structure-tree file not already covered by an item into a catch-all item.
 
@@ -904,13 +1056,22 @@ def _reconcile_uncovered(
 
     ``reroot`` re-roots swept leaves under canonical ``backend/`` / ``frontend/`` folders, matching
     what the adaptive builders emit. The legacy path leaves it off to keep its byte-for-byte paths.
+    ``backend_covers``/``frontend_covers`` (see :func:`_harness_covered_sides`) must match what the
+    builders used for the SAME side, or a scaffold-owned leaf could be swept in here as a catch-all
+    item even though the builder above already (correctly, or incorrectly) excluded it.
     """
-    leaves_of = _rerooted_source_leaves if reroot else lambda tree, _side: _source_leaves(tree)
+    leaves_of = (
+        (lambda tree, side, covers: _rerooted_source_leaves(tree, side, harness_covers=covers))
+        if reroot else
+        (lambda tree, _side, covers: _source_leaves(tree, harness_covers=covers))
+    )
     covered = {f for item in items for f in item.target_files}
     used_ids = {item.id for item in items}
     extra: list[WorkItem] = []
-    for prefix, tree in (("backend", backend_tree), ("frontend", frontend_tree)):
-        uncovered = [(p, d) for p, d in leaves_of(tree, prefix) if p not in covered]
+    for prefix, tree, covers in (
+        ("backend", backend_tree, backend_covers), ("frontend", frontend_tree, frontend_covers),
+    ):
+        uncovered = [(p, d) for p, d in leaves_of(tree, prefix, covers) if p not in covered]
         if uncovered:
             extra += _items_from_groups(prefix, uncovered, used_ids=used_ids)
     return extra

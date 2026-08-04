@@ -69,18 +69,26 @@ rework loop) is gone — a completed plan commits automatically. The escalation 
 ``needs_human_review`` for the orchestrator, but no longer pauses on an interrupt (it had no
 resume contract and always ended the run anyway).
 
-Compiled with a checkpointer so ``get_state`` (used by the API/demo to read a finished run) works;
-the graph itself no longer contains any interrupt().
+Compiled with a disk-backed (SQLite) checkpointer so ``get_state`` (used by the API/demo to read a
+finished run) works, AND so a run that crashes mid-graph (an uncaught exception — e.g. a transient
+network error during an LLM call) can be resumed from its last completed node with
+``workflow.invoke(None, config)`` instead of restarting the whole pipeline; the graph itself still
+contains no interrupt().
 """
 
 from __future__ import annotations
 
-from langgraph.checkpoint.memory import MemorySaver
+import sqlite3
+from pathlib import Path
+
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.debugging import debugging_node
 from app.agents.refactoring import refactoring_node
 from app.agents.repair import repair_node
+from app.config.settings import get_settings
 from app.graph import nodes
 from app.graph.router import (
     route_after_codegen,
@@ -93,6 +101,58 @@ from app.graph.router import (
     route_after_test_run,
 )
 from app.graph.state import WorkflowState
+from app.models import WorkItem
+
+
+#: This module's own directory is ``<service_root>/app/graph/``, so two ``.parent``s up is the
+#: service root regardless of how deeply THAT root itself is nested (e.g. a flattened checkout
+#: vs. the intended ``services/implementation/`` layout) — anchoring on this file's own location
+#: avoids hardcoding a parent-count borrowed from a different module's path depth.
+_SERVICE_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def resolve_checkpoint_db_path(db_path: str | None = None) -> str:
+    """The checkpoint DB path actually used, as an ABSOLUTE path (or the literal ``":memory:"``).
+
+    ``Settings.checkpoint_db_path`` defaults to the relative string ``"app/workspace/checkpoints.
+    sqlite"``, and ``sqlite3.connect`` resolves a relative path against the PROCESS's current
+    working directory at connect time — which is whatever directory the app/script happened to be
+    launched from. Two launches from different CWDs (the FastAPI app from the repo root, a demo
+    script from ``scripts/``, an IDE run configuration with its own CWD, ...) then each connect to
+    a DIFFERENT file, silently splitting what looks like one project's checkpoint history in two:
+    a crash-resume can find nothing to resume from, or (worse) a fresh run's ``--project`` name
+    coincidentally has no checkpoint in ITS interpretation of the path when one really does exist
+    under a sibling path. Resolving a relative path against :data:`_SERVICE_ROOT` instead of CWD
+    makes the file the same absolute path no matter where the process was launched from, and this
+    function is also called from ``scripts/run_fixture.py`` so its user-facing messages can name
+    the exact file being checked, rather than repeating the ambiguous configured string.
+    """
+    db_path = get_settings().checkpoint_db_path if db_path is None else db_path
+    if db_path == ":memory:":
+        return db_path
+    path = Path(db_path)
+    return str(path if path.is_absolute() else _SERVICE_ROOT / path)
+
+
+def _build_checkpointer() -> SqliteSaver:
+    """A disk-backed checkpointer keyed by ``thread_id`` (== ``run_id``): a run crashing mid-graph
+    (e.g. a transient network drop during an LLM call) can resume from its last completed node
+    via ``workflow.invoke(None, config)`` instead of restarting the whole pipeline — unlike
+    ``MemorySaver``, which loses all history the moment the process exits.
+
+    ``WorkItem`` (stored in ``work_items``/``current_work_item``) is a pydantic model, not a
+    plain dict — the default serde's msgpack allowlist only permits it with a "will be blocked
+    in a future version" warning on every checkpoint read. Explicitly allow-listing it here keeps
+    it deserializing as a real ``WorkItem`` (not a plain dict, which would break every node's
+    attribute access, e.g. ``work_item.target_files``) once a future langgraph release tightens
+    the default, and silences the warning now.
+    """
+    db_path = resolve_checkpoint_db_path()
+    if db_path != ":memory:":
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    serde = JsonPlusSerializer(allowed_msgpack_modules=[WorkItem])
+    return SqliteSaver(conn, serde=serde)
 
 
 def build_graph():
@@ -185,8 +245,9 @@ def build_graph():
     graph.add_edge("finalize", "package")  # PR opened (or skipped/failed) → build the zip output
     graph.add_edge("package", END)         # zip ready (or failed) → done
 
-    # Checkpointer kept only so get_state(config) can read a finished run; there are no interrupts.
-    return graph.compile(checkpointer=MemorySaver())
+    # Disk-backed checkpointer: lets get_state(config) read a finished run AND lets a crashed run
+    # resume from its last completed node (see _build_checkpointer) — there are no interrupts.
+    return graph.compile(checkpointer=_build_checkpointer())
 
 
 # Compiled once at import; FastAPI invokes this.

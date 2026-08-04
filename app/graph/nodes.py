@@ -23,7 +23,7 @@ from app.integrations.github import get_github_client
 from app.integrations.review_sandbox import is_allowed_repo_url
 from app.services.boilerplate import render_scaffold
 from app.services.packaging import build_project_zip
-from app.services.wiring import reconcile_wiring
+from app.services.wiring import find_unresolved_imports, reconcile_wiring
 
 logger = logging.getLogger(__name__)
 
@@ -275,10 +275,10 @@ def gate_node(state: WorkflowState) -> WorkflowState:
 
     try:
         result = executor.files_complete(project_dir, target_files)
-        checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "exit_code": result.exit_code})
+        checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code})
     except Exception as exc:  # noqa: BLE001 - executor failure becomes a gate failure, not a crash
         logger.exception("gate: files_complete raised for run %s", state.get("run_id"))
-        checks.append({"name": "files_complete", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1})
+        checks.append({"name": "files_complete", "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1})
 
     state["gate_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
     return state
@@ -300,10 +300,10 @@ def debug_check_node(state: WorkflowState) -> WorkflowState:
     for name, check in (("compile", executor.compile), ("build", executor.build)):
         try:
             result = check(project_dir)
-            checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "exit_code": result.exit_code})
+            checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code})
         except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
             logger.exception("debug_check: %s raised for run %s", name, state.get("run_id"))
-            checks.append({"name": name, "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1})
+            checks.append({"name": name, "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1})
 
     state["debug_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
     return state
@@ -332,10 +332,10 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
 
     try:
         result = executor.test(project_dir)
-        check: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "exit_code": result.exit_code}
+        check: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code}
     except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
         logger.exception("unit_test_run: test raised for run %s", state.get("run_id"))
-        check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "exit_code": -1}
+        check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1}
 
     state["test_result"] = {"passed": check["passed"], "checks": [check]}
     return state
@@ -497,9 +497,12 @@ def package_node(state: WorkflowState) -> WorkflowState:
             executor=executor,
             project_dir=project_dir,
             generated_code=state.get("generated_code", []),
+            unit_tests=state.get("unit_tests", []),
             documentation=state.get("documentation", ""),
             review_report=state.get("review_report", ""),
             security_report=state.get("security_report", ""),
+            debugging_report=state.get("debugging_report", ""),
+            unit_test_report=state.get("unit_test_report", ""),
         )
     except Exception as exc:  # noqa: BLE001 - a packaging failure must not crash a finished run
         logger.exception("packaging failed for run %s", state.get("run_id"))
@@ -612,6 +615,38 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
         logger.exception("wiring reconciliation failed for run %s", state.get("run_id"))
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[reconcile] FAILED: {exc}\n"
         return state
+
+    # Report-only companion pass: relative imports that resolve to nothing in the generated file
+    # set. Deliberately NOT auto-fixed — the two real shapes (a module nobody generated, and one
+    # generated under a different convention) are repaired either by creating the file or by
+    # renaming the importer, and choosing between them is a judgement call that belongs to the LLM
+    # debugging agent. Surfacing them here means that agent is handed the list up front instead of
+    # rediscovering them one crash at a time from test stack traces.
+    #
+    # Scanned over ``{**files, **changed}`` (the wiring fixer's OWN output), not the pre-fix
+    # ``files`` — the router fixer above can un-comment a require it just wired in, and analyzing
+    # the pre-fix set would miss whatever import that newly-live line introduces.
+    try:
+        unresolved = find_unresolved_imports({**files, **changed})
+    except Exception:  # noqa: BLE001 - an analysis bug must never crash a finished plan
+        logger.exception("unresolved-import analysis failed for run %s", state.get("run_id"))
+        unresolved = []
+    if unresolved:
+        logger.warning(
+            "[reconcile] run=%s | %d unresolved import(s) — left for the debugging agent",
+            state.get("run_id") or "-",
+            len(unresolved),
+        )
+        # Stored as plain dicts (not the dataclass, not pre-rendered strings) so the Debugging
+        # agent can both RENDER them (UnresolvedImport.as_note()) and PRUNE them once a later round
+        # resolves one — see app.agents.debugging._prune_unresolved. Without a structured form the
+        # agent could only ever hand back the identical note text, with no way to tell "still
+        # broken" from "fixed two rounds ago".
+        state["unresolved_imports"] = [item.to_dict() for item in unresolved]
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            f"[reconcile] {len(unresolved)} unresolved import(s) (not auto-fixed):\n"
+            + "".join(f"    - {item.as_note()}\n" for item in unresolved)
+        )
 
     if not changed:
         state["generation_summary"] = (state.get("generation_summary") or "") + "[reconcile] no wiring changes\n"

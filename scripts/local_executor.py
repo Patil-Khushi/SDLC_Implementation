@@ -41,7 +41,7 @@ _IMPL_DIR = Path(__file__).resolve().parent.parent
 if str(_IMPL_DIR) not in sys.path:
     sys.path.insert(0, str(_IMPL_DIR))
 
-from app.integrations.executor import CheckResult, CommitResult, Executor, RunResult, StrPath
+from app.integrations.executor import CheckResult, CommitResult, Executor, RunResult, StrPath, cap_output
 
 # On Windows, npm/npx ship as `.cmd` shims; `subprocess.run(["npm", ...])` without `shell=True`
 # does NOT resolve the PATHEXT extension the way a shell would, and fails with "command not
@@ -51,11 +51,18 @@ from app.integrations.executor import CheckResult, CommitResult, Executor, RunRe
 _NPM = shutil.which("npm") or "npm"
 _NPX = shutil.which("npx") or "npx"
 
+# Output capping (real incident: a project-wide `npm test` across 4000+ tests produced 7.5M chars
+# of stderr, blowing the LLM's context outright) now lives in app.integrations.executor.cap_output
+# — shared with MCPExecutor, which needs the exact same protection and previously lacked it.
+
 
 def _global_git_identity() -> tuple[str, str]:
     """The developer's global git identity (user.name, user.email), or ('','') if unset."""
     def _g(key: str) -> str:
-        r = subprocess.run(["git", "config", "--global", key], capture_output=True, text=True)
+        r = subprocess.run(
+            ["git", "config", "--global", key],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
         return r.stdout.strip() if r.returncode == 0 else ""
     return _g("user.name"), _g("user.email")
 
@@ -97,9 +104,10 @@ class LocalDiskExecutor(Executor):
         workdir.mkdir(parents=True, exist_ok=True)
         try:
             proc = subprocess.run(
-                list(cmd), cwd=str(workdir), capture_output=True, text=True, timeout=timeout or 120, env=env
+                list(cmd), cwd=str(workdir), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout or 120, env=env,
             )
-            return RunResult(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+            return RunResult(stdout=cap_output(proc.stdout), stderr=cap_output(proc.stderr), exit_code=proc.returncode)
         except subprocess.TimeoutExpired:
             return RunResult(stdout="", stderr="[timed out]", exit_code=124, timed_out=True)
         except FileNotFoundError as exc:
@@ -144,6 +152,25 @@ class LocalDiskExecutor(Executor):
         return self.run_command([_NPM, "install", "--no-audit", "--no-fund"], cwd=project_dir, timeout=600)
 
     @staticmethod
+    def _candidate_roots(project_dir: StrPath) -> list[tuple[str, str]]:
+        """(label-prefix, root) pairs to probe for a manifest.
+
+        The ADAPTIVE ``plan_builder`` path unconditionally re-roots every generated file under
+        exactly ``backend/`` and ``frontend/`` when both sides are enabled, so a split-root
+        project's manifests (``requirements.txt`` / ``package.json`` / ``tsconfig.json``) live
+        one level below ``project_dir``, not at it. Checking ``backend``/``frontend`` is
+        ADDITIVE to checking ``project_dir`` itself — never a replacement — so a combined-
+        manifest project, a legacy pack, or a backend-only/frontend-only project (manifest
+        directly at ``project_dir``) keeps working exactly as before.
+        """
+        base = str(project_dir)
+        return [
+            ("", base),
+            ("backend/", f"{base}/backend"),
+            ("frontend/", f"{base}/frontend"),
+        ]
+
+    @staticmethod
     def _aggregate(name: str, results: list[tuple[str, RunResult]]) -> CheckResult:
         for label, run in results:
             if not run.ok:
@@ -155,44 +182,49 @@ class LocalDiskExecutor(Executor):
 
     def compile(self, project_dir: StrPath) -> CheckResult:
         results = [("py", self.run_command(["python", "-m", "compileall", "-q", "."], cwd=project_dir))]
-        if self._exists(project_dir, "tsconfig.json"):  # frontend
-            # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all — unlike
-            # compileall (syntax-only, no import resolution), so node_modules must exist first.
-            results.append(("npm-install", self._npm_install(project_dir)))
-            results.append(("tsc", self.run_command([_NPX, "tsc", "--noEmit"], cwd=project_dir, timeout=180)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "tsconfig.json"):  # frontend
+                # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all —
+                # unlike compileall (syntax-only, no import resolution), so node_modules must
+                # exist first.
+                results.append((f"{prefix}npm-install", self._npm_install(root)))
+                results.append((f"{prefix}tsc", self.run_command([_NPX, "tsc", "--noEmit"], cwd=root, timeout=180)))
         return self._aggregate("compile", results)
 
     def build(self, project_dir: StrPath) -> CheckResult:
         results: list[tuple[str, RunResult]] = []
-        if self._exists(project_dir, "requirements.txt"):
-            results.append(("pip", self.run_command(
-                ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
-                cwd=project_dir, timeout=300,
-            )))
-        if self._exists(project_dir, "package.json"):
-            # Mirrors the pip branch above: install before building. Without this, `npm run
-            # build` always fails on a fresh checkout (no node_modules).
-            results.append(("npm-install", self._npm_install(project_dir)))
-            results.append(("npm", self.run_command([_NPM, "run", "build", "--if-present"], cwd=project_dir, timeout=300)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "requirements.txt"):
+                results.append((f"{prefix}pip", self.run_command(
+                    ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
+                    cwd=root, timeout=300,
+                )))
+            if self._exists(root, "package.json"):
+                # Mirrors the pip branch above: install before building. Without this, `npm run
+                # build` always fails on a fresh checkout (no node_modules).
+                results.append((f"{prefix}npm-install", self._npm_install(root)))
+                results.append((f"{prefix}npm", self.run_command([_NPM, "run", "build", "--if-present"], cwd=root, timeout=300)))
         return self._aggregate("build", results) if results else CheckResult(name="build", passed=True)
 
     def test(self, project_dir: StrPath) -> CheckResult:
         results: list[tuple[str, RunResult]] = []
-        if self._exists(project_dir, "requirements.txt"):
-            # Gated (unlike the sandbox executor's unconditional pytest) — pytest exits 5 ("no
-            # tests collected") on a project with zero Python files, which would otherwise mark a
-            # pure-JS project's test check as failed.
-            results.append(("pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=project_dir, timeout=180)))
-        if self._exists(project_dir, "package.json"):
-            results.append(("npm-test", self.run_command([_NPM, "test", "--if-present"], cwd=project_dir, timeout=300)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "requirements.txt"):
+                # Gated (unlike the sandbox executor's unconditional pytest) — pytest exits 5
+                # ("no tests collected") on a project with zero Python files, which would
+                # otherwise mark a pure-JS project's test check as failed.
+                results.append((f"{prefix}pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=root, timeout=180)))
+            if self._exists(root, "package.json"):
+                results.append((f"{prefix}npm-test", self.run_command([_NPM, "test", "--if-present"], cwd=root, timeout=300)))
         return self._aggregate("test", results) if results else CheckResult(name="test", passed=True)
 
     def lint(self, project_dir: StrPath) -> CheckResult:
         results: list[tuple[str, RunResult]] = []
-        if self._exists(project_dir, "requirements.txt"):
-            results.append(("ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=project_dir, timeout=120)))
-        if self._exists(project_dir, "package.json"):
-            results.append(("eslint", self.run_command([_NPX, "eslint", "."], cwd=project_dir, timeout=180)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "requirements.txt"):
+                results.append((f"{prefix}ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=root, timeout=120)))
+            if self._exists(root, "package.json"):
+                results.append((f"{prefix}eslint", self.run_command([_NPX, "eslint", "."], cwd=root, timeout=180)))
         return self._aggregate("lint", results) if results else CheckResult(name="lint", passed=True)
 
     # -- commit (real git) + optional publish to GitHub (real push) ----------

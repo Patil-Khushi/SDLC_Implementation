@@ -1,0 +1,447 @@
+{
+  "app_name": "Vantage Commerce Platform – Backend API",
+  "groups": [
+    {
+      "name": "Core / Runtime",
+      "vars": [
+        {
+          "key": "NODE_ENV",
+          "example": "development",
+          "secret": false,
+          "required": true,
+          "comment": "Runtime environment: development | production | test"
+        },
+        {
+          "key": "PORT",
+          "example": "3000",
+          "secret": false,
+          "required": true,
+          "comment": "TCP port the Express server listens on"
+        },
+        {
+          "key": "API_BASE_URL",
+          "example": "http://localhost:3000",
+          "secret": false,
+          "required": true,
+          "comment": "Fully-qualified base URL of this API, used for self-referential links and cookie domains"
+        },
+        {
+          "key": "CLIENT_APP_URL",
+          "example": "http://localhost:5173",
+          "secret": false,
+          "required": true,
+          "comment": "Origin of the React/Vite storefront; used for CORS and redirect targets"
+        },
+        {
+          "key": "ADMIN_APP_URL",
+          "example": "http://localhost:5174",
+          "secret": false,
+          "required": true,
+          "comment": "Origin of the in-app admin module; used for CORS allow-list"
+        }
+      ]
+    },
+    {
+      "name": "MySQL 8 – Primary Datastore",
+      "vars": [
+        {
+          "key": "DB_HOST",
+          "example": "127.0.0.1",
+          "secret": false,
+          "required": true,
+          "comment": "Hostname or IP of the MySQL 8 server"
+        },
+        {
+          "key": "DB_PORT",
+          "example": "3306",
+          "secret": false,
+          "required": true,
+          "comment": "MySQL server port"
+        },
+        {
+          "key": "DB_NAME",
+          "example": "vantage_commerce",
+          "secret": false,
+          "required": true,
+          "comment": "Name of the application database"
+        },
+        {
+          "key": "DB_USER",
+          "example": "vantage_app",
+          "secret": false,
+          "required": true,
+          "comment": "MySQL user the application connects as"
+        },
+        {
+          "key": "DB_PASSWORD",
+          "example": "",
+          "secret": true,
+          "required": true,
+          "comment": "Password for DB_USER"
+        },
+        {
+          "key": "DB_CONNECTION_LIMIT",
+          "example": "20",
+          "secret": false,
+          "required": false,
+          "comment": "Maximum connections in the MySQL pool"
+        },
+        {
+          "key": "DB_SSL",
+          "example": "false",
+          "secret": false,
+          "required": false,
+          "comment": "Require TLS for MySQL connections (true in production)"
+        }
+      ]
+    },
+    {
+      "name": "PostgreSQL – Notification Store",
+      "vars": [
+        {
+          "key": "NOTIFY_DB_HOST",
+          "example": "127.0.0.1",
+          "secret": false,
+          "required": true,
+          "comment": "Hostname of the PostgreSQL instance that holds the notifications table"
+        },
+        {
+          "key": "NOTIFY_DB_PORT",
+          "example": "5432",
+          "secret": false,
+          "required": true,
+          "comment": "PostgreSQL server port"
+        },
+        {
+          "key": "NOTIFY_DB_NAME",
+          "example": "vantage_notifications",
+          "secret": false,
+          "required": true,
+          "comment": "PostgreSQL database name for the notification store"
+        },
+        {
+          "key": "NOTIFY_DB_USER",
+          "example": "vantage_notify",
+          "secret": false,
+          "required": true,
+          "comment": "PostgreSQL user for the notification service"
+        },
+        {
+          "key": "NOTIFY_DB_PASSWORD",
+          "example": "",
+          "secret": true,
+          "required": true,
+          "comment": "Password for NOTIFY_DB_USER"
+        },
+        {
+          "key": "NOTIFY_DB_SSL",
+          "example": "false",
+          "secret": false,
+          "required": false,
+          "comment": "Require TLS for PostgreSQL connections (true in production)"
+        },
+        {
+          "key": "NOTIFICATION_POLL_INTERVAL_MS",
+          "example": "5000",
+          "secret": false,
+          "required": false,
+          "comment": "How often (ms) the frontend is expected to poll the notification REST endpoint; documented here for API consistency"
+        }
+      ]
+    },
+    {
+      "name": "Authentication & Cryptography",
+      "vars": [
+        {
+          "key": "JWT_SECRET",
+          "example": "",
+          "secret": true,
+          "required": true,
+          "comment": "Secret used to sign JWT access tokens; must be at least 32 random bytes"
+        },
+        {
+          "key": "JWT_EXPIRES_IN",
+          "example": "15m",
+          "secret": false,
+          "required": true,
+          "comment": "Lifetime of a JWT access token (ms/zeit format, e.g. 15m, 1h)"
+        },
+        {
+          "key": "JWT_REFRESH_SECRET",
+          "example": "",
+          "secret": true,
+          "required": true,
+          "comment": "Separate secret used to sign refresh tokens"
+        },
+        {
+          "key": "JWT_REFRESH_EXPIRES_IN",
+          "example": "7d",
+          "secret": false,
+          "required": true,
+          "comment": "Lifetime of a refresh token"
+        },
+        {
+          "key": "BCRYPT_SALT_ROUNDS",
+          "example": "12",
+          "secret": false,
+          "required": true,
+          "comment": "bcrypt work factor for password hashing (10–14 recommended)"
+        },
+        {
+          "key": "PASSWORD_RESET_TOKEN_EXPIRES_IN",
+          "example": "3600",
+          "secret": false,
+          "required": true,
+          "comment": "Seconds before a password-reset token expires"
+        },
+        {
+          "key": "PASSWORD_RESET_SECRET",
+          "example": "",
+          "secret": true,
+          "required": true,
+          "comment": "Secret used to sign/verify password-reset tokens"
+        },
+        {
+          "key": "COOKIE_SECRET",
+          "example": "",
+          "secret": true,
+          "required": true,
+          "comment": "Secret for signing session/refresh-token cookies via cookie-parser"
+        }
+      ]
+    },
+    {
+      "name": "Elasticsearch – Search & Autocomplete",
+      "vars": [
+        {
+          "key": "ELASTICSEARCH_NODE",
+          "example": "http://localhost:9200",
+          "secret": false,
+          "required": true,
+          "comment": "URL of the Elasticsearch node (or load-balancer) used for product search and autocomplete"
+        },
+        {
+          "key": "ELASTICSEARCH_USERNAME",
+          "example": "elastic",
+          "secret": false,
+          "required": false,
+          "comment": "Username for Elasticsearch basic auth (leave blank if security is disabled locally)"
+        },
+        {
+          "key": "ELASTICSEARCH_PASSWORD",
+          "example": "",
+          "secret": true,
+          "required": false,
+          "comment": "Password for Elasticsearch basic auth"
+        },
+        {
+          "key": "ELASTICSEARCH_API_KEY",
+          "example": "",
+          "secret": true,
+          "required": false,
+          "comment": "API key auth alternative to username/password for hosted Elasticsearch (e.g. Elastic Cloud)"
+        },
+        {
+          "key": "ELASTICSEARCH_INDEX_PRODUCTS",
+          "example": "vantage_products",
+          "secret": false,
+          "required": true,
+          "comment": "Name of the Elasticsearch index for product catalogue documents"
+        },
+        {
+          "key": "ELASTICSEARCH_TLS_REJECT_UNAUTHORIZED",
+          "example": "true",
+          "secret": false,
+          "required": false,
+          "comment": "Set to false only in local dev when using self-signed certs"
+        }
+      ]
+    },
+    {
+      "name": "Payment Module (Mock / Test Mode)",
+      "vars": [
+        {
+          "key": "PAYMENT_PROVIDER",
+          "example": "mock",
+          "secret": false,
+          "required": true,
+          "comment": "Active payment adapter: mock (build phase) | stripe | razorpay — controls which adapter is loaded by the provider-agnostic interface"
+        },
+        {
+          "key": "PAYMENT_MOCK_ALWAYS_SUCCEED",
+          "example": "true",
+          "secret": false,
+          "required": false,
+          "comment": "When PAYMENT_PROVIDER=mock, force every payment attempt to succeed (true) or fail (false)"
+        },
+        {
+          "key": "PAYMENT_API_KEY",
+          "example": "",
+          "secret": true,
+          "required": false,
+          "comment": "Live/test API key for the real payment gateway; supplied by Vantage post-build — not required during build phase"
+        },
+        {
+          "key": "PAYMENT_API_SECRET",
+          "example": "",
+          "secret": true,
+          "required": false,
+          "comment": "API secret / private key for the payment gateway; supplied by Vantage post-build"
+        },
+        {
+          "key": "PAYMENT_WEBHOOK_SECRET",
+          "example": "",
+          "secret": true,
+          "required": false,
+          "comment": "Signing secret used to verify inbound payment webhook payloads; supplied by Vantage post-build"
+        },
+        {
+          "key": "STOCK_RESERVATION_TTL_SECONDS",
+          "example": "900",
+          "secret": false,
+          "required": true,
+          "comment": "Seconds before an unpaid stock reservation is released (≈15 min per REQ-17)"
+        }
+      ]
+    },
+    {
+      "name": "CORS & Security",
+      "vars": [
+        {
+          "key": "CORS_ALLOWED_ORIGINS",
+          "example": "http://localhost:5173,http://localhost:5174",
+          "secret": false,
+          "required": true,
+          "comment": "Comma-separated list of allowed CORS origins (storefront and admin)"
+        },
+        {
+          "key": "CORS_MAX_AGE",
+          "example": "86400",
+          "secret": false,
+          "required": false,
+          "comment": "Seconds the browser may cache CORS preflight results"
+        },
+        {
+          "key": "HTTPS_ENABLED",
+          "example": "false",
+          "secret": false,
+          "required": false,
+          "comment": "Set to true when Express terminates TLS directly (most prod setups terminate at the load balancer)"
+        },
+        {
+          "key": "TLS_CERT_PATH",
+          "example": "./certs/server.crt",
+          "secret": false,
+          "required": false,
+          "comment": "Path to TLS certificate file when HTTPS_ENABLED=true"
+        },
+        {
+          "key": "TLS_KEY_PATH",
+          "example": "./certs/server.key",
+          "secret": false,
+          "required": false,
+          "comment": "Path to TLS private key file when HTTPS_ENABLED=true"
+        },
+        {
+          "key": "TRUST_PROXY",
+          "example": "1",
+          "secret": false,
+          "required": false,
+          "comment": "Number of proxy hops to trust for req.ip (used by rate limiter behind a load balancer)"
+        }
+      ]
+    },
+    {
+      "name": "Rate Limiting",
+      "vars": [
+        {
+          "key": "RATE_LIMIT_WINDOW_MS",
+          "example": "900000",
+          "secret": false,
+          "required": true,
+          "comment": "Rate-limit sliding window in milliseconds (default: 15 minutes)"
+        },
+        {
+          "key": "RATE_LIMIT_MAX_REQUESTS",
+          "example": "100",
+          "secret": false,
+          "required": true,
+          "comment": "Maximum requests per IP per window for general API routes"
+        },
+        {
+          "key": "RATE_LIMIT_AUTH_WINDOW_MS",
+          "example": "900000",
+          "secret": false,
+          "required": true,
+          "comment": "Sliding window in ms for the stricter login/password-reset rate limiter"
+        },
+        {
+          "key": "RATE_LIMIT_AUTH_MAX_REQUESTS",
+          "example": "10",
+          "secret": false,
+          "required": true,
+          "comment": "Maximum login/password-reset attempts per IP per auth window"
+        }
+      ]
+    },
+    {
+      "name": "Caching – Redis",
+      "vars": [
+        {
+          "key": "REDIS_URL",
+          "example": "redis://127.0.0.1:6379",
+          "secret": false,
+          "required": false,
+          "comment": "Redis connection URL used for response caching, stock reservation TTL, and distributed rate limiting in production"
+        },
+        {
+          "key": "REDIS_PASSWORD",
+          "example": "",
+          "secret": true,
+          "required": false,
+          "comment": "AUTH password for the Redis instance (omit for unauthenticated local dev)"
+        },
+        {
+          "key": "REDIS_TLS",
+          "example": "false",
+          "secret": false,
+          "required": false,
+          "comment": "Enable TLS for the Redis connection (true in production managed Redis)"
+        },
+        {
+          "key": "CACHE_DEFAULT_TTL_SECONDS",
+          "example": "60",
+          "secret": false,
+          "required": false,
+          "comment": "Default TTL (seconds) for cached API responses such as product listing pages"
+        }
+      ]
+    },
+    {
+      "name": "Observability & Logging",
+      "vars": [
+        {
+          "key": "LOG_LEVEL",
+          "example": "info",
+          "secret": false,
+          "required": true,
+          "comment": "Minimum log level emitted: error | warn | info | http | debug"
+        },
+        {
+          "key": "LOG_FORMAT",
+          "example": "pretty",
+          "secret": false,
+          "required": false,
+          "comment": "Log output format: pretty (dev) | json (production/log aggregators)"
+        },
+        {
+          "key": "REQUEST_LOGGING_ENABLED",
+          "example": "true",
+          "secret": false,
+          "required": false,
+          "comment": "Toggle HTTP request logging middleware (e.g. morgan) on or off"
+        }
+      ]
+    }
+  ]
+}

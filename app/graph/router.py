@@ -12,10 +12,20 @@ from app.graph.state import WorkflowState
 #: Local repair cap — how many repair attempts a single work item gets before escalation.
 REPAIR_CAP = 3
 
-#: Local retry cap for the separate post-commit Debugging<->Unit-Test loop. This is NOT the
-#: same counter or cap as REPAIR_CAP — that one belongs to the earlier per-work-item
-#: code-generation loop and is already spent by the time this phase runs.
-DEBUG_CAP = 3
+#: Local cap for the separate post-commit Debugging<->Unit-Test loop. This is NOT the same counter
+#: or cap as REPAIR_CAP — that one belongs to the earlier per-work-item code-generation loop and is
+#: already spent by the time this phase runs.
+#:
+#: This caps CONSECUTIVE NO-PROGRESS rounds, not total rounds: ``debug_attempt`` resets to 0
+#: whenever a round actually reduces the failure count (see app/agents/debugging.py). It was first
+#: raised 3 -> 10 while still counting raw entries, which only postponed the real problem — on a
+#: large generated project (259 test files across 59 independently generated work items) the
+#: post-commit failures are a long tail of small INDEPENDENT issues, so *any* flat per-entry cap
+#: cuts off a loop that is still converging, while rounds that fixed nothing cost the same as
+#: rounds that fixed several files. 10 consecutive stalled rounds is a genuinely stuck loop.
+#: ``debugging.DEBUG_ROUNDS_CEILING`` separately bounds TOTAL rounds so an oscillating loop (each
+#: fix breaking something else, so "progress" keeps resetting this counter) still terminates.
+DEBUG_CAP = 10
 
 #: Local cap for the Security<->Refactoring loop, at the very end of the run. Separate counter
 #: (``security_loop_attempt``) and separate cap from REPAIR_CAP/DEBUG_CAP above — this loop starts
@@ -55,14 +65,30 @@ def route_after_gate(state: WorkflowState) -> str:
     return "escalate"
 
 
+def _debug_budget_left(state: WorkflowState) -> bool:
+    """True while the debug/test loop may run another round.
+
+    Two independent limits, both required: the progress-sensitive stall counter (``debug_attempt``
+    < DEBUG_CAP) and the absolute total-rounds backstop (``debug_rounds`` < DEBUG_ROUNDS_CEILING).
+    Neither subsumes the other — the first lets a converging loop keep going, the second stops an
+    oscillating one that would otherwise reset the first forever.
+    """
+    from app.agents.debugging import DEBUG_ROUNDS_CEILING  # local: avoids a circular import
+
+    return (
+        int(state.get("debug_attempt", 0)) < DEBUG_CAP
+        and int(state.get("debug_rounds", 0)) < DEBUG_ROUNDS_CEILING
+    )
+
+
 def route_after_debug_check(state: WorkflowState) -> str:
     """The debug-check decision: passing → run existing tests if any were already generated in a
-    prior pass, else generate them for the first time; fail under cap → debugging; fail at cap →
-    escalate (needs_human_review)."""
+    prior pass, else generate them for the first time; fail with budget left → debugging; fail with
+    the budget spent → escalate (needs_human_review)."""
     debug_result = state.get("debug_result")
     if debug_result and debug_result.get("passed"):
         return "unit_test_run" if state.get("unit_tests") else "unit_test_generate"
-    if int(state.get("debug_attempt", 0)) < DEBUG_CAP:
+    if _debug_budget_left(state):
         return "debugging"
     return "escalate"
 
@@ -81,7 +107,7 @@ def route_after_test_run(state: WorkflowState) -> str:
     test_result = state.get("test_result")
     if test_result and test_result.get("passed"):
         return "done"
-    if int(state.get("debug_attempt", 0)) < DEBUG_CAP:
+    if _debug_budget_left(state):
         return "debugging"
     return "escalate"
 

@@ -1,0 +1,2564 @@
+{
+  "datastore": "relational",
+  "dialect": "postgresql",
+  "tables": [
+    {
+      "name": "users",
+      "comment": "Registered customer and staff accounts; guests are represented by null user_id on orders/carts",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "email",
+          "type": "varchar(320)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "password_hash",
+          "type": "varchar(255)",
+          "nullable": true
+        },
+        {
+          "name": "full_name",
+          "type": "varchar(255)",
+          "nullable": true
+        },
+        {
+          "name": "phone",
+          "type": "varchar(30)",
+          "nullable": true
+        },
+        {
+          "name": "is_guest_converted",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "email"
+        ]
+      ],
+      "checks": [],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "idx_users_email",
+          "columns": [
+            "email"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "roles",
+      "comment": "RBAC role definitions (e.g. customer, staff, merchandiser, admin)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "name",
+          "type": "varchar(100)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "name"
+        ]
+      ],
+      "checks": [],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "idx_roles_name",
+          "columns": [
+            "name"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "user_roles",
+      "comment": "Join table assigning roles to users (supports multiple roles per user)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "user_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "role_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "user_id",
+          "role_id"
+        ]
+      ],
+      "checks": [],
+      "foreign_keys": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        },
+        {
+          "columns": [
+            "role_id"
+          ],
+          "ref_table": "roles",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_user_roles_user_id",
+          "columns": [
+            "user_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_user_roles_role_id",
+          "columns": [
+            "role_id"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "addresses",
+      "comment": "Saved delivery addresses belonging to a registered user",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "user_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "full_name",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "line1",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "line2",
+          "type": "varchar(255)",
+          "nullable": true
+        },
+        {
+          "name": "city",
+          "type": "varchar(100)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "state",
+          "type": "varchar(100)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "pin_code",
+          "type": "varchar(20)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "country",
+          "type": "varchar(100)",
+          "nullable": false,
+          "default": "'India'"
+        },
+        {
+          "name": "phone",
+          "type": "varchar(30)",
+          "nullable": true
+        },
+        {
+          "name": "is_default",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [],
+      "foreign_keys": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_addresses_user_id",
+          "columns": [
+            "user_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_addresses_pin_code",
+          "columns": [
+            "pin_code"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "serviceable_pin_codes",
+      "comment": "Lookup table of PIN codes eligible for delivery (REQ-16, REQ-18)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "pin_code",
+          "type": "varchar(20)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "city",
+          "type": "varchar(100)",
+          "nullable": true
+        },
+        {
+          "name": "state",
+          "type": "varchar(100)",
+          "nullable": true
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "pin_code"
+        ]
+      ],
+      "checks": [],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "idx_serviceable_pin_codes_pin_code",
+          "columns": [
+            "pin_code"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_serviceable_pin_codes_is_active",
+          "columns": [
+            "is_active"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "categories",
+      "comment": "Product catalogue categories supporting hierarchical browsing (REQ-46)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "parent_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "name",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "slug",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "slug"
+        ]
+      ],
+      "checks": [],
+      "foreign_keys": [
+        {
+          "columns": [
+            "parent_id"
+          ],
+          "ref_table": "categories",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_categories_slug",
+          "columns": [
+            "slug"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_categories_parent_id",
+          "columns": [
+            "parent_id"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "brands",
+      "comment": "Brand master used for catalogue filtering (REQ-38)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "name",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "slug",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "slug"
+        ]
+      ],
+      "checks": [],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "idx_brands_slug",
+          "columns": [
+            "slug"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "products",
+      "comment": "Parent product record; variant/CMS attributes stored in JSONB for CMS flexibility (REQ-53, REQ-55)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "category_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "brand_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "name",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "slug",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "base_price_paise",
+          "type": "bigint",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "tax_rate_percent",
+          "type": "numeric(5,2)",
+          "nullable": false,
+          "default": "0.00"
+        },
+        {
+          "name": "attributes",
+          "type": "jsonb",
+          "nullable": true
+        },
+        {
+          "name": "average_rating",
+          "type": "numeric(3,2)",
+          "nullable": true
+        },
+        {
+          "name": "review_count",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "is_returnable",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "return_window_days",
+          "type": "integer",
+          "nullable": false,
+          "default": "7"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "slug"
+        ]
+      ],
+      "checks": [
+        "base_price_paise >= 0",
+        "tax_rate_percent >= 0",
+        "review_count >= 0",
+        "return_window_days >= 0"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "category_id"
+          ],
+          "ref_table": "categories",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "columns": [
+            "brand_id"
+          ],
+          "ref_table": "brands",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_products_slug",
+          "columns": [
+            "slug"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_products_category_id",
+          "columns": [
+            "category_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_products_brand_id",
+          "columns": [
+            "brand_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_products_is_active",
+          "columns": [
+            "is_active"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_products_average_rating",
+          "columns": [
+            "average_rating"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_products_attributes_gin",
+          "columns": [
+            "attributes"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "product_images",
+      "comment": "Images attached to a product (REQ-42)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "product_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "url",
+          "type": "varchar(2048)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "alt_text",
+          "type": "varchar(255)",
+          "nullable": true
+        },
+        {
+          "name": "sort_order",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "is_primary",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [],
+      "foreign_keys": [
+        {
+          "columns": [
+            "product_id"
+          ],
+          "ref_table": "products",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_product_images_product_id",
+          "columns": [
+            "product_id"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "skus",
+      "comment": "Each size/colour combination is its own SKU with independent stock (BR-3, REQ-37, REQ-43)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "product_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "sku_code",
+          "type": "varchar(100)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "size",
+          "type": "varchar(50)",
+          "nullable": true
+        },
+        {
+          "name": "colour",
+          "type": "varchar(50)",
+          "nullable": true
+        },
+        {
+          "name": "variant_attributes",
+          "type": "jsonb",
+          "nullable": true
+        },
+        {
+          "name": "price_paise",
+          "type": "bigint",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "stock_quantity",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "reserved_quantity",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "sku_code"
+        ]
+      ],
+      "checks": [
+        "stock_quantity >= 0",
+        "reserved_quantity >= 0",
+        "reserved_quantity <= stock_quantity",
+        "price_paise >= 0"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "product_id"
+          ],
+          "ref_table": "products",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_skus_sku_code",
+          "columns": [
+            "sku_code"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_skus_product_id",
+          "columns": [
+            "product_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_skus_is_active",
+          "columns": [
+            "is_active"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "promo_codes",
+      "comment": "Promotional codes with percentage or flat discounts and optional expiry (REQ-49, REQ-52, REQ-54)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "code",
+          "type": "varchar(50)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "discount_type",
+          "type": "varchar(20)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "discount_value",
+          "type": "numeric(10,2)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "minimum_order_paise",
+          "type": "bigint",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "max_uses",
+          "type": "integer",
+          "nullable": true
+        },
+        {
+          "name": "used_count",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "code"
+        ]
+      ],
+      "checks": [
+        "discount_type IN ('percentage', 'flat')",
+        "discount_value > 0",
+        "minimum_order_paise >= 0",
+        "used_count >= 0",
+        "max_uses IS NULL OR max_uses > 0"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "created_by"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_promo_codes_code",
+          "columns": [
+            "code"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_promo_codes_is_active",
+          "columns": [
+            "is_active"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_promo_codes_expires_at",
+          "columns": [
+            "expires_at"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "carts",
+      "comment": "Active shopping carts for registered users and guests (REQ-23, REQ-24, REQ-32)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "user_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "guest_email",
+          "type": "varchar(320)",
+          "nullable": true
+        },
+        {
+          "name": "promo_code_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": "'active'"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [
+        "status IN ('active', 'checked_out', 'abandoned')",
+        "user_id IS NOT NULL OR guest_email IS NOT NULL"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "columns": [
+            "promo_code_id"
+          ],
+          "ref_table": "promo_codes",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_carts_user_id",
+          "columns": [
+            "user_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_carts_status",
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "cart_items",
+      "comment": "Line items within a cart, each referencing a specific SKU (REQ-21, REQ-23)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "cart_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "sku_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "quantity",
+          "type": "integer",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "unit_price_paise",
+          "type": "bigint",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "cart_id",
+          "sku_id"
+        ]
+      ],
+      "checks": [
+        "quantity > 0",
+        "unit_price_paise >= 0"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "cart_id"
+          ],
+          "ref_table": "carts",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        },
+        {
+          "columns": [
+            "sku_id"
+          ],
+          "ref_table": "skus",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_cart_items_cart_id",
+          "columns": [
+            "cart_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_cart_items_sku_id",
+          "columns": [
+            "sku_id"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "orders",
+      "comment": "Confirmed and in-progress orders with denormalised current_status and address snapshot (REQ-5, REQ-10, REQ-11, BR-4)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "order_number",
+          "type": "varchar(50)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "user_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "guest_email",
+          "type": "varchar(320)",
+          "nullable": true
+        },
+        {
+          "name": "cart_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "promo_code_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "promo_code_snapshot",
+          "type": "varchar(50)",
+          "nullable": true
+        },
+        {
+          "name": "current_status",
+          "type": "varchar(30)",
+          "nullable": false,
+          "default": "'pending_payment'"
+        },
+        {
+          "name": "delivery_address_snapshot",
+          "type": "jsonb",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "subtotal_paise",
+          "type": "bigint",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "discount_paise",
+          "type": "bigint",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "shipping_charge_paise",
+          "type": "bigint",
+          "nullable": false,
+          "default": "4900"
+        },
+        {
+          "name": "tax_paise",
+          "type": "bigint",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "total_paise",
+          "type": "bigint",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "free_shipping_threshold_paise",
+          "type": "bigint",
+          "nullable": false,
+          "default": "79900"
+        },
+        {
+          "name": "pin_code",
+          "type": "varchar(20)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "is_pin_code_serviceable",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "cancellation_reason",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "cancelled_at",
+          "type": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [
+        [
+          "order_number"
+        ]
+      ],
+      "checks": [
+        "current_status IN ('pending_payment', 'confirmed', 'packed', 'shipped', 'delivered', 'cancelled', 'return_requested', 'return_approved', 'refunded')",
+        "subtotal_paise >= 0",
+        "discount_paise >= 0",
+        "shipping_charge_paise >= 0",
+        "tax_paise >= 0",
+        "total_paise >= 0",
+        "shipping_charge_paise = CASE WHEN (subtotal_paise - discount_paise) >= free_shipping_threshold_paise THEN 0 ELSE shipping_charge_paise END OR current_status = 'pending_payment'",
+        "user_id IS NOT NULL OR guest_email IS NOT NULL"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "columns": [
+            "cart_id"
+          ],
+          "ref_table": "carts",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "columns": [
+            "promo_code_id"
+          ],
+          "ref_table": "promo_codes",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_orders_user_id",
+          "columns": [
+            "user_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_orders_order_number",
+          "columns": [
+            "order_number"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_orders_current_status",
+          "columns": [
+            "current_status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_orders_created_at",
+          "columns": [
+            "created_at"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_orders_pin_code",
+          "columns": [
+            "pin_code"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "order_items",
+      "comment": "Line items for an order with price snapshot at time of purchase (REQ-5)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "order_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "sku_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "sku_code_snapshot",
+          "type": "varchar(100)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "product_name_snapshot",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "variant_snapshot",
+          "type": "jsonb",
+          "nullable": true
+        },
+        {
+          "name": "quantity",
+          "type": "integer",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "unit_price_paise",
+          "type": "bigint",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "tax_rate_percent",
+          "type": "numeric(5,2)",
+          "nullable": false,
+          "default": "0.00"
+        },
+        {
+          "name": "tax_paise",
+          "type": "bigint",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "is_returnable",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "return_window_days",
+          "type": "integer",
+          "nullable": false,
+          "default": "7"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [
+        "quantity > 0",
+        "unit_price_paise >= 0",
+        "tax_rate_percent >= 0",
+        "tax_paise >= 0",
+        "return_window_days >= 0"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "order_id"
+          ],
+          "ref_table": "orders",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        },
+        {
+          "columns": [
+            "sku_id"
+          ],
+          "ref_table": "skus",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_order_items_order_id",
+          "columns": [
+            "order_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_order_items_sku_id",
+          "columns": [
+            "sku_id"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "order_status_history",
+      "comment": "Append-only audit log of every status transition for an order; drives the status timeline UI (REQ-11, REQ-14)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "order_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "status",
+          "type": "varchar(30)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "changed_by",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [
+        "status IN ('pending_payment', 'confirmed', 'packed', 'shipped', 'delivered', 'cancelled', 'return_requested', 'return_approved', 'refunded')"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "order_id"
+          ],
+          "ref_table": "orders",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        },
+        {
+          "columns": [
+            "changed_by"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_order_status_history_order_id",
+          "columns": [
+            "order_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_order_status_history_created_at",
+          "columns": [
+            "created_at"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "stock_reservations",
+      "comment": "Tracks per-SKU stock held during checkout; released on payment timeout or cancellation (REQ-15, REQ-17, REQ-3)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "order_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "cart_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "sku_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "quantity",
+          "type": "integer",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "status",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": "'active'"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "released_at",
+          "type": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [
+        "status IN ('active', 'confirmed', 'released', 'expired')",
+        "quantity > 0"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "order_id"
+          ],
+          "ref_table": "orders",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "columns": [
+            "cart_id"
+          ],
+          "ref_table": "carts",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "columns": [
+            "sku_id"
+          ],
+          "ref_table": "skus",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_stock_reservations_sku_id",
+          "columns": [
+            "sku_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_stock_reservations_order_id",
+          "columns": [
+            "order_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_stock_reservations_status",
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_stock_reservations_expires_at",
+          "columns": [
+            "expires_at"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "payment_attempts",
+      "comment": "Each attempt to pay for an order, provider-agnostic; supports retry on failure (REQ-32, REQ-33, REQ-34, BR-4)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "order_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "provider",
+          "type": "varchar(50)",
+          "nullable": false,
+          "default": "'mock'"
+        },
+        {
+          "name": "provider_reference",
+          "type": "varchar(255)",
+          "nullable": true
+        },
+        {
+          "name": "amount_paise",
+          "type": "bigint",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "currency",
+          "type": "varchar(10)",
+          "nullable": false,
+          "default": "'INR'"
+        },
+        {
+          "name": "status",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": "'initiated'"
+        },
+        {
+          "name": "failure_reason",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "test_mode",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "initiated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "completed_at",
+          "type": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [
+        "status IN ('initiated', 'pending', 'success', 'failed', 'timed_out')",
+        "amount_paise > 0"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "order_id"
+          ],
+          "ref_table": "orders",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_payment_attempts_order_id",
+          "columns": [
+            "order_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_payment_attempts_status",
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_payment_attempts_provider_reference",
+          "columns": [
+            "provider_reference"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "refunds",
+      "comment": "Refunds recorded against an originating order and linked to the payment attempt (REQ-13)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "order_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "payment_attempt_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "amount_paise",
+          "type": "bigint",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": "'pending'"
+        },
+        {
+          "name": "provider_reference",
+          "type": "varchar(255)",
+          "nullable": true
+        },
+        {
+          "name": "processed_by",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [
+        "status IN ('pending', 'processed', 'failed')",
+        "amount_paise > 0"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "order_id"
+          ],
+          "ref_table": "orders",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        },
+        {
+          "columns": [
+            "payment_attempt_id"
+          ],
+          "ref_table": "payment_attempts",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "columns": [
+            "processed_by"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_refunds_order_id",
+          "columns": [
+            "order_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_refunds_payment_attempt_id",
+          "columns": [
+            "payment_attempt_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_refunds_status",
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "return_requests",
+      "comment": "Two-step return flow: customer request followed by staff approval (REQ-6, REQ-7, BR-1)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "order_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "order_item_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "requested_by",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": "'requested'"
+        },
+        {
+          "name": "reviewed_by",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "review_notes",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "reviewed_at",
+          "type": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "return_window_expires_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [
+        "status IN ('requested', 'approved', 'rejected', 'completed')"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "order_id"
+          ],
+          "ref_table": "orders",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        },
+        {
+          "columns": [
+            "order_item_id"
+          ],
+          "ref_table": "order_items",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "RESTRICT"
+        },
+        {
+          "columns": [
+            "requested_by"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "columns": [
+            "reviewed_by"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_return_requests_order_id",
+          "columns": [
+            "order_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_return_requests_order_item_id",
+          "columns": [
+            "order_item_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_return_requests_status",
+          "columns": [
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_return_requests_requested_by",
+          "columns": [
+            "requested_by"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "order_tracking",
+      "comment": "Simulated tracking events for an order (REQ-1)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "order_id",
+          "type": "uuid",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "event_label",
+          "type": "varchar(100)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "event_description",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "location",
+          "type": "varchar(255)",
+          "nullable": true
+        },
+        {
+          "name": "occurred_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [],
+      "foreign_keys": [
+        {
+          "columns": [
+            "order_id"
+          ],
+          "ref_table": "orders",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_order_tracking_order_id",
+          "columns": [
+            "order_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_order_tracking_occurred_at",
+          "columns": [
+            "occurred_at"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "notifications",
+      "comment": "In-app notification centre; polled by frontend; simulates email/SMS during build (REQ-56)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "gen_random_uuid()",
+          "constraints": [
+            "PRIMARY KEY"
+          ]
+        },
+        {
+          "name": "user_id",
+          "type": "uuid",
+          "nullable": true
+        },
+        {
+          "name": "guest_email",
+          "type": "varchar(320)",
+          "nullable": true
+        },
+        {
+          "name": "type",
+          "type": "varchar(50)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "title",
+          "type": "varchar(255)",
+          "nullable": false,
+          "constraints": [
+            "NOT NULL"
+          ]
+        },
+        {
+          "name": "body",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "payload",
+          "type": "jsonb",
+          "nullable": true
+        },
+        {
+          "name": "is_read",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique": [],
+      "checks": [
+        "user_id IS NOT NULL OR guest_email IS NOT NULL"
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "ref_table": "users",
+          "ref_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_notifications_user_id",
+          "columns": [
+            "user_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_notifications_is_read",
+          "columns": [
+            "is_read"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_notifications_created_at",
+          "columns": [
+            "created_at"
+          ],
+          "unique": false
+        },
+        {
+          "name": "idx_notifications_guest_email",
+          "columns": [
+            "guest_email"
+          ],
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "All monetary values are stored as integer paise (1 INR = 100 paise) using bigint to avoid floating-point rounding errors; display layer divides by 100.",
+    "The shipping charge business rule (BR-2: free at ₹799+, otherwise ₹49) is enforced at application layer during checkout; the DDL CHECK on orders is a soft guard only since the threshold column makes the rule self-documenting and reconfigurable.",
+    "The free_shipping_threshold_paise column on orders (default 79900) captures the threshold value at time of order creation, making the rule auditable even if the threshold changes later.",
+    "Prices are stored inclusive of tax as displayed to customers (BR-7); tax_paise columns capture the tax component for GST reporting (BR-5).",
+    "Stock reservation expiry (REQ-17, ~15 minutes) is enforced by a background job that queries stock_reservations WHERE status='active' AND expires_at < now(); the expires_at column makes this schedulable without schema changes.",
+    "The order current_status CHECK enum matches the order_status_history status CHECK enum exactly; both must be kept in sync when new states are added.",
+    "RBAC enforcement (REQ-48, REQ-51) is implemented at application layer using the user_roles join table; the schema provides the data foundation but row-level access rules are enforced in the API.",
+    "The products.attributes and skus.variant_attributes JSONB columns support the CMS flexibility requirement (REQ-53) allowing merchandisers to add new variant dimensions without schema migrations.",
+    "Guest checkout (REQ-24) is supported via nullable user_id + required guest_email on carts, orders, and notifications; the CHECK constraint ensures at least one is present.",
+    "The promo_codes.minimum_order_paise column supports minimum order value rules per promo code, which is a natural extension of the promotions engine (REQ-54) even though no specific minimum is stated beyond the shipping threshold.",
+    "The return_window_expires_at on return_requests is computed at request time as order delivered_at + order_item.return_window_days; this denormalisation avoids recalculation and makes the window enforceable by a simple timestamp comparison.",
+    "The shipping_charge_paise default of 4900 represents ₹49; the free threshold default of 79900 represents ₹799 — both per BR-2/REQ-28.",
+    "Elasticsearch is referenced in the tech stack for autocomplete (REQ-41) and faceted filtering (REQ-38, REQ-40); this PostgreSQL schema is the source of truth that feeds Elasticsearch index sync — no separate ES schema is included here.",
+    "The products.average_rating and review_count columns support the rating filter (REQ-38); a reviews table could be added if user-generated reviews become a requirement, but it is not stated in the current requirements.",
+    "Confirm whether the tech stack choice of MySQL 8 vs PostgreSQL (noted inconsistently in section 7.3) is resolved to PostgreSQL, as the chosen approach and notification store both target PostgreSQL."
+  ],
+  "datastore_product": "postgresql"
+}

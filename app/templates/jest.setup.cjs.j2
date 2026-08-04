@@ -1,0 +1,89 @@
+/**
+ * Jest setup (setupFilesAfterEnv) — DETERMINISTIC scaffold output (app/services/boilerplate.py).
+ *
+ * Fills the gaps between the test environment and what real application/library code assumes
+ * exists. EVERY entry is behind a `typeof … === 'undefined'` guard on purpose: the job is to fill a
+ * gap, never to shadow a real implementation. Without the guards this file would silently replace
+ * whatever a newer Node/jsdom (or an intentional test double) already provides, and the suite would
+ * stop testing the thing it thinks it tests.
+ *
+ * CommonJS (.cjs): a generated package.json commonly declares "type": "module"; `require` here must
+ * keep working regardless.
+ */
+{% if dom %}
+
+// Adds the DOM matchers (toBeInTheDocument, toHaveTextContent, toBeDisabled, …) to `expect`.
+require('@testing-library/jest-dom');
+{% endif %}
+
+// The jsdom environment drops Node's immediate timers (the 'node' environment keeps them — hence
+// the guard), yet plenty of library code still schedules with them.
+if (typeof globalThis.setImmediate === 'undefined') {
+  globalThis.setImmediate = (fn, ...args) => setTimeout(fn, 0, ...args);
+}
+if (typeof globalThis.clearImmediate === 'undefined') {
+  globalThis.clearImmediate = (id) => clearTimeout(id);
+}
+
+// jsdom omits the TextEncoder/TextDecoder globals that anything doing UTF-8 byte work expects.
+if (typeof globalThis.TextEncoder === 'undefined' || typeof globalThis.TextDecoder === 'undefined') {
+  const util = require('util');
+  globalThis.TextEncoder = globalThis.TextEncoder || util.TextEncoder;
+  globalThis.TextDecoder = globalThis.TextDecoder || util.TextDecoder;
+}
+
+// undici — pulled in transitively by HTTP clients such as @elastic/elasticsearch — reads
+// MessagePort AT REQUIRE TIME. A missing global is therefore not a failed assertion but a crash
+// while the module graph is still loading, which takes the whole suite down with an opaque error.
+if (typeof globalThis.MessagePort === 'undefined') {
+  const workerThreads = require('worker_threads');
+  globalThis.MessagePort = workerThreads.MessagePort;
+  globalThis.MessageChannel = globalThis.MessageChannel || workerThreads.MessageChannel;
+}
+
+// Web streams: present in Node's global scope only from v18, and absent from jsdom's.
+if (typeof globalThis.ReadableStream === 'undefined') {
+  const streamWeb = require('stream/web');
+  globalThis.ReadableStream = streamWeb.ReadableStream;
+  globalThis.WritableStream = globalThis.WritableStream || streamWeb.WritableStream;
+  globalThis.TransformStream = globalThis.TransformStream || streamWeb.TransformStream;
+}
+
+// A minimal Response — enough for code that constructs one or reads status/ok/text()/json().
+// Deliberately NOT a spec implementation: tests that need real fetch semantics should stub them.
+if (typeof globalThis.Response === 'undefined') {
+  globalThis.Response = class Response {
+    constructor(body = null, init = {}) {
+      this.body = body;
+      this.status = init.status === undefined ? 200 : init.status;
+      this.statusText = init.statusText || '';
+      this.headers = new Map(Object.entries(init.headers || {}));
+      this.ok = this.status >= 200 && this.status < 300;
+    }
+
+    async text() {
+      return typeof this.body === 'string' ? this.body : JSON.stringify(this.body);
+    }
+
+    async json() {
+      return typeof this.body === 'string' ? JSON.parse(this.body) : this.body;
+    }
+  };
+}
+
+// A stub, not a client: reaching the network from a unit test is a bug, so the default resolves an
+// empty 200. Tests that care override globalThis.fetch (or jest.spyOn it) themselves.
+if (typeof globalThis.fetch === 'undefined') {
+  globalThis.fetch = () => Promise.resolve(new globalThis.Response('{}', { status: 200 }));
+}
+{% if dom %}
+
+// jsdom implements no layout, so scrollIntoView simply does not exist — a component that calls it
+// on mount (lists, chat panes, steppers) throws during render in an otherwise valid test.
+if (
+  typeof globalThis.Element !== 'undefined' &&
+  typeof globalThis.Element.prototype.scrollIntoView === 'undefined'
+) {
+  globalThis.Element.prototype.scrollIntoView = function scrollIntoView() {};
+}
+{% endif %}

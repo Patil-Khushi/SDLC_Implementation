@@ -1,0 +1,245 @@
+{
+  "src/": {
+    "main.jsx": "Vite entry point; renders App into #root",
+    "App.jsx": "Root component; sets up React Router, global providers (auth, cart, notifications)",
+    "index.css": "Tailwind base/components/utilities imports; CSS custom properties for design tokens",
+    "routes/": {
+      "index.jsx": "Centralised route definitions using React Router v6 createBrowserRouter",
+      "ProtectedRoute.jsx": "Wraps routes requiring authentication; redirects to /login if no token",
+      "AdminRoute.jsx": "Wraps admin routes; checks role claim in JWT; 403 if unauthorised",
+      "GuestRoute.jsx": "Redirects authenticated users away from login/register pages"
+    },
+    "pages/": {
+      "Home.jsx": "Landing page /",
+      "NotFound.jsx": "404 catch-all page *",
+      "catalogue/": {
+        "ProductListing.jsx": "Page /products — PLP with filters, result counts, pagination",
+        "CategoryProductListing.jsx": "Page /categories/:slug/products — category-scoped PLP",
+        "SearchResults.jsx": "Page /search — full-text search results with facet filters",
+        "ProductDetail.jsx": "Page /products/:slug — image, variant picker, tax-inclusive price, add-to-cart"
+      },
+      "cart/": {
+        "Cart.jsx": "Page /cart — cart item list, totals, proceed to checkout"
+      },
+      "checkout/": {
+        "CheckoutAddress.jsx": "Step 1 /checkout/address — delivery address form, PIN serviceability check",
+        "CheckoutPayment.jsx": "Step 2 /checkout/payment — payment form with test-mode mock",
+        "CheckoutReview.jsx": "Step 3 /checkout/review — order totals, taxes, promo code entry, shipping charge display",
+        "CheckoutConfirmation.jsx": "Page /checkout/confirmation — order confirmed summary",
+        "GuestPostCheckoutRegister.jsx": "Page /checkout/register — optional account creation after guest checkout"
+      },
+      "auth/": {
+        "Login.jsx": "Page /login — email + password login form",
+        "Register.jsx": "Page /register — new customer registration form",
+        "ForgotPassword.jsx": "Page /forgot-password — request password reset form",
+        "ResetPassword.jsx": "Page /reset-password — submit new password with token from URL"
+      },
+      "account/": {
+        "AccountOverview.jsx": "Page /account — dashboard: profile summary, quick links",
+        "AccountProfile.jsx": "Page /account/profile — edit name, email, password",
+        "AccountAddresses.jsx": "Page /account/addresses — address book list",
+        "AddressNew.jsx": "Page /account/addresses/new — add new address form",
+        "AddressEdit.jsx": "Page /account/addresses/:id/edit — edit existing address form",
+        "OrderHistory.jsx": "Page /account/orders — order list with status badges",
+        "OrderDetail.jsx": "Page /account/orders/:id — status timeline, items, tracking, cancel/return actions",
+        "ReturnRequest.jsx": "Page /account/orders/:id/return — return request form for eligible items",
+        "Notifications.jsx": "Page /account/notifications — in-app notification centre, mark-read"
+      },
+      "admin/": {
+        "AdminDashboard.jsx": "Page /admin — aggregated stats and quick-access tiles",
+        "AdminReports.jsx": "Page /admin/reports — consolidated business reporting view",
+        "orders/": {
+          "AdminOrderList.jsx": "Page /admin/orders — staff order list with status filters",
+          "AdminOrderDetail.jsx": "Page /admin/orders/:id — order detail, advance status controls"
+        },
+        "catalogue/": {
+          "AdminProductList.jsx": "Page /admin/catalogue/products — product CMS list",
+          "AdminProductNew.jsx": "Page /admin/catalogue/products/new — create product form",
+          "AdminProductEdit.jsx": "Page /admin/catalogue/products/:id/edit — edit product & SKUs form",
+          "AdminCategoryList.jsx": "Page /admin/catalogue/categories — category tree management",
+          "AdminCategoryNew.jsx": "Page /admin/catalogue/categories/new — create category form",
+          "AdminCategoryEdit.jsx": "Page /admin/catalogue/categories/:id/edit — edit category form",
+          "AdminBrandList.jsx": "Page /admin/catalogue/brands — brand list",
+          "AdminBrandNew.jsx": "Page /admin/catalogue/brands/new — create brand form",
+          "AdminBrandEdit.jsx": "Page /admin/catalogue/brands/:id/edit — edit brand form"
+        },
+        "promotions/": {
+          "AdminPromotionList.jsx": "Page /admin/promotions — promo code list",
+          "AdminPromotionNew.jsx": "Page /admin/promotions/new — create promo code: type, discount, expiry",
+          "AdminPromotionEdit.jsx": "Page /admin/promotions/:id/edit — edit promo code form"
+        },
+        "returns/": {
+          "AdminReturnList.jsx": "Page /admin/returns — return requests queue",
+          "AdminReturnDetail.jsx": "Page /admin/returns/:id — return detail, approve/reject controls"
+        },
+        "users/": {
+          "AdminUserList.jsx": "Page /admin/users — user list with role filter",
+          "AdminUserDetail.jsx": "Page /admin/users/:id — user detail, role assignment"
+        }
+      }
+    },
+    "components/": {
+      "layout/": {
+        "AppShell.jsx": "Outer shell: renders Header, main content slot, Footer",
+        "Header.jsx": "Top nav: logo, search bar, cart icon, account menu, notification bell",
+        "Footer.jsx": "Site footer: links, copyright",
+        "AdminShell.jsx": "Admin layout shell with sidebar nav gated by AdminRoute",
+        "AdminSidebar.jsx": "Sidebar nav for admin panel: links to all admin sections",
+        "PageWrapper.jsx": "Applies consistent page padding and max-width constraint",
+        "Breadcrumb.jsx": "Generic breadcrumb trail component"
+      },
+      "catalogue/": {
+        "ProductCard.jsx": "Grid card: image, name, tax-inclusive price, rating badge",
+        "ProductGrid.jsx": "Responsive product card grid with skeleton loading states",
+        "FilterPanel.jsx": "Brand, price-range, rating filter controls with result counts",
+        "ActiveFilterBar.jsx": "Chips showing applied filters with remove controls",
+        "VariantPicker.jsx": "Size/colour selector that resolves selection to a SKU",
+        "ProductImageGallery.jsx": "Main product image display for PDP",
+        "PriceDisplay.jsx": "Renders tax-inclusive price with optional original price strikethrough",
+        "CategoryNav.jsx": "Category tree navigation menu",
+        "ResultCount.jsx": "Displays total results and per-option facet counts"
+      },
+      "search/": {
+        "SearchBar.jsx": "Input field wired to autocomplete; submits to /search on enter",
+        "AutocompleteSuggestions.jsx": "Dropdown list of autocomplete suggestions from GET /search/autocomplete"
+      },
+      "cart/": {
+        "CartItem.jsx": "Single cart line: image, name, SKU variant, qty stepper, remove",
+        "CartSummary.jsx": "Subtotal, shipping charge, discount, GST, grand total display",
+        "PromoCodeInput.jsx": "Promo code field and apply button; shows applied discount",
+        "EmptyCart.jsx": "Empty state illustration and CTA for /products"
+      },
+      "checkout/": {
+        "CheckoutStepper.jsx": "Step indicator for Address → Payment → Review flow",
+        "AddressForm.jsx": "Reusable delivery address fields with PIN serviceability feedback",
+        "OrderSummaryPanel.jsx": "Compact order totals panel shown during checkout steps",
+        "PaymentMockForm.jsx": "Test-mode payment form: simulate success/failure/pending outcomes",
+        "ShippingBadge.jsx": "Displays free shipping eligibility or ₹49 charge contextually"
+      },
+      "orders/": {
+        "OrderCard.jsx": "Summary card for order history list: ID, date, status badge",
+        "StatusTimeline.jsx": "Visual timeline: Confirmed → Packed → Shipped → Delivered stages",
+        "OrderItemsList.jsx": "Tabular list of items in an order with quantities and prices",
+        "TrackingInfo.jsx": "Simulated tracking details block on order detail page",
+        "CancelOrderButton.jsx": "Cancel CTA with confirmation dialog; only shown when eligible",
+        "ReturnItemSelector.jsx": "Checkbox list for selecting eligible items to include in return request"
+      },
+      "notifications/": {
+        "NotificationBell.jsx": "Header icon showing unread count badge; opens notification dropdown",
+        "NotificationList.jsx": "Scrollable list of notifications with read/unread state",
+        "NotificationItem.jsx": "Single notification row: icon, message, timestamp, mark-read action"
+      },
+      "auth/": {
+        "LoginForm.jsx": "Controlled login form with validation",
+        "RegisterForm.jsx": "Controlled registration form with validation",
+        "ForgotPasswordForm.jsx": "Email input form for password reset request",
+        "ResetPasswordForm.jsx": "New password + confirm fields with token from URL param"
+      },
+      "admin/": {
+        "StatsCard.jsx": "Dashboard KPI tile: metric label, value, trend indicator",
+        "OrderStatusAdvancer.jsx": "Dropdown/button to advance order status; role-gated",
+        "ProductForm.jsx": "Create/edit product form including SKU variant management",
+        "CategoryForm.jsx": "Create/edit category form with parent selector",
+        "BrandForm.jsx": "Create/edit brand form",
+        "PromoCodeForm.jsx": "Create/edit promo code: type (percentage/flat), value, expiry date",
+        "ReturnApprovalPanel.jsx": "Approve/reject return request controls with refund note",
+        "UserRoleEditor.jsx": "Role assignment dropdown for a given user",
+        "AdminDataTable.jsx": "Reusable sortable/paginated table for admin list views",
+        "ReportChart.jsx": "Wrapper around charting library for consolidated reports"
+      },
+      "ui/": {
+        "Button.jsx": "Design-system button with variants (primary, secondary, destructive) and sizes",
+        "Input.jsx": "Styled text input with label, error message, and accessible focus ring",
+        "Select.jsx": "Styled select/dropdown component",
+        "Checkbox.jsx": "Accessible checkbox with label",
+        "Badge.jsx": "Status badge: colour + icon + label (never colour alone)",
+        "Modal.jsx": "Accessible modal dialog with focus trap and elevation-3 shadow",
+        "Spinner.jsx": "Loading spinner for async states",
+        "Toast.jsx": "Transient success/error/info notification toast",
+        "ToastContainer.jsx": "Renders active toasts; anchored to viewport corner",
+        "Skeleton.jsx": "Content-placeholder skeleton shapes for loading states",
+        "Pagination.jsx": "Page navigation controls for list views",
+        "EmptyState.jsx": "Generic empty-state block with optional CTA",
+        "ErrorBoundary.jsx": "React error boundary to catch and display render errors"
+      }
+    },
+    "services/": {
+      "api.js": "Axios instance: base URL, JWT auth header injection, 401 refresh/logout handling",
+      "authService.js": "Calls POST /auth/register, /auth/login, /auth/logout, /auth/forgot-password, /auth/reset-password",
+      "usersService.js": "Calls GET/PATCH /users/me; admin CRUD /admin/users",
+      "addressesService.js": "Calls GET/POST/PUT/DELETE /users/me/addresses; PIN serviceability via addresses service",
+      "catalogueService.js": "Calls product listing, PLP filters, product detail, categories, brands endpoints; admin catalogue CRUD",
+      "searchService.js": "Calls GET /search and GET /search/autocomplete",
+      "cartService.js": "Calls GET/POST/PATCH/DELETE /cart and /cart/items/:id; apply promo",
+      "checkoutService.js": "Calls POST /checkout/initiate and /checkout/confirm",
+      "paymentsService.js": "Calls POST /payments/initiate and /payments/confirm; surfaces mock adapter outcomes",
+      "ordersService.js": "Calls GET /orders, GET /orders/:id; admin order list, detail, status update",
+      "returnsService.js": "Calls POST /orders/:id/returns; GET /orders/:id/returns/:rid; admin returns endpoints",
+      "promotionsService.js": "Calls promo validation endpoint; admin CRUD /admin/promo-codes",
+      "notificationsService.js": "Calls GET /notifications, PATCH /notifications/:id/read, PATCH /notifications/read-all",
+      "adminService.js": "Calls admin dashboard stats and reports endpoints; delegates domain calls to domain services"
+    },
+    "hooks/": {
+      "useAuth.js": "Reads auth context; exposes user, login, logout, isAuthenticated",
+      "useCart.js": "Cart context consumer; exposes cart state, addItem, removeItem, updateQty",
+      "useNotifications.js": "Polls GET /notifications on interval; exposes list, unreadCount, markRead",
+      "useSearch.js": "Manages search query state, calls searchService, debounces autocomplete",
+      "useFilters.js": "Manages multi-filter state for PLP; builds query params for catalogueService",
+      "usePagination.js": "Manages page/limit state for paginated list views",
+      "useCheckout.js": "Manages multi-step checkout form state across Address/Payment/Review steps",
+      "useOrders.js": "Fetches order history and single order detail via ordersService",
+      "useAddresses.js": "Fetches and mutates address book via addressesService",
+      "useRoles.js": "Reads role claims from auth context; exposes hasRole helper",
+      "useToast.js": "Imperative toast trigger hook wired to ToastContainer"
+    },
+    "context/": {
+      "AuthContext.jsx": "Provides JWT-backed auth state; persists token in httpOnly cookie or localStorage",
+      "CartContext.jsx": "Provides cart state and mutation actions; merges guest cart on login",
+      "NotificationContext.jsx": "Provides notification list and unread count to header bell and notification page"
+    },
+    "types/": {
+      "auth.types.js": "JSDoc/TS-style shapes: User, LoginPayload, RegisterPayload, ResetPayload",
+      "catalogue.types.js": "Product, SKU, Category, Brand, ProductImage shapes mirroring backend models",
+      "cart.types.js": "Cart, CartItem shapes",
+      "checkout.types.js": "CheckoutInitiatePayload, CheckoutConfirmPayload shapes",
+      "order.types.js": "Order, OrderItem, OrderStatusHistory, OrderTracking shapes",
+      "payment.types.js": "PaymentAttempt, PaymentOutcome shapes (success/failure/pending)",
+      "returns.types.js": "ReturnRequest, Refund shapes",
+      "promotions.types.js": "PromoCode shape with discount type and expiry",
+      "notification.types.js": "Notification shape mirroring notifications table",
+      "address.types.js": "Address shape including pin_code and serviceability flag",
+      "admin.types.js": "DashboardStats, ReportData, AdminUser shapes"
+    },
+    "utils/": {
+      "formatCurrency.js": "Formats amounts as ₹ with locale-aware decimals",
+      "formatDate.js": "Formats ISO dates to display strings",
+      "taxUtils.js": "Derives GST-inclusive display price; extracts tax portion for breakdown",
+      "shippingUtils.js": "Computes shipping charge (₹0 if total ≥ ₹799, else ₹49)",
+      "authUtils.js": "Decode JWT claims; check token expiry client-side",
+      "validationSchemas.js": "Yup/Zod schemas for all form fields matching backend validator rules",
+      "errorUtils.js": "Parses API error responses into user-facing messages",
+      "cn.js": "Classname utility (clsx + tailwind-merge) for conditional Tailwind classes"
+    },
+    "config/": {
+      "env.js": "Reads import.meta.env vars; exports typed constants (API_BASE_URL, etc.)",
+      "tokens.css": "CSS custom properties mapping all design token names to hex/value literals",
+      "tailwind.config.js": "Extends Tailwind with design-system colour, spacing, radius, and shadow tokens"
+    },
+    "assets/": {
+      "images/": "Static image assets (logo, placeholder product image, empty-state illustrations)",
+      "icons/": "SVG icon files used throughout the UI for status indicators and navigation"
+    }
+  },
+  "public/": {
+    "favicon.ico": "Site favicon",
+    "robots.txt": "Robots crawl directives"
+  },
+  "index.html": "Vite HTML entry; mounts #root div, references main.jsx",
+  "vite.config.js": "Vite config: React plugin, path aliases (@/ → src/), proxy /api to backend dev server",
+  "tailwind.config.js": "Root Tailwind config extending src/config/tailwind.config.js token extensions",
+  "postcss.config.js": "PostCSS config for Tailwind and autoprefixer",
+  "eslint.config.js": "ESLint config: React, import-order, accessibility (jsx-a11y) rules",
+  ".env.example": "Template: VITE_API_BASE_URL and other required frontend env vars",
+  "package.json": "Dependencies: react, react-dom, react-router-dom, axios, @tanstack/react-query, tailwindcss, clsx, tailwind-merge, yup; devDeps: vite, @vitejs/plugin-react, eslint, jest, @testing-library/react",
+  "README.md": "Frontend setup, env var reference, design token usage guide, route map"
+}

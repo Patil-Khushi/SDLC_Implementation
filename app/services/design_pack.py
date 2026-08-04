@@ -97,12 +97,18 @@ def _load_structured(path: Path) -> Any:
     return None
 
 
-def _read_table(path: Path) -> list[dict[str, str]]:
-    """Read a delimited table (csv/tsv) into row dicts; ``[]`` if it is not clearly tabular."""
-    try:
-        text = path.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError:
-        return []
+def _rows_from_delimited_text(text: str) -> list[dict[str, str]]:
+    """Parse ``text`` as a delimited table (csv/tsv) into row dicts; ``[]`` if it is not clearly
+    tabular, has fewer than two real columns, or has no actual DATA rows (header-only).
+
+    Factored out of :func:`_read_table` so :func:`has_rich_api_mapping` — which reads the SAME
+    kind of artifact from an in-memory dict rather than a file on disk — parses it with the exact
+    same rules rather than a second, independently-maintained copy. The two disagreeing is not
+    hypothetical: an earlier version of ``has_rich_api_mapping`` checked only the header row, so a
+    header-only CSV (no data rows) registered as a "rich mapping" there while :func:`detect_roles`
+    (which calls this same logic) correctly saw no table at all — reproducing, on that one input
+    shape, the exact scaffold/plan-builder root disagreement this whole check exists to prevent.
+    """
     lines = text.splitlines()
     if not lines:
         return []
@@ -125,6 +131,15 @@ def _read_table(path: Path) -> list[dict[str, str]]:
     except csv.Error:
         return []
     return [r for r in rows if any((v or "").strip() for v in r.values())]
+
+
+def _read_table(path: Path) -> list[dict[str, str]]:
+    """Read a delimited table (csv/tsv) into row dicts; ``[]`` if it is not clearly tabular."""
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return []
+    return _rows_from_delimited_text(text)
 
 
 # --------------------------------------------------------------------------- role detection
@@ -234,6 +249,46 @@ def _is_rich_api_mapping(headers: list[str]) -> bool:
     """The legacy flat mapping: has its own operation_id + req_ids + endpoint_path columns."""
     hs = {h.lower() for h in headers}
     return {"operation_id", "endpoint_path"}.issubset(hs) and any("req" in h for h in hs)
+
+
+def has_rich_api_mapping(design_package: dict[str, Any]) -> bool:
+    """Dict-based equivalent of ``detect_roles(pack_dir).get("rich_api_mapping")``.
+
+    ``app.services.boilerplate`` never receives ``pack_dir`` — only the already-parsed artifact
+    dict (``state["design_package"]``) — but it needs the SAME signal ``build_plan`` uses to pick
+    its builder: the legacy flat-CSV path keeps every path byte-for-byte, while the adaptive
+    (structure-tree) path unconditionally re-roots every generated file under canonical
+    ``backend/``/``frontend/`` folders (see ``plan_builder._reroot``), discarding whatever wrapper
+    directory name the structure trees actually used. ``boilerplate.py``'s OWN root computation
+    (``_single_top_dir``) has no way to know about that rerooting, so left alone the two modules
+    can disagree on where a project's files live — which is exactly how a scaffolded
+    ``jest.config``'s ``rootDir`` and ``@/`` alias ended up pointing at a path nothing was ever
+    generated under. This function lets ``boilerplate.py`` ask the same "will build_plan reroot
+    this?" question ``detect_roles`` answers from disk, from the in-memory dict it actually has.
+
+    Reads every CSV/TSV-shaped artifact (raw text, as ``app.services.plan_builder._load_pack_artifacts``
+    stores it, OR an already-parsed list of row dicts) via the SAME :func:`_rows_from_delimited_text`
+    logic ``_read_table``/``detect_roles`` use — not a second, hand-rolled parse — then applies the
+    identical header check :func:`_is_rich_api_mapping` uses against the first actual DATA row.
+
+    Requiring a real data row (not just a header) matters: ``detect_roles`` only ever sets the
+    ``rich_api_mapping`` role when ``_read_table`` returns at least one row, so a header-only CSV
+    is invisible to it — ``build_plan()`` would take the adaptive (re-rooted) path for such a pack.
+    Checking headers alone here would answer the opposite way for the exact same file, silently
+    reintroducing the scaffold/plan-builder root mismatch this function exists to prevent.
+    """
+    for name, value in design_package.items():
+        if not str(name).lower().endswith((".csv", ".tsv")):
+            continue
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            rows = [r for r in value if any((v or "").strip() for v in r.values())]
+        elif isinstance(value, str):
+            rows = _rows_from_delimited_text(value)
+        else:
+            continue
+        if rows and _is_rich_api_mapping(list(rows[0].keys())):
+            return True
+    return False
 
 
 @dataclass

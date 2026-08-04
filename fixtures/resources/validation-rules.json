@@ -1,0 +1,556 @@
+{
+  "RegisterRequest": {
+    "email": {
+      "required": true,
+      "type": "email",
+      "maxLength": 320,
+      "message": "Enter a valid email address."
+    },
+    "password": {
+      "required": true,
+      "type": "string",
+      "minLength": 8,
+      "message": "Password must be at least 8 characters."
+    },
+    "confirm": {
+      "matches": "password",
+      "message": "Passwords do not match."
+    },
+    "full_name": {
+      "type": "string",
+      "maxLength": 255,
+      "message": "Full name must not exceed 255 characters."
+    },
+    "phone": {
+      "type": "tel",
+      "maxLength": 30,
+      "message": "Enter a valid phone number."
+    }
+  },
+  "LoginRequest": {
+    "email": {
+      "required": true,
+      "type": "email",
+      "maxLength": 320,
+      "message": "Enter a valid email address."
+    },
+    "password": {
+      "required": true,
+      "type": "string",
+      "minLength": 1,
+      "message": "Password is required."
+    }
+  },
+  "ForgotPasswordRequest": {
+    "email": {
+      "required": true,
+      "type": "email",
+      "maxLength": 320,
+      "message": "Enter a valid email address."
+    }
+  },
+  "ResetPasswordRequest": {
+    "token": {
+      "required": true,
+      "type": "string",
+      "message": "Reset token is required."
+    },
+    "password": {
+      "required": true,
+      "type": "string",
+      "minLength": 8,
+      "message": "Password must be at least 8 characters."
+    },
+    "confirm": {
+      "matches": "password",
+      "message": "Passwords do not match."
+    }
+  },
+  "GuestRegisterPromptRequest": {
+    "email": {
+      "required": true,
+      "type": "email",
+      "maxLength": 320,
+      "message": "Enter a valid email address."
+    },
+    "password": {
+      "required": true,
+      "type": "string",
+      "minLength": 8,
+      "message": "Password must be at least 8 characters."
+    },
+    "confirm": {
+      "matches": "password",
+      "message": "Passwords do not match."
+    },
+    "full_name": {
+      "type": "string",
+      "maxLength": 255,
+      "message": "Full name must not exceed 255 characters."
+    }
+  },
+  "UpdateUserRequest": {
+    "full_name": {
+      "type": "string",
+      "maxLength": 255,
+      "message": "Full name must not exceed 255 characters."
+    },
+    "phone": {
+      "type": "tel",
+      "maxLength": 30,
+      "message": "Enter a valid phone number."
+    }
+  },
+  "ChangePasswordRequest": {
+    "current_password": {
+      "required": true,
+      "type": "string",
+      "message": "Current password is required."
+    },
+    "new_password": {
+      "required": true,
+      "type": "string",
+      "minLength": 8,
+      "message": "New password must be at least 8 characters."
+    },
+    "confirm": {
+      "matches": "new_password",
+      "message": "Passwords do not match."
+    }
+  },
+  "CreateAddressRequest": {
+    "full_name": {
+      "required": true,
+      "type": "string",
+      "maxLength": 255,
+      "message": "Full name is required and must not exceed 255 characters."
+    },
+    "line1": {
+      "required": true,
+      "type": "string",
+      "maxLength": 255,
+      "message": "Address line 1 is required and must not exceed 255 characters."
+    },
+    "line2": {
+      "type": "string",
+      "maxLength": 255,
+      "message": "Address line 2 must not exceed 255 characters."
+    },
+    "city": {
+      "required": true,
+      "type": "string",
+      "maxLength": 100,
+      "message": "City is required and must not exceed 100 characters."
+    },
+    "state": {
+      "required": true,
+      "type": "string",
+      "maxLength": 100,
+      "message": "State is required and must not exceed 100 characters."
+    },
+    "pin_code": {
+      "required": true,
+      "type": "string",
+      "maxLength": 10,
+      "message": "PIN code is required and must not exceed 10 characters."
+    },
+    "country": {
+      "required": true,
+      "type": "string",
+      "maxLength": 64,
+      "message": "Country is required and must not exceed 64 characters."
+    },
+    "phone": {
+      "type": "tel",
+      "maxLength": 20,
+      "message": "Enter a valid phone number of up to 20 characters."
+    },
+    "is_default": {
+      "type": "boolean",
+      "message": "Default address selection must be true or false."
+    }
+  },
+  "CreateCategoryRequest": {
+    "name": {
+      "required": true,
+      "type": "string",
+      "maxLength": 128,
+      "message": "Category name is required and must not exceed 128 characters."
+    },
+    "slug": {
+      "required": true,
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "message": "Slug is required, must not exceed 128 characters, and may only contain lowercase letters, numbers, and hyphens."
+    },
+    "parent_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "Parent category must be a valid UUID."
+    },
+    "description": {
+      "type": "string",
+      "message": "Description must be a valid string."
+    },
+    "is_active": {
+      "type": "boolean",
+      "message": "Active status must be true or false."
+    }
+  },
+  "CreateBrandRequest": {
+    "name": {
+      "required": true,
+      "type": "string",
+      "maxLength": 128,
+      "message": "Brand name is required and must not exceed 128 characters."
+    },
+    "slug": {
+      "required": true,
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "message": "Slug is required, must not exceed 128 characters, and may only contain lowercase letters, numbers, and hyphens."
+    }
+  },
+  "CreateProductRequest": {
+    "name": {
+      "required": true,
+      "type": "string",
+      "maxLength": 255,
+      "message": "Product name is required and must not exceed 255 characters."
+    },
+    "slug": {
+      "required": true,
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "message": "Slug is required, must not exceed 255 characters, and may only contain lowercase letters, numbers, and hyphens."
+    },
+    "description": {
+      "type": "string",
+      "message": "Description must be a valid string."
+    },
+    "brand_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "Brand must be a valid UUID."
+    },
+    "category_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "Category must be a valid UUID."
+    },
+    "base_price_paise": {
+      "required": true,
+      "type": "integer",
+      "min": 0,
+      "message": "Base price is required and must be a non-negative integer (in paise)."
+    },
+    "tax_rate_pct": {
+      "required": true,
+      "type": "number",
+      "min": 0,
+      "max": 100,
+      "message": "Tax rate is required and must be a number between 0 and 100."
+    },
+    "is_returnable": {
+      "required": true,
+      "type": "boolean",
+      "message": "Returnable status is required and must be true or false."
+    },
+    "return_window_days": {
+      "required": true,
+      "type": "integer",
+      "min": 0,
+      "message": "Return window days is required and must be a non-negative integer."
+    },
+    "is_active": {
+      "type": "boolean",
+      "message": "Active status must be true or false."
+    }
+  },
+  "CreateSkuRequest": {
+    "sku_code": {
+      "required": true,
+      "type": "string",
+      "maxLength": 100,
+      "message": "SKU code is required and must not exceed 100 characters."
+    },
+    "variant_attributes": {
+      "required": true,
+      "type": "object",
+      "message": "Variant attributes are required."
+    },
+    "price_paise": {
+      "required": true,
+      "type": "integer",
+      "min": 0,
+      "message": "Price is required and must be a non-negative integer (in paise)."
+    },
+    "stock_qty": {
+      "required": true,
+      "type": "integer",
+      "min": 0,
+      "message": "Stock quantity is required and must be a non-negative integer."
+    },
+    "is_active": {
+      "type": "boolean",
+      "message": "Active status must be true or false."
+    }
+  },
+  "AddCartItemRequest": {
+    "sku_id": {
+      "required": true,
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "A valid SKU must be selected."
+    },
+    "quantity": {
+      "required": true,
+      "type": "integer",
+      "min": 1,
+      "message": "Quantity is required and must be at least 1."
+    }
+  },
+  "UpdateCartItemRequest": {
+    "quantity": {
+      "required": true,
+      "type": "integer",
+      "min": 0,
+      "message": "Quantity is required and must be 0 or greater."
+    }
+  },
+  "ApplyPromoRequest": {
+    "code": {
+      "required": true,
+      "type": "string",
+      "maxLength": 50,
+      "message": "Promo code is required."
+    }
+  },
+  "CheckoutStartRequest": {
+    "cart_id": {
+      "required": true,
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "A valid cart ID is required."
+    },
+    "guest_email": {
+      "type": "email",
+      "maxLength": 320,
+      "message": "Enter a valid guest email address."
+    }
+  },
+  "CheckoutAddressRequest": {
+    "cart_id": {
+      "required": true,
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "A valid cart ID is required."
+    },
+    "address_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "Address ID must be a valid UUID."
+    },
+    "address.full_name": {
+      "type": "string",
+      "maxLength": 255,
+      "message": "Full name must not exceed 255 characters."
+    },
+    "address.line1": {
+      "type": "string",
+      "maxLength": 255,
+      "message": "Address line 1 must not exceed 255 characters."
+    },
+    "address.line2": {
+      "type": "string",
+      "maxLength": 255,
+      "message": "Address line 2 must not exceed 255 characters."
+    },
+    "address.city": {
+      "type": "string",
+      "maxLength": 100,
+      "message": "City must not exceed 100 characters."
+    },
+    "address.state": {
+      "type": "string",
+      "maxLength": 100,
+      "message": "State must not exceed 100 characters."
+    },
+    "address.pin_code": {
+      "type": "string",
+      "maxLength": 10,
+      "message": "PIN code must not exceed 10 characters."
+    },
+    "address.country": {
+      "type": "string",
+      "maxLength": 64,
+      "message": "Country must not exceed 64 characters."
+    },
+    "address.phone": {
+      "type": "tel",
+      "maxLength": 20,
+      "message": "Enter a valid phone number of up to 20 characters."
+    },
+    "address.is_default": {
+      "type": "boolean",
+      "message": "Default address selection must be true or false."
+    }
+  },
+  "PlaceOrderRequest": {
+    "cart_id": {
+      "required": true,
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "A valid cart ID is required."
+    },
+    "payment_method": {
+      "type": "string",
+      "message": "Enter a valid payment method."
+    }
+  },
+  "AdvanceOrderRequest": {
+    "status": {
+      "required": true,
+      "type": "string",
+      "enum": [
+        "packed",
+        "shipped",
+        "delivered"
+      ],
+      "message": "Status is required and must be one of: packed, shipped, or delivered."
+    },
+    "notes": {
+      "type": "string",
+      "message": "Notes must be a valid string."
+    }
+  },
+  "InitiatePaymentRequest": {
+    "order_id": {
+      "required": true,
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "A valid order ID is required."
+    },
+    "payment_method": {
+      "required": true,
+      "type": "string",
+      "message": "Payment method is required."
+    },
+    "test_scenario": {
+      "type": "string",
+      "enum": [
+        "success",
+        "failure",
+        "pending"
+      ],
+      "message": "Test scenario must be one of: success, failure, or pending."
+    }
+  },
+  "PaymentCallbackRequest": {
+    "payment_id": {
+      "required": true,
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "A valid payment ID is required."
+    },
+    "provider_reference": {
+      "type": "string",
+      "maxLength": 255,
+      "message": "Provider reference must not exceed 255 characters."
+    },
+    "status": {
+      "required": true,
+      "type": "string",
+      "enum": [
+        "success",
+        "failed",
+        "pending"
+      ],
+      "message": "Status is required and must be one of: success, failed, or pending."
+    },
+    "failure_reason": {
+      "type": "string",
+      "message": "Failure reason must be a valid string."
+    }
+  },
+  "ValidatePromoRequest": {
+    "code": {
+      "required": true,
+      "type": "string",
+      "maxLength": 50,
+      "message": "Promo code is required."
+    },
+    "cart_id": {
+      "required": true,
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "message": "A valid cart ID is required."
+    }
+  },
+  "CreatePromoCodeRequest": {
+    "code": {
+      "required": true,
+      "type": "string",
+      "maxLength": 50,
+      "message": "Promo code is required and must not exceed 50 characters."
+    },
+    "discount_type": {
+      "required": true,
+      "type": "string",
+      "enum": [
+        "percentage",
+        "flat"
+      ],
+      "message": "Discount type is required and must be either percentage or flat."
+    },
+    "discount_value": {
+      "required": true,
+      "type": "number",
+      "min": 0,
+      "message": "Discount value is required and must be a non-negative number."
+    },
+    "minimum_order_paise": {
+      "type": "integer",
+      "min": 0,
+      "message": "Minimum order amount must be a non-negative integer (in paise)."
+    },
+    "max_uses": {
+      "type": "integer",
+      "min": 1,
+      "message": "Maximum uses must be a positive integer."
+    },
+    "expires_at": {
+      "type": "date",
+      "message": "Enter a valid expiry date and time."
+    },
+    "is_active": {
+      "type": "boolean",
+      "message": "Active status must be true or false."
+    }
+  },
+  "CreateServiceablePinCodeRequest": {
+    "pin_code": {
+      "required": true,
+      "type": "string",
+      "maxLength": 10,
+      "message": "PIN code is required and must not exceed 10 characters."
+    },
+    "city": {
+      "type": "string",
+      "maxLength": 100,
+      "message": "City must not exceed 100 characters."
+    },
+    "state": {
+      "type": "string",
+      "maxLength": 100,
+      "message": "State must not exceed 100 characters."
+    },
+    "is_active": {
+      "type": "boolean",
+      "message": "Active status must be true or false."
+    }
+  }
+}

@@ -1,0 +1,60 @@
+/**
+ * Jest configuration — DETERMINISTIC scaffold output (app/services/boilerplate.py), not model
+ * output. The correct shape of a test harness is fully derivable from the project's capabilities,
+ * so it is never guessed: a jest.config written inside a BACKEND-framed work item cannot know a
+ * React frontend shares the same runner, and that is exactly how a shipped project got
+ * testEnvironment:'node' with a '**\/*.test.js'-only testMatch and no Babel config at all.
+ *
+ * CommonJS (.cjs) ON PURPOSE: generated package.json files commonly declare "type": "module", and
+ * a plain jest.config.js is then loaded as an ES module — `module.exports` throws
+ * "ReferenceError: module is not defined in ES module scope" before a single test runs. A .cjs
+ * config is unambiguous under BOTH module systems, so it is correct either way.
+ */
+module.exports = {
+{% if dom %}
+  // jsdom, because a React frontend lives at this project root: a 'node' environment has no
+  // document/window, so every component render throws before the assertion is reached.
+  testEnvironment: 'jsdom',
+{% else %}
+  // 'node': this root is server-side only — jsdom would be dead weight (and a slower boot).
+  testEnvironment: 'node',
+{% endif %}
+
+  // Matches .js AND .jsx/.ts/.tsx. A '**/*.test.js'-only pattern fails SILENTLY: Jest simply never
+  // collects the .jsx/.ts/.tsx suites and reports the handful it did find as green, so a project
+  // can ship with hundreds of tests that have never once executed.
+  testMatch: [
+    '**/__tests__/**/*.test.[jt]s?(x)',
+    '**/*.test.[jt]s?(x)',
+    '**/*.spec.[jt]s?(x)',
+  ],
+
+  // Build output and installed packages carry their own *.test.js files; collecting them means
+  // running someone else's suite (and, for dist/, the same suite twice).
+  testPathIgnorePatterns: ['/node_modules/', '/dist/', '/build/'],
+
+  // Explicit rather than implicit: this is the transform that makes the Babel config below
+  // (ESM -> CJS, JSX, import.meta) actually apply to the sources under test.
+  transform: {
+    '^.+\\.[jt]sx?$': 'babel-jest',
+  },
+
+  moduleNameMapper: {
+    // ORDER MATTERS — Jest applies the FIRST pattern that matches. `import logo from
+    // '@/assets/logo.svg'` matches BOTH this rule and the '^@/(.*)$' alias below; with the alias
+    // first, Jest resolves the real .svg and tries to parse XML as JavaScript. Assets first.
+    '\\.(svg|png|jpe?g|gif|webp|avif|ico)$': '<rootDir>/test-utils/fileMock.cjs',
+    // Same reasoning for stylesheets: a plain `import './App.css'` is a syntax error to the JS
+    // parser. An object stub also keeps `styles.foo` (CSS-module) access from throwing.
+    '\\.(css|less|sass|scss)$': '<rootDir>/test-utils/styleMock.cjs',
+    '^@/(.*)$': '<rootDir>/src/$1',
+  },
+
+  // setupFilesAfterEnv (NOT setupFiles / the non-existent "setupFilesAfterEach"): the polyfills and
+  // matchers in jest.setup.cjs must land AFTER the test framework and environment are installed.
+  setupFilesAfterEnv: ['<rootDir>/jest.setup.cjs'],
+
+  moduleFileExtensions: ['js', 'jsx', 'ts', 'tsx', 'json', 'node'],
+
+  clearMocks: true,
+};

@@ -21,17 +21,27 @@ def build_project_zip(
     executor: Executor,
     project_dir: str,
     generated_code: list[str],
+    unit_tests: list[str] | None = None,
     documentation: str = "",
     review_report: str = "",
     security_report: str = "",
+    debugging_report: str = "",
+    unit_test_report: str = "",
 ) -> str:
-    """Zip every generated file (source + boilerplate) plus README/review/security docs.
+    """Zip every generated file (source + boilerplate + tests) plus the run's docs/reports.
 
     ``generated_code`` entries are ``<project_dir>/...``-prefixed workspace paths (as written by
     ``scaffold_node``/``code_generator_node``); the prefix is stripped so the zip's internal layout
     is a clean, self-contained project tree, not one nested under the run's project_id folder.
     Missing/unreadable files are skipped (not fatal) — same graceful-degradation style the other
     report-writing agents use.
+
+    ``unit_tests`` (Unit Test agent's ``unit_tests`` state field) is zipped alongside the source.
+    It is a SEPARATE argument because that agent deliberately owns only its own field and never
+    appends to ``generated_code`` — so iterating ``generated_code`` alone silently shipped an
+    "Implementation Package" containing the whole application and NONE of the 235 tests written
+    for it. Both lists are de-duplicated against each other, since the debug/test loop does add
+    test files it rewrote to ``generated_code``.
 
     The scaffold already renders its own boilerplate ``README.md`` (``app/services/readme.py``);
     when Documentation produced one too, its version — written from the actual final source,
@@ -55,8 +65,14 @@ def build_project_zip(
         if security_report.strip():
             zf.writestr("docs/security-report.md", security_report)
             written.add("docs/security-report.md")
+        if debugging_report.strip():
+            zf.writestr("docs/debugging-report.md", debugging_report)
+            written.add("docs/debugging-report.md")
+        if unit_test_report.strip():
+            zf.writestr("docs/unit-test-report.md", unit_test_report)
+            written.add("docs/unit-test-report.md")
 
-        for path in generated_code:
+        for path in [*generated_code, *(unit_tests or [])]:
             if path in seen:
                 continue
             seen.add(path)
