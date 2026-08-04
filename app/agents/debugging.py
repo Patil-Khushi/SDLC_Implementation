@@ -38,6 +38,7 @@ from app.config.settings import get_settings
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.services.llm_gateway import LLMGateway
+from app.services.plan_builder import _is_test_path
 from app.services.wiring import UnresolvedImport, target_resolves
 
 logger = logging.getLogger(__name__)
@@ -53,12 +54,6 @@ _DEBUG_REPORT_HEADER = (
 
 def _slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", value) or "run"
-
-
-def _is_test_path(path: str) -> bool:
-    """True for a test file — used to flag test edits distinctly in the report/summary."""
-    base = path.rsplit("/", 1)[-1].lower()
-    return ".test." in base or ".spec." in base or "/__tests__/" in path.lower()
 
 
 def _parse_notes(raw: str) -> str:
@@ -200,6 +195,19 @@ class DebuggingAgent(BaseAgent):
         # overwrites it every run); test_result can be stale (only unit_test_run_node writes it),
         # so a failing debug_result always wins - see _current_failure.
         check_name, stderr, stdout = _current_failure(state)
+        if check_name == "unknown":
+            # Neither debug_result nor test_result is actually failing. This shouldn't normally
+            # happen given the router (this node is only entered on a real check failure), but
+            # nothing here enforces that, and the cost of being wrong is a full DEBUG_MAX_ITERS-turn
+            # LLM round burned for zero signal ("The fixed unknown check failed... (none)... (none)").
+            # Treat it as a cheap no-op instead: no LLM call, no debug_rounds/debug_attempt bump, no
+            # report entry — state is returned exactly as received.
+            logger.warning(
+                "[debugging] run=%s | _current_failure returned 'unknown' (neither debug_result "
+                "nor test_result is failing) — skipping the LLM round entirely",
+                state.get("run_id") or "-",
+            )
+            return state
         manifest = list(state.get("generated_code", []))
 
         # LOCAL, PROGRESS-SENSITIVE debug counter (NOT the same as repair_attempt or the
@@ -243,7 +251,23 @@ class DebuggingAgent(BaseAgent):
             prompt=prompt, system=system, tools=executor.get_repair_tools(), max_iters=DEBUG_MAX_ITERS
         )
 
-        fixes = _parse_files(raw)
+        fixes, parse_error = _parse_files(raw)
+        if fixes is None:
+            # Hitting DEBUG_MAX_ITERS without a parseable reply is a GUARANTEED wasted round: when
+            # the tool loop exhausts max_iters, llm_gateway.complete_with_tools returns whatever
+            # prose text accompanied the LAST turn's tool_use blocks (e.g. "Now let me check the
+            # middleware config..."), never the JSON fix — so nothing here would ever parse anyway.
+            # ONE additional tool-FREE retry (self.llm.complete, no tools bound) explicitly re-asks
+            # for the JSON — costs one cheap call instead of accepting a wasted DEBUG_MAX_ITERS-turn
+            # round. Matches the parse-failure retry unit_test.py / code_generator.py already use.
+            retry_prompt = (
+                f"{prompt}\n\nYour previous reply was not valid JSON matching "
+                f'{{"files":[{{"path":...,"content":...}}]}}. Error: {parse_error}. '
+                "Reply with STRICT JSON only — no prose, no code fences."
+            )
+            raw = self.llm.complete(prompt=retry_prompt, system=system)
+            fixes, parse_error = _parse_files(raw)
+
         written_paths: list[str] = []
         if fixes:
             # Write under the SAME <project_dir>/ prefix the code_generator used (and that the
@@ -253,18 +277,30 @@ class DebuggingAgent(BaseAgent):
             generated = list(state.get("generated_code", []))
             for entry in fixes:
                 path = _project_path(project_dir, entry["path"])
-                executor.write_file(path, entry["content"])  # fixed code writes the proposal
+                try:
+                    executor.write_file(path, entry["content"])  # fixed code writes the proposal
+                except Exception:  # noqa: BLE001 - one bad model-proposed path (e.g. a traversal
+                    # path LocalDiskExecutor._resolve rejects) must not sink every OTHER legitimate
+                    # fix in this round; skip just this file and keep going.
+                    logger.exception(
+                        "debugging: failed to write fix %r for run %s — skipping this file, "
+                        "continuing with the rest of the round",
+                        path, state.get("run_id"),
+                    )
+                    continue
                 written_paths.append(path)
                 if path not in generated:
                     generated.append(path)
             state["generated_code"] = generated
         else:
-            # Proposal didn't parse: write nothing (no partial garbage). The check re-runs and
-            # will re-fail/escalate; log it so the no-op fix is debuggable.
+            # Proposal didn't parse even after the retry: write nothing (no partial garbage). The
+            # check re-runs and will re-fail/escalate; log it so the no-op fix is debuggable.
             logger.warning(
-                "debugging: no valid fix parsed for run %s (attempt %s) — wrote nothing",
+                "debugging: no valid fix parsed for run %s (attempt %s) even after the tool-free "
+                "retry (%s) — wrote nothing",
                 state.get("run_id"),
                 state.get("debug_attempt"),
+                parse_error,
             )
         if unresolved:
             # Re-check the reconcile pass's findings against what THIS round changed, so a later
@@ -441,15 +477,26 @@ def _first_failure_output(gate_result: Any) -> tuple[str, str]:
     return "", ""
 
 
-def _parse_files(raw: str) -> list[dict[str, str]] | None:
+def _parse_files(raw: str) -> tuple[list[dict[str, str]] | None, str]:
+    """Parse the model reply into a list of {path, content}. Returns (files, error) — the error
+    string feeds the D1 tool-free retry prompt (see ``execute``) so the re-ask names the SPECIFIC
+    thing that was wrong, matching ``unit_test.py``/``code_generator.py``'s own ``_parse``."""
     obj = _extract_json(raw)
-    if not isinstance(obj, dict) or not isinstance(obj.get("files"), list):
-        return None
+    if not isinstance(obj, dict):
+        return None, "no JSON object found in reply"
+    files = obj.get("files")
+    if not isinstance(files, list) or not files:
+        return None, "'files' must be a non-empty array"
     clean: list[dict[str, str]] = []
-    for entry in obj["files"]:
-        if isinstance(entry, dict) and isinstance(entry.get("path"), str) and isinstance(entry.get("content"), str):
-            clean.append({"path": entry["path"], "content": entry["content"]})
-    return clean or None
+    for entry in files:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("content"), str)
+        ):
+            return None, "each file needs string 'path' and 'content'"
+        clean.append({"path": entry["path"], "content": entry["content"]})
+    return clean, ""
 
 
 # Module-level agent reused across invocations (guide's node pattern). Executor + gateway are

@@ -26,6 +26,7 @@ def build_project_zip(
     review_report: str = "",
     security_report: str = "",
     debugging_report: str = "",
+    unit_test_report: str = "",
 ) -> str:
     """Zip every generated file (source + boilerplate + tests) plus the run's docs/reports.
 
@@ -67,6 +68,9 @@ def build_project_zip(
         if debugging_report.strip():
             zf.writestr("docs/debugging-report.md", debugging_report)
             written.add("docs/debugging-report.md")
+        if unit_test_report.strip():
+            zf.writestr("docs/unit-test-report.md", unit_test_report)
+            written.add("docs/unit-test-report.md")
 
         for path in [*generated_code, *(unit_tests or [])]:
             if path in seen:

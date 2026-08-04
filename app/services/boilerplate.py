@@ -37,6 +37,8 @@ from typing import Any, Callable
 
 from jinja2 import Environment, FileSystemLoader
 
+from app.services.design_pack import has_rich_api_mapping
+
 try:  # PyYAML is available in this service; fall back gracefully if a slim env drops it.
     import yaml
 except ModuleNotFoundError:  # pragma: no cover
@@ -499,6 +501,26 @@ def resolve_scaffold_config(
     # root) and the render step collapses to a single combined manifest to avoid a collision.
     merged["_backend_root"] = _single_top_dir(backend_tree)
     merged["_frontend_root"] = _single_top_dir(frontend_tree)
+    # BUT: when this pack will actually be planned by app.services.plan_builder's ADAPTIVE path
+    # (no legacy flat-CSV mapping — the same "rich_api_mapping absent" signal build_plan() uses),
+    # that path unconditionally re-roots every generated leaf under canonical backend/ / frontend/
+    # folders regardless of what the structure trees themselves are named or wrapped in (see
+    # plan_builder._reroot, which discards wrapper names like "quickbite-backend/" outright). This
+    # module's own _single_top_dir has no way to know that — it answers "what does this tree call
+    # its own wrapper?", not "where will build_plan() actually put the generated files?" — so left
+    # alone the two disagree on the project's layout for every adaptive pack. That's not
+    # cosmetic: a scaffold-owned jest.config's rootDir and its "@/" alias are computed from
+    # _backend_root/_frontend_root, so a wrong root makes them point at a namespace nothing was
+    # ever generated under (e.g. "src/" when the code actually landed at "frontend/src/"), and it
+    # decides whether backend+frontend collapse into ONE combined manifest — correct only when
+    # both sides truly end up at the same root, which never happens once build_plan reroots them
+    # to two DIFFERENT canonical folders. Override per side (only where that side has an actual
+    # tree to reroot — an empty tree has nothing for plan_builder to touch either).
+    if not has_rich_api_mapping(package):
+        if backend_tree:
+            merged["_backend_root"] = "backend/"
+        if frontend_tree:
+            merged["_frontend_root"] = "frontend/"
     # Runs AFTER the roots are known: whether the harness needs the DOM stack depends on which
     # sides share a project root, which _normalize (root-blind by design) cannot decide.
     _add_jest_harness_deps(merged)
@@ -565,9 +587,21 @@ def render_scaffold(
     # package.json files, so collapse to ONE combined manifest — otherwise the backend would have no
     # manifest at all (issue 1b). Separated packs (distinct wrapper roots) get a manifest per side.
     if backend_on and frontend_on and language == "node" and be_root == fe_root:
+        scripts = {**(config.option("backend", "scripts", {}) or {}),
+                   **(config.option("frontend", "scripts", {}) or {})}
+        # A shared root can carry only ONE jest.config, so at most one side actually owns the
+        # rendered harness (see _jest_harness_plan) — that side's "test" script must win, not
+        # whichever side's scripts happened to be spread into the dict last. Real bug this
+        # guards against: a React frontend declaring "test": "vitest" silently overwrote a Node
+        # backend's "test": "jest" here purely by merge order, even though the harness this
+        # module actually renders at this root was the backend's jest.config.
+        harness_owner = next((h.owner for h in _jest_harness_plan(config.data) if h.root == be_root), None)
+        if harness_owner:
+            owner_test = (config.option(harness_owner, "scripts", {}) or {}).get("test")
+            if owner_test:
+                scripts["test"] = owner_test
         combined = {
-            "scripts": {**(config.option("backend", "scripts", {}) or {}),
-                        **(config.option("frontend", "scripts", {}) or {})},
+            "scripts": scripts,
             "dependencies": {**(config.option("frontend", "dependencies", {}) or {}),
                              **(config.option("backend", "dependencies", {}) or {})},
             "devDependencies": {**(config.option("frontend", "devDependencies", {}) or {}),

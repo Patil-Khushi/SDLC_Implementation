@@ -502,6 +502,7 @@ def package_node(state: WorkflowState) -> WorkflowState:
             review_report=state.get("review_report", ""),
             security_report=state.get("security_report", ""),
             debugging_report=state.get("debugging_report", ""),
+            unit_test_report=state.get("unit_test_report", ""),
         )
     except Exception as exc:  # noqa: BLE001 - a packaging failure must not crash a finished run
         logger.exception("packaging failed for run %s", state.get("run_id"))

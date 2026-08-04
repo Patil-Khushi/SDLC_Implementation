@@ -236,6 +236,44 @@ def _is_rich_api_mapping(headers: list[str]) -> bool:
     return {"operation_id", "endpoint_path"}.issubset(hs) and any("req" in h for h in hs)
 
 
+def has_rich_api_mapping(design_package: dict[str, Any]) -> bool:
+    """Dict-based equivalent of ``detect_roles(pack_dir).get("rich_api_mapping")``.
+
+    ``app.services.boilerplate`` never receives ``pack_dir`` — only the already-parsed artifact
+    dict (``state["design_package"]``) — but it needs the SAME signal ``build_plan`` uses to pick
+    its builder: the legacy flat-CSV path keeps every path byte-for-byte, while the adaptive
+    (structure-tree) path unconditionally re-roots every generated file under canonical
+    ``backend/``/``frontend/`` folders (see ``plan_builder._reroot``), discarding whatever wrapper
+    directory name the structure trees actually used. ``boilerplate.py``'s OWN root computation
+    (``_single_top_dir``) has no way to know about that rerooting, so left alone the two modules
+    can disagree on where a project's files live — which is exactly how a scaffolded
+    ``jest.config``'s ``rootDir`` and ``@/`` alias ended up pointing at a path nothing was ever
+    generated under. This function lets ``boilerplate.py`` ask the same "will build_plan reroot
+    this?" question ``detect_roles`` answers from disk, from the in-memory dict it actually has.
+
+    Reads every CSV/TSV-shaped artifact (raw text, as ``app.services.plan_builder._load_pack_artifacts``
+    stores it, OR an already-parsed list of row dicts) and applies the identical header check
+    :func:`_is_rich_api_mapping` uses. ``csv.DictReader`` (not a naive ``split(",")``) so a quoted
+    field containing a comma doesn't produce a spurious header.
+    """
+    for name, value in design_package.items():
+        if not str(name).lower().endswith((".csv", ".tsv")):
+            continue
+        headers: list[str] = []
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            headers = list(value[0].keys())
+        elif isinstance(value, str):
+            lines = value.splitlines()
+            if not lines:
+                continue
+            delimiter = "\t" if lines[0].count("\t") > lines[0].count(",") else ","
+            reader = csv.DictReader(lines, delimiter=delimiter)
+            headers = [h for h in (reader.fieldnames or []) if h]
+        if headers and _is_rich_api_mapping(headers):
+            return True
+    return False
+
+
 @dataclass
 class DetectedFile:
     path: Path

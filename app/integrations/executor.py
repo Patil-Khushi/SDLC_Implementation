@@ -543,40 +543,82 @@ class MCPExecutor(Executor):
     def _npm_install(self, project_dir: StrPath) -> RunResult:
         return self.run_command(["npm", "install", "--no-audit", "--no-fund"], cwd=project_dir)
 
+    @staticmethod
+    def _candidate_roots(project_dir: StrPath) -> list[tuple[str, str]]:
+        """(label-prefix, root) pairs to probe for a manifest.
+
+        The ADAPTIVE ``plan_builder`` path unconditionally re-roots every generated file under
+        exactly ``backend/`` and ``frontend/`` when both sides are enabled, so a split-root
+        project's manifests (``requirements.txt`` / ``package.json`` / ``tsconfig.json``) live
+        one level below ``project_dir``, not at it. Checking ``backend``/``frontend`` is
+        ADDITIVE to checking ``project_dir`` itself — never a replacement — so a combined-
+        manifest project, a legacy pack, or a backend-only/frontend-only project (manifest
+        directly at ``project_dir``) keeps working exactly as before.
+        """
+        base = str(project_dir)
+        return [
+            ("", base),
+            ("backend/", f"{base}/backend"),
+            ("frontend/", f"{base}/frontend"),
+        ]
+
     def compile(self, project_dir: StrPath) -> CheckResult:
         results = [("py", self.run_command(["python", "-m", "compileall", "-q", "."], cwd=project_dir))]
-        if self._exists(project_dir, "tsconfig.json"):  # frontend
-            # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all — unlike
-            # compileall (syntax-only, no import resolution), so node_modules must exist first.
-            results.append(("npm-install", self._npm_install(project_dir)))
-            results.append(("tsc", self.run_command(["npx", "tsc", "--noEmit"], cwd=project_dir)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "tsconfig.json"):  # frontend
+                # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all —
+                # unlike compileall (syntax-only, no import resolution), so node_modules must
+                # exist first.
+                results.append((f"{prefix}npm-install", self._npm_install(root)))
+                results.append((f"{prefix}tsc", self.run_command(["npx", "tsc", "--noEmit"], cwd=root)))
         return self._aggregate("compile", results)
 
     def build(self, project_dir: StrPath) -> CheckResult:
         results: list[tuple[str, RunResult]] = []
-        if self._exists(project_dir, "requirements.txt"):
-            results.append(("pip", self.run_command(
-                ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
-                cwd=project_dir,
-            )))
-        if self._exists(project_dir, "package.json"):
-            # Mirrors the pip branch above: install before building. Without this, `npm run
-            # build` always fails on a fresh checkout (no node_modules) — a repro found by
-            # running the real fixed checks against a real generated project (fixture-run-dev).
-            results.append(("npm-install", self._npm_install(project_dir)))
-            results.append(("npm", self.run_command(["npm", "run", "build", "--if-present"], cwd=project_dir)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "requirements.txt"):
+                results.append((f"{prefix}pip", self.run_command(
+                    ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
+                    cwd=root,
+                )))
+            if self._exists(root, "package.json"):
+                # Mirrors the pip branch above: install before building. Without this, `npm run
+                # build` always fails on a fresh checkout (no node_modules) — a repro found by
+                # running the real fixed checks against a real generated project (fixture-run-dev).
+                results.append((f"{prefix}npm-install", self._npm_install(root)))
+                results.append((f"{prefix}npm", self.run_command(["npm", "run", "build", "--if-present"], cwd=root)))
         return self._aggregate("build", results) if results else CheckResult(name="build", passed=True)
 
     def test(self, project_dir: StrPath) -> CheckResult:
-        results = [("pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=project_dir))]
-        if self._exists(project_dir, "package.json"):
-            results.append(("npm-test", self.run_command(["npm", "test", "--if-present"], cwd=project_dir)))
+        # `pytest` at `project_dir` itself runs UNCONDITIONALLY — unlike every other branch here
+        # (and unlike LocalDiskExecutor's gated version), this is pre-existing sandbox-executor
+        # behavior that predates the backend/frontend split-root probing added below, and is kept
+        # exactly as-is for backward compatibility. The newly-added `backend`/`frontend`
+        # candidates have no such precedent, so they're gated on `requirements.txt` like
+        # everywhere else — additive only, never replacing the unconditional root check.
+        results: list[tuple[str, RunResult]] = [
+            ("pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=project_dir))
+        ]
+        for prefix, root in self._candidate_roots(project_dir):
+            if prefix and self._exists(root, "requirements.txt"):
+                results.append((f"{prefix}pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=root)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "package.json"):
+                results.append((f"{prefix}npm-test", self.run_command(["npm", "test", "--if-present"], cwd=root)))
         return self._aggregate("test", results)
 
     def lint(self, project_dir: StrPath) -> CheckResult:
-        results = [("ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=project_dir))]
-        if self._exists(project_dir, "package.json"):
-            results.append(("eslint", self.run_command(["npx", "eslint", "."], cwd=project_dir)))
+        # `ruff` at `project_dir` itself runs UNCONDITIONALLY, same pre-existing rationale as
+        # `test` above — preserved exactly; only the new backend/frontend candidates are gated.
+        results: list[tuple[str, RunResult]] = [
+            ("ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=project_dir))
+        ]
+        for prefix, root in self._candidate_roots(project_dir):
+            if prefix and self._exists(root, "requirements.txt"):
+                results.append((f"{prefix}ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=root)))
+        for prefix, root in self._candidate_roots(project_dir):
+            if self._exists(root, "package.json"):
+                results.append((f"{prefix}eslint", self.run_command(["npx", "eslint", "."], cwd=root)))
         return self._aggregate("lint", results)
 
     def git_commit(self, project_dir: StrPath, message: str) -> CommitResult:

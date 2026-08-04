@@ -128,6 +128,8 @@ class WorkflowState(TypedDict, total=False):
     # build error at a time.
     unresolved_imports: list[dict[str, Any]]
     unit_tests: list[str]                  # workspace-relative paths of test files written
+    unit_test_report: str        # Unit Test: the Markdown report content (per-work-item coverage)
+    unit_test_report_path: str   # Unit Test: where the report .md was saved (reports/…)
     debugging_report: str        # Debugging: the Markdown report content (what each round changed)
     debugging_report_path: str   # Debugging: where the report .md was saved (reports/…)
     documentation: str

@@ -13,6 +13,7 @@ ALL_FIELDS = {
     "review_report", "review_report_path", "review_findings_path", "refactored_code",
     "refactored_files", "refactoring_report", "refactoring_report_path",
     "unresolved_imports", "unit_tests",
+    "unit_test_report", "unit_test_report_path",
     "debugging_report", "debugging_report_path",
     "documentation", "security_report", "security_report_path", "security_verdict",
     "security_findings_path", "security_loop_attempt", "pr_url", "finalize_status", "package_path",

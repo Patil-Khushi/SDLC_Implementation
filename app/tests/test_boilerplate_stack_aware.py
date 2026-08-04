@@ -44,8 +44,14 @@ def test_node_backend_inferred_from_structure_tree() -> None:
     cfg = resolve_scaffold_config("quickbite", SEPARATED_PACK)
     assert cfg.backend_language == "node"
     assert cfg.option("backend", "framework") == "express"
-    assert cfg.backend_root == "quickbite-backend/"
-    assert cfg.frontend_root == "quickbite-frontend/"
+    # No rich_api_mapping CSV in SEPARATED_PACK -> app.services.plan_builder's ADAPTIVE path
+    # re-roots every generated file under canonical backend/ / frontend/ folders regardless of
+    # what the structure trees themselves are wrapped in (plan_builder._reroot discards a wrapper
+    # name like "quickbite-backend/" outright) — so the scaffold must place its own manifest /
+    # Dockerfile / jest harness there too, or their rootDir-relative paths (e.g. jest's "@/" alias)
+    # point at a namespace nothing was ever generated under. See design_pack.has_rich_api_mapping.
+    assert cfg.backend_root == "backend/"
+    assert cfg.frontend_root == "frontend/"
 
 
 def test_separated_pack_emits_per_project_manifests() -> None:
@@ -55,20 +61,24 @@ def test_separated_pack_emits_per_project_manifests() -> None:
     assert "requirements.txt" not in files
     assert not any(p.endswith("requirements.txt") for p in files)
 
-    # Backend manifest + Dockerfile live inside the backend project root.
-    assert "quickbite-backend/package.json" in files
-    assert "quickbite-backend/Dockerfile" in files
-    assert "node:20-slim" in files["quickbite-backend/Dockerfile"]
+    # Backend manifest + Dockerfile live inside the CANONICAL backend project root (not the
+    # pack's own "quickbite-backend/" wrapper name — see test_node_backend_inferred_from_structure_tree).
+    assert "backend/package.json" in files
+    assert "backend/Dockerfile" in files
+    assert "node:20-slim" in files["backend/Dockerfile"]
 
-    # Frontend manifest lives inside the frontend project root.
-    assert "quickbite-frontend/package.json" in files
-    # ... and NOT at the repo root (that was the single-shared-tree bug).
+    # Frontend manifest lives inside the canonical frontend project root.
+    assert "frontend/package.json" in files
+    # ... and NOT at the repo root (that was the single-shared-tree bug) ...
     assert "package.json" not in files
+    # ... nor under the pack's own wrapper names, which build_plan never uses for generated code.
+    assert "quickbite-backend/package.json" not in files
+    assert "quickbite-frontend/package.json" not in files
 
 
 def test_backend_package_json_has_real_node_deps_and_scripts() -> None:
     files = _by_path("quickbite", SEPARATED_PACK)
-    pkg = json.loads(files["quickbite-backend/package.json"])
+    pkg = json.loads(files["backend/package.json"])
 
     assert pkg["name"] == "quickbite-backend"
     assert "express" in pkg["dependencies"]
@@ -90,9 +100,18 @@ def test_backend_env_example_has_node_backend_vars() -> None:
 def test_shared_root_node_pack_collapses_to_one_combined_manifest() -> None:
     # Both trees rooted at src/ (no wrapper) — a Node app can't carry two package.json at the root,
     # so the scaffold emits ONE combined manifest carrying both frontend and backend deps.
+    #
+    # Carries a rich_api_mapping CSV on purpose: WITHOUT one, app.services.plan_builder treats this
+    # as an ADAPTIVE pack and unconditionally re-roots backend+frontend under canonical, DIFFERENT
+    # backend/ / frontend/ folders regardless of the trees' own (wrapper-less) shape — so it would
+    # never actually collapse to one manifest once combined with build_plan's real behavior (see
+    # design_pack.has_rich_api_mapping). Only the LEGACY path keeps paths byte-for-byte, so only a
+    # legacy-shaped pack can genuinely reach the shared-root, single-manifest scenario this test
+    # protects.
     shared = {
         "backend-structure.json": {"tree": {"src/": {"server.js": "entry", "app.js": "factory"}}},
         "frontend-structure.json": {"tree": {"src/": {"App.jsx": "root"}}},
+        "api-to-ui-mapping.csv": "operation_id,endpoint_path,req_ids\nloginUser,/api/login,REQ-1\n",
     }
     files = _by_path("resource-app", shared)
     assert "requirements.txt" not in files
@@ -100,6 +119,22 @@ def test_shared_root_node_pack_collapses_to_one_combined_manifest() -> None:
     pkg = json.loads(files["package.json"])
     assert "express" in pkg["dependencies"]          # backend deps present
     assert "react" in pkg["dependencies"]            # frontend deps present
+
+
+def test_adaptive_shared_tree_pack_still_gets_separate_manifests() -> None:
+    # Same wrapper-less trees as the legacy test above, but WITHOUT a rich_api_mapping CSV: this is
+    # exactly the shape app.services.plan_builder's ADAPTIVE path re-roots to canonical, DIFFERENT
+    # backend/ / frontend/ folders (plan_builder._reroot) — so, unlike the legacy case, the two
+    # sides must NOT collapse into one manifest, or the scaffold's package.json/jest harness would
+    # sit at a path (the repo root) nothing is actually generated under.
+    shared_adaptive = {
+        "backend-structure.json": {"tree": {"src/": {"server.js": "entry", "app.js": "factory"}}},
+        "frontend-structure.json": {"tree": {"src/": {"App.jsx": "root"}}},
+    }
+    files = _by_path("resource-app", shared_adaptive)
+    assert "package.json" not in files
+    assert "backend/package.json" in files
+    assert "frontend/package.json" in files
 
 
 def test_explicit_python_framework_still_wins_over_inference() -> None:

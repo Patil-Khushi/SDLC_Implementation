@@ -29,6 +29,15 @@ from app.services.plan_builder import (
 
 # Shared-root Node/React pack: ONE package.json, ONE jest config serving backend AND frontend —
 # the exact shape that shipped broken.
+#
+# Carries a LEGACY-shaped (rich_api_mapping) mapping CSV on purpose: app.services.plan_builder's
+# ADAPTIVE path (no rich_api_mapping present) unconditionally re-roots every generated file under
+# canonical backend/ / frontend/ folders regardless of what these trees are named or wrapped in
+# (see plan_builder._reroot) — so an adaptive-shaped version of this fixture would never actually
+# share a root with plan_builder's real output, and app.services.boilerplate now detects that via
+# design_pack.has_rich_api_mapping() and forces backend/ + frontend/ roots to match. Only the
+# LEGACY path keeps paths byte-for-byte, so only a legacy-shaped pack can genuinely reach the
+# "shared root, one combined manifest, one jsdom jest config" scenario this file protects.
 SHARED_ROOT_PACK = {
     "backend-structure.json": {
         "tree": {
@@ -39,9 +48,14 @@ SHARED_ROOT_PACK = {
     },
     "frontend-structure.json": {
         "tree": {"src/": {"App.jsx": "root component", "main.jsx": "entry"}}},
+    "api-to-ui-mapping.csv": "operation_id,endpoint_path,req_ids\nloginUser,/api/login,REQ-1\n",
 }
 
-# Separated pack: the backend is Node (jest), the frontend is its own Vite/vitest project.
+# Separated pack: the backend is Node (jest), the frontend is its own Vite/vitest project. No
+# rich_api_mapping CSV, so this goes through the ADAPTIVE path — which re-roots both sides under
+# canonical backend/ / frontend/ regardless of the "quickbite-..." wrapper names these trees use
+# (plan_builder._reroot discards wrapper names outright), so that is what the scaffold must place
+# its manifests/harness under too — see design_pack.has_rich_api_mapping / boilerplate.py.
 SEPARATED_PACK = {
     "backend-structure.json": {
         "tree": {"quickbite-backend/": {"src/": {"server.js": "entry", "app.js": "factory"}}}},
@@ -99,11 +113,13 @@ def test_frontend_sharing_the_root_makes_the_environment_jsdom() -> None:
 
 def test_backend_only_root_stays_on_the_node_environment() -> None:
     # Separated pack: the backend project root has no React in it, so jsdom would be dead weight.
+    # No rich_api_mapping CSV -> the adaptive path re-roots both sides to canonical backend/ /
+    # frontend/, discarding the "quickbite-..." wrapper names the input trees used.
     files = _by_path("quickbite", SEPARATED_PACK)
 
-    assert "quickbite-backend/jest.config.cjs" in files
-    assert "quickbite-frontend/jest.config.cjs" not in files  # that side runs vitest
-    assert "testEnvironment: 'node'" in files["quickbite-backend/jest.config.cjs"]
+    assert "backend/jest.config.cjs" in files
+    assert "frontend/jest.config.cjs" not in files  # that side runs vitest
+    assert "testEnvironment: 'node'" in files["backend/jest.config.cjs"]
 
 
 def test_testmatch_catches_jsx_ts_and_tsx_not_only_js() -> None:
@@ -136,7 +152,7 @@ def test_setup_file_is_wired_through_setup_files_after_env() -> None:
 
 def test_babel_adds_the_react_preset_only_when_jsx_shares_the_root() -> None:
     shared = _by_path("quickbite", SHARED_ROOT_PACK)["babel.config.cjs"]
-    backend_only = _by_path("quickbite", SEPARATED_PACK)["quickbite-backend/babel.config.cjs"]
+    backend_only = _by_path("quickbite", SEPARATED_PACK)["backend/babel.config.cjs"]
 
     assert "@babel/preset-env" in shared and "@babel/preset-react" in shared
     assert "runtime: 'automatic'" in shared
@@ -180,7 +196,7 @@ def test_setup_polyfills_are_guarded_and_cover_the_known_gaps() -> None:
 
 
 def test_backend_only_setup_skips_the_dom_pieces() -> None:
-    setup = _by_path("quickbite", SEPARATED_PACK)["quickbite-backend/jest.setup.cjs"]
+    setup = _by_path("quickbite", SEPARATED_PACK)["backend/jest.setup.cjs"]
 
     assert "@testing-library/jest-dom" not in setup
     assert "scrollIntoView" not in setup
@@ -223,7 +239,7 @@ def test_babel_packages_are_pinned_to_the_7_line() -> None:
 
 def test_backend_only_manifest_skips_the_dom_packages() -> None:
     dev = json.loads(
-        _by_path("quickbite", SEPARATED_PACK)["quickbite-backend/package.json"]
+        _by_path("quickbite", SEPARATED_PACK)["backend/package.json"]
     )["devDependencies"]
 
     assert "babel-jest" in dev and "@babel/preset-env" in dev
