@@ -45,6 +45,44 @@ logger = logging.getLogger(__name__)
 #: 404 repo not visible to this identity (GitHub hides private/foreign repos behind 404).
 _CREDENTIAL_STATUSES = (401, 403, 404)
 
+#: …and the status that does NOT look like a permission failure but is one. Verified live against a
+#: read-only PAT on someone else's repo: ``POST /pulls`` answers **422 "Validation Failed"** with
+#: ``errors: [{"resource": "Issue", "code": "custom", "message": "must be a collaborator"}]`` — not
+#: 403. A status-only rule therefore gives up on the first credential and never tries the one that
+#: owns the repo, which is the whole bug this fallback exists to fix. 422 is only retried when its
+#: ``errors[]`` detail carries one of these hints; a genuine 422 ("No commits between main and dev",
+#: "A pull request already exists") must be reported as-is, since no other token would change it.
+_PERMISSION_HINTS = ("must be a collaborator", "not accessible", "permission", "forbidden")
+
+
+def _error_detail(payload: Any) -> str:
+    """GitHub's ``message`` PLUS the ``errors[]`` entries it hides the real reason in.
+
+    Without the array, the caller sees only "Validation Failed" — true but useless; the actionable
+    text ("must be a collaborator") lives one level down.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    parts = [str(payload.get("message", "")).strip()]
+    for err in payload.get("errors") or []:
+        if isinstance(err, dict):
+            text = str(err.get("message") or err.get("code") or "").strip()
+        else:
+            text = str(err).strip()
+        if text:
+            parts.append(text)
+    return "; ".join(p for p in parts if p)
+
+
+def _is_credential_problem(status: int, detail: str) -> bool:
+    """True when another credential could plausibly succeed where this one failed."""
+    if status in _CREDENTIAL_STATUSES:
+        return True
+    if status == 422:
+        low = detail.lower()
+        return any(hint in low for hint in _PERMISSION_HINTS)
+    return False
+
 #: A minimal seam over the HTTP layer: (method, url, params, json_body, headers, timeout) ->
 #: (status_code, parsed JSON body). Lets tests exercise this integration without the network.
 HttpRequest = Callable[[str, str, dict[str, Any], dict[str, Any] | None, dict[str, str], float], tuple[int, Any]]
@@ -63,6 +101,9 @@ class PRResult:
     url: str = ""
     error: str = ""
     status: int | None = None
+    #: Set when the failure looks like "this credential lacks access" rather than "this request was
+    #: invalid" — i.e. worth re-attempting with a different token (see ``_is_credential_problem``).
+    retryable: bool = False
 
 
 class GitHubClient(ABC):
@@ -143,7 +184,7 @@ class RealGitHubClient(GitHubClient):
         result = PRResult(ok=False, error="no attempt made")
         for i, token in enumerate(credentials):
             result = self._attempt(owner, repo, head, base, title, body, token)
-            if result.ok or result.status not in _CREDENTIAL_STATUSES:
+            if result.ok or not result.retryable:
                 return result  # success, or a real error that another token would not fix
             if i + 1 < len(credentials):
                 # The identity that pushed the repo is often not the identity in $GITHUB_PAT; say
@@ -170,10 +211,11 @@ class RealGitHubClient(GitHubClient):
         except Exception as exc:  # noqa: BLE001 - a GitHub API failure must not crash the run
             return PRResult(ok=False, error=f"github request failed: {exc}")
         if status not in (200, 201):
-            message = payload.get("message", "") if isinstance(payload, dict) else ""
+            detail = _error_detail(payload)
             return PRResult(
                 ok=False, status=status,
-                error=f"github create PR failed ({status}): {message}".strip(),
+                error=f"github create PR failed ({status}): {detail}".strip(),
+                retryable=_is_credential_problem(status, detail),
             )
         return PRResult(ok=True, number=payload.get("number"), url=payload.get("html_url", ""),
                         status=status)

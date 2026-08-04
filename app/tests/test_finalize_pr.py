@@ -27,9 +27,21 @@ _WRITE_TOKEN = "gh-cli-token-owns-the-repo"
 _READONLY_TOKEN = "configured-pat-different-identity"
 
 
-def _fake_api(write_token: str, *, create_status: int = 201,
-              create_message: str = "") -> tuple[Any, list[dict[str, str]]]:
-    """A GitHub stand-in that only honors ``write_token``; every call is recorded for assertions."""
+#: What GitHub ACTUALLY returns when a non-collaborator PAT tries to open a PR — captured live.
+#: A 422, not a 403, with the real reason buried in errors[]. See _PERMISSION_HINTS.
+_NOT_COLLABORATOR = (422, {
+    "message": "Validation Failed",
+    "errors": [{"resource": "Issue", "code": "custom", "message": "must be a collaborator"}],
+})
+
+
+def _fake_api(write_token: str, *, create_status: int = 201, create_message: str = "",
+              denial: tuple[int, dict[str, Any]] = _NOT_COLLABORATOR,
+              ) -> tuple[Any, list[dict[str, str]]]:
+    """A GitHub stand-in that only honors ``write_token``; every call is recorded for assertions.
+
+    ``denial`` is how the API rebuffs any other token — defaults to the live-captured 422.
+    """
     calls: list[dict[str, str]] = []
 
     def http_request(method: str, url: str, params: dict[str, Any], json_body: dict[str, Any] | None,
@@ -37,9 +49,11 @@ def _fake_api(write_token: str, *, create_status: int = 201,
         token = headers.get("Authorization", "").removeprefix("Bearer ")
         calls.append({"method": method, "token": token})
         if method == "GET":
-            return (200, []) if token == write_token else (404, {"message": "Not Found"})
+            # A read-only PAT CAN list PRs on a public repo (verified live: 200) — the denial only
+            # bites on create, which is exactly why the failure was so easy to misread.
+            return 200, []
         if token != write_token:
-            return 403, {"message": "Resource not accessible by personal access token"}
+            return denial
         if create_status not in (200, 201):
             return create_status, {"message": create_message}
         return create_status, {"number": 7, "html_url": _PR_URL}
@@ -47,11 +61,40 @@ def _fake_api(write_token: str, *, create_status: int = 201,
     return http_request, calls
 
 
-def test_readonly_pat_falls_back_to_the_gh_cli_token() -> None:
-    # The live failure: the configured PAT is a different identity with read-only access. The 403
-    # must advance to the `gh` token (the identity that created the repo) instead of ending the run
-    # with no PR.
-    http_request, calls = _fake_api(_WRITE_TOKEN)
+def test_non_collaborator_422_falls_back_instead_of_giving_up() -> None:
+    # THE live case, and the one a status-only rule gets wrong: GitHub denies a non-collaborator
+    # PAT with 422 "Validation Failed" + "must be a collaborator" — not 403. Treating 422 as
+    # always-terminal means never trying the token that owns the repo, i.e. no PR at all.
+    http_request, calls = _fake_api(_WRITE_TOKEN, denial=_NOT_COLLABORATOR)
+    client = RealGitHubClient(
+        token=_READONLY_TOKEN, fallback_tokens=(_WRITE_TOKEN,), http_request=http_request,
+    )
+
+    result = client.create_or_update_pull_request("owner", "repo", "dev", "main", "t", "b")
+
+    assert result.ok, f"422/collaborator was not recognized as a credential problem: {result.error}"
+    assert result.url == _PR_URL
+    assert [c["token"] for c in calls if c["method"] == "POST"] == [_READONLY_TOKEN, _WRITE_TOKEN]
+
+
+def test_error_message_includes_the_errors_array_detail() -> None:
+    # "Validation Failed" alone is true but useless — the actionable reason is in errors[].
+    http_request, _ = _fake_api("some-other-token", denial=_NOT_COLLABORATOR)
+    client = RealGitHubClient(token=_READONLY_TOKEN, http_request=http_request)
+
+    result = client.create_or_update_pull_request("owner", "repo", "dev", "main", "t", "b")
+
+    assert not result.ok
+    assert "Validation Failed" in result.error
+    assert "must be a collaborator" in result.error  # the part that tells a human what to do
+
+
+def test_readonly_pat_falls_back_when_denial_is_a_plain_403() -> None:
+    # The other shape of the same problem (403 rather than 422) must also fall back.
+    http_request, calls = _fake_api(
+        _WRITE_TOKEN,
+        denial=(403, {"message": "Resource not accessible by personal access token"}),
+    )
     client = RealGitHubClient(
         token=_READONLY_TOKEN, fallback_tokens=(_WRITE_TOKEN,), http_request=http_request,
     )
