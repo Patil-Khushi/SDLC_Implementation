@@ -46,6 +46,17 @@ def _stage(agent: str, doing: str) -> None:
     logger.info("   -> %s", doing)
 
 
+def _note(state: WorkflowState, line: str) -> WorkflowState:
+    """Append one line to the run summary — the artifact a human actually reads after a run.
+
+    A stage outcome that lives only in a log line is effectively invisible (a failed finalize used
+    to end a run that still reported "completed" with a zip). Returns ``state`` so nodes can
+    ``return _note(state, ...)``.
+    """
+    state["generation_summary"] = (state.get("generation_summary") or "") + line.rstrip("\n") + "\n"
+    return state
+
+
 def scaffold_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic: render the repo-root boilerplate once, before any work item.
 
@@ -456,27 +467,33 @@ def finalize_node(state: WorkflowState) -> WorkflowState:
     if not repo_url or not is_allowed_repo_url(repo_url):
         logger.info("[finalize] run=%s | no repo_url / not an allowed GitHub URL - skipping PR", run_id)
         state["finalize_status"] = "skipped"
-        return state
+        return _note(state, "[finalize] SKIPPED — no repo_url (nothing was published, so there is "
+                            "no branch to open a PR from)")
 
     match = _OWNER_REPO_RE.match(repo_url)
     if not match:
         logger.warning("[finalize] run=%s | could not parse owner/repo from repo_url: %s", run_id, repo_url)
         state["finalize_status"] = "skipped"
-        return state
+        return _note(state, f"[finalize] SKIPPED — could not parse owner/repo from {repo_url}")
     owner, repo = match.group(1), match.group(2)
 
     title = f"Security-approved: merge {head} into main"
     body = (state.get("security_report") or "Security scan passed.")[:60000]
     logger.info("[finalize] run=%s | opening PR %s -> main for %s/%s ...", run_id, head, owner, repo)
-    result = get_github_client().create_or_update_pull_request(owner, repo, head, "main", title, body)
+    # Pass the credential THIS run pushed with; the client falls back to the configured PAT and
+    # then to the `gh` CLI's token, since only the identity that owns the repo can open a PR on it.
+    client = get_github_client(token=(state.get("git_token") or "").strip() or None)
+    result = client.create_or_update_pull_request(owner, repo, head, "main", title, body)
     if result.ok:
         state["pr_url"] = result.url
         state["finalize_status"] = "pr_created"
         logger.info("[finalize] run=%s | PR ready: %s", run_id, result.url)
-    else:
-        state["finalize_status"] = "pr_failed"
-        logger.warning("[finalize] run=%s | PR failed: %s", run_id, result.error)
-    return state
+        return _note(state, f"[finalize] PR ready: {result.url}")
+    state["finalize_status"] = "pr_failed"
+    logger.warning("[finalize] run=%s | PR failed: %s", run_id, result.error)
+    # Record it in the run summary too: a PR failure used to be a log line only, so a run could
+    # finish "completed" with a zip and nobody noticed the PR never got opened.
+    return _note(state, f"[finalize] PR FAILED ({head} -> main on {owner}/{repo}): {result.error}")
 
 
 def package_node(state: WorkflowState) -> WorkflowState:
