@@ -222,11 +222,26 @@ class DebuggingAgent(BaseAgent):
         # to a broken build would otherwise read as "1 < 30 -> progress" and wrongly reset the
         # stall counter right when the loop actually got worse. DEBUG_ROUNDS_CEILING still bounds
         # the case where the kind keeps flip-flopping (kind-gating alone can't terminate that).
+        #
+        # A KIND CHANGE ITSELF (check_name != kind_before) is NEUTRAL for the stall counter — it
+        # must NOT increment it. The most common case is FORWARD: compile/build finally passes and
+        # test runs for the first time — that is the loop advancing to a new phase, not failing to
+        # make progress on the current one, and incrementing here shaved a round off the budget for
+        # a check that had never even run before. It must also NOT reset the counter to 0: the
+        # BACKWARD case (a fix breaks the build entirely, so debug_result starts failing again
+        # after test was failing) is precisely the regression kind-gating above exists to catch —
+        # resetting on every kind change would let that exact oscillation launder an elevated
+        # counter back to 0 on every swing, silently defeating kind-gating and DEBUG_ROUNDS_CEILING
+        # both. So on a kind change the counter is left EXACTLY as it was; only the recorded
+        # (count, kind) baseline updates, so the NEXT round can compare correctly.
         failures_now = _failure_count(state)
         failures_before = int(state.get("debug_last_failure_count", -1))
         kind_before = state.get("debug_last_failure_kind") or ""
-        made_progress = failures_before < 0 or (check_name == kind_before and failures_now < failures_before)
-        state["debug_attempt"] = 0 if made_progress else int(state.get("debug_attempt", 0)) + 1
+        first_round = failures_before < 0
+        kind_changed = not first_round and check_name != kind_before
+        made_progress = first_round or (not kind_changed and failures_now < failures_before)
+        if not kind_changed:
+            state["debug_attempt"] = 0 if made_progress else int(state.get("debug_attempt", 0)) + 1
         state["debug_last_failure_count"] = failures_now
         state["debug_last_failure_kind"] = check_name
         state["debug_rounds"] = int(state.get("debug_rounds", 0)) + 1
@@ -236,9 +251,9 @@ class DebuggingAgent(BaseAgent):
             state["debug_rounds"],
             failures_now,
             check_name,
-            "n/a" if failures_before < 0 else failures_before,
-            "" if failures_before < 0 else f" [{kind_before}]",
-            "progress" if made_progress else "NO progress",
+            "n/a" if first_round else failures_before,
+            "" if first_round else f" [{kind_before}]",
+            "kind changed (neutral)" if kind_changed else ("progress" if made_progress else "NO progress"),
             state["debug_attempt"],
         )
 

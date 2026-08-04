@@ -104,6 +104,36 @@ from app.graph.state import WorkflowState
 from app.models import WorkItem
 
 
+#: This module's own directory is ``<service_root>/app/graph/``, so two ``.parent``s up is the
+#: service root regardless of how deeply THAT root itself is nested (e.g. a flattened checkout
+#: vs. the intended ``services/implementation/`` layout) — anchoring on this file's own location
+#: avoids hardcoding a parent-count borrowed from a different module's path depth.
+_SERVICE_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def resolve_checkpoint_db_path(db_path: str | None = None) -> str:
+    """The checkpoint DB path actually used, as an ABSOLUTE path (or the literal ``":memory:"``).
+
+    ``Settings.checkpoint_db_path`` defaults to the relative string ``"app/workspace/checkpoints.
+    sqlite"``, and ``sqlite3.connect`` resolves a relative path against the PROCESS's current
+    working directory at connect time — which is whatever directory the app/script happened to be
+    launched from. Two launches from different CWDs (the FastAPI app from the repo root, a demo
+    script from ``scripts/``, an IDE run configuration with its own CWD, ...) then each connect to
+    a DIFFERENT file, silently splitting what looks like one project's checkpoint history in two:
+    a crash-resume can find nothing to resume from, or (worse) a fresh run's ``--project`` name
+    coincidentally has no checkpoint in ITS interpretation of the path when one really does exist
+    under a sibling path. Resolving a relative path against :data:`_SERVICE_ROOT` instead of CWD
+    makes the file the same absolute path no matter where the process was launched from, and this
+    function is also called from ``scripts/run_fixture.py`` so its user-facing messages can name
+    the exact file being checked, rather than repeating the ambiguous configured string.
+    """
+    db_path = get_settings().checkpoint_db_path if db_path is None else db_path
+    if db_path == ":memory:":
+        return db_path
+    path = Path(db_path)
+    return str(path if path.is_absolute() else _SERVICE_ROOT / path)
+
+
 def _build_checkpointer() -> SqliteSaver:
     """A disk-backed checkpointer keyed by ``thread_id`` (== ``run_id``): a run crashing mid-graph
     (e.g. a transient network drop during an LLM call) can resume from its last completed node
@@ -117,7 +147,7 @@ def _build_checkpointer() -> SqliteSaver:
     attribute access, e.g. ``work_item.target_files``) once a future langgraph release tightens
     the default, and silences the warning now.
     """
-    db_path = get_settings().checkpoint_db_path
+    db_path = resolve_checkpoint_db_path()
     if db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)

@@ -590,8 +590,20 @@ def _frontend_items(rows: list[dict[str, str]], frontend: dict) -> list[WorkItem
 # real structure trees with the same stack-agnostic role classifier used above.
 
 def _is_test_path(path: str) -> bool:
+    """True for a test-file path: colocated JS-style (``*.test.js``/``*.spec.js``), Python's
+    ``test_*.py`` prefix OR ``*_test.py`` suffix convention, or any path under a ``tests/``/
+    ``__tests__/`` directory.
+
+    The suffix form needs the extension stripped before the ``endswith`` check, or it never
+    matches: ``"login_test.py"``'s basename ends in ``".py"``, not ``"_test"``, so the previous
+    ``base.endswith((".test", "_test"))`` (checked against the FULL basename, extension included)
+    only ever matched an extensionless ``foo_test`` — never the actual ``*_test.py`` convention it
+    was meant to catch. The prefix form (``startswith("test_")``) doesn't have this problem — a
+    prefix check is extension-agnostic — so it stays on the full basename, unchanged.
+    """
     base = _basename(path)
-    if ".test." in base or ".spec." in base or base.startswith("test_") or base.endswith((".test", "_test")):
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    if ".test." in base or ".spec." in base or base.startswith("test_") or stem.endswith("_test"):
         return True
     segs = path.lower().split("/")
     return "tests" in segs or "__tests__" in segs

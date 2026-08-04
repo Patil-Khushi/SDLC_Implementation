@@ -36,8 +36,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # so `app.*` imports work
 
-from app.config.settings import get_settings  # noqa: E402
-from app.graph.graph import workflow  # noqa: E402
+from app.graph.graph import resolve_checkpoint_db_path, workflow  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_executor  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
@@ -230,13 +229,16 @@ def main() -> None:
     if _existing_thread_state:
         print(
             f"A checkpoint already exists for --project {args.project!r} "
-            f"(workflow_status={_existing_thread_state.get('workflow_status')!r}). Starting a "
-            f"FRESH run under this same name would silently inherit stale fields (security_verdict, "
-            f"unit_tests, repo_url, ...) from that prior run and can skip whole phases of the "
-            f"pipeline without any error.\n\n"
+            f"(workflow_status={_existing_thread_state.get('workflow_status')!r}) in "
+            f"{resolve_checkpoint_db_path()!r}. Starting a FRESH run under this same name would "
+            f"silently inherit stale fields (security_verdict, unit_tests, repo_url, ...) from "
+            f"that prior run and can skip whole phases of the pipeline without any error.\n\n"
             f"Pick one:\n"
             f"  --resume                    continue that run from its last completed node\n"
             f"  --project <a-new-name>       start a genuinely fresh run\n\n"
+            f"If this checkpoint is unexpected (e.g. you didn't think {args.project!r} had run "
+            f"before), the file above is checked regardless of which directory this script is "
+            f"launched from — delete it directly if it's stale.\n\n"
             f"Aborting — no work done."
         )
         return
@@ -322,11 +324,15 @@ def _resume(args: argparse.Namespace, *, mode: str, make_public: bool) -> None:
     config = {"configurable": {"thread_id": run_id}, "recursion_limit": 1000}
     existing = workflow.get_state(config).values
     if not existing:
+        # The RESOLVED path (see resolve_checkpoint_db_path), not the raw get_settings() string —
+        # the configured value is commonly a relative path, and printing it as-is misrepresents
+        # where this actually looked: sqlite3.connect resolves a relative path against the
+        # process's CWD, which is not necessarily where the reader of this message is standing.
         print(
             f"--resume: no checkpoint found for project {run_id!r} (thread_id={run_id!r}) in "
-            f"{get_settings().checkpoint_db_path!r}. Either this project never ran with the "
-            f"SQLite checkpointer, or the run already finished and its checkpoint was read once "
-            f"already. Nothing to resume — start a fresh run instead."
+            f"{resolve_checkpoint_db_path()!r}. Either this project never ran with the SQLite "
+            f"checkpointer, or the run already finished and its checkpoint was read once already. "
+            f"Nothing to resume — start a fresh run instead."
         )
         return
     print(

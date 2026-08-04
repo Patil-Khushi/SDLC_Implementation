@@ -195,6 +195,54 @@ def test_a_round_that_makes_things_worse_counts_as_a_stall() -> None:
     assert state["debug_attempt"] == 1
 
 
+def test_kind_transition_to_test_for_the_first_time_does_not_tick_the_stall_counter() -> None:
+    """Review-flagged gap: the FORWARD case. compile/build finally passes and the test suite runs
+    for the first time — a NEW check kind, never previously measured, not a failure to make
+    progress on the one that was already running. Incrementing here shaved a round off the budget
+    for a check that hadn't even started yet."""
+    executor = FakeExecutor()
+    llm = _FixedReplyLLM("backend/app/main.py")
+    agent = DebuggingAgent(executor=executor, llm=llm)
+    state = _state(debug_result=_failing(stdout="Tests: 2 failed, 8 passed, 10 total"))
+
+    agent.execute(state)
+    assert state["debug_attempt"] == 0             # first round ever measured
+    assert state["debug_last_failure_kind"] == "compile/build"
+
+    # compile/build now passes; test_result fails for the FIRST time. check_name flips to "test".
+    state["debug_result"] = {"passed": True, "checks": []}
+    state["test_result"] = _failing(name="test", stdout="Tests: 30 failed, 5 passed, 35 total")
+    agent.execute(state)
+
+    assert state["debug_last_failure_kind"] == "test"
+    assert state["debug_attempt"] == 0             # NOT incremented to 1 by the kind change alone
+
+
+def test_kind_transition_does_not_launder_an_elevated_stall_counter_to_zero_either() -> None:
+    """The BACKWARD case, and the reason a kind transition must be NEUTRAL rather than a free
+    reset: a fix that breaks the build entirely swings the kind from "test" back to
+    "compile/build". If that swing reset the counter to 0, an oscillating loop (each fix breaking
+    something else) could flip kinds forever without the stall counter ever accumulating — exactly
+    the regression the kind-gating check exists to catch, silently defeated by a different door."""
+    executor = FakeExecutor()
+    llm = _FixedReplyLLM("backend/app/main.py")
+    agent = DebuggingAgent(executor=executor, llm=llm)
+    state = _state(test_result=_failing(name="test", stdout="Tests: 9 failed, 1 passed, 10 total"))
+
+    agent.execute(state)                           # baseline: test, 9 failing
+    state["test_result"] = _failing(name="test", stdout="Tests: 9 failed, 1 passed, 10 total")
+    agent.execute(state)
+    assert state["debug_attempt"] == 1             # stalled at 9, same kind
+
+    # A bad fix breaks the build outright: debug_result now fails, which always wins over a stale
+    # test_result (see _current_failure) — kind flips test -> compile/build.
+    state["debug_result"] = _failing(name="build", stdout="", stderr="SyntaxError")
+    agent.execute(state)
+
+    assert state["debug_last_failure_kind"] == "compile/build"
+    assert state["debug_attempt"] == 1             # carried over exactly, not reset to 0
+
+
 def test_unparseable_reply_retries_once_tool_free_then_recovers() -> None:
     """D1: an unparseable ``complete_with_tools`` reply used to be a guaranteed wasted round —
     hitting DEBUG_MAX_ITERS without a parseable final reply makes ``llm_gateway.complete_with_tools``
