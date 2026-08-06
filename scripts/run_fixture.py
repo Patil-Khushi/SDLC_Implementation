@@ -30,7 +30,9 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,61 @@ from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_e
 from app.services.plan_builder import build_plan  # noqa: E402
 from scripts.feature_commit import _DEFAULT_OUT_DIR  # noqa: E402  (generated output goes outside the repo)
 from scripts.local_executor import LocalDiskExecutor  # noqa: E402
+
+
+def _resolve_owner(owner_arg: str | None) -> str:
+    """The GitHub owner a published repo would be created under: --owner, $GITHUB_OWNER, then `gh`."""
+    owner = (owner_arg or os.environ.get("GITHUB_OWNER", "")).strip()
+    if owner:
+        return owner
+    try:
+        result = subprocess.run(["gh", "api", "user", "--jq", ".login"],
+                                capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _name_is_taken(name: str, *, out_base: Path, owner: str, check_github: bool) -> bool:
+    """True if anything from a previous run already answers to ``name``.
+
+    All three homes a project name occupies are checked, because reusing ANY of them corrupts the
+    next run differently: the local folder (a new scaffold writes into last run's working tree),
+    the GitHub repo (features push onto last run's branches), and the LangGraph checkpoint (stale
+    state fields silently skip whole phases — the case ``main``'s guard already aborts on).
+    """
+    if (out_base / name).exists():
+        return True
+    if workflow.get_state({"configurable": {"thread_id": name}}).values:
+        return True
+    if check_github and owner:
+        try:
+            result = subprocess.run(["gh", "repo", "view", f"{owner}/{name}"],
+                                    capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return False  # can't ask GitHub — don't invent a collision
+        return result.returncode == 0
+    return False
+
+
+def _fresh_project_name(project: str, *, out_base: Path, owner: str, check_github: bool) -> str:
+    """``project`` if it is genuinely unused, else the same name with a timestamp suffix.
+
+    Opt-in (``--fresh``). Without it the run still aborts on a reused name and asks the operator to
+    choose — this only automates that choice, for the case where re-running the same pack under a
+    predictable name is the point (a nightly build, a demo recording).
+    """
+    if not _name_is_taken(project, out_base=out_base, owner=owner, check_github=check_github):
+        return project
+    stamp = datetime.now().strftime("%m%d-%H%M%S")
+    candidate = f"{project}-{stamp}"
+    suffix = 1
+    while _name_is_taken(candidate, out_base=out_base, owner=owner, check_github=check_github):
+        candidate = f"{project}-{stamp}-{suffix}"
+        suffix += 1
+    print(f"--fresh: {project!r} is already in use (local folder, GitHub repo and/or checkpoint) — "
+          f"this run uses {candidate!r} instead.")
+    return candidate
 
 
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
@@ -177,6 +234,12 @@ def main() -> None:
     parser.add_argument("--project", "--project-id", dest="project", default="fixture-run",
                         help="project name — also the repo subfolder under --out-dir in --real mode")
     parser.add_argument(
+        "--fresh", action="store_true",
+        help="if --project is already in use (local folder, GitHub repo or checkpoint), append a "
+             "timestamp and run under THAT name instead of aborting - so a repeatable command "
+             "(nightly build, demo recording) never writes into or pushes onto a previous run",
+    )
+    parser.add_argument(
         "--only", default=None,
         help="only generate work items whose id contains this substring, e.g. --only login "
              "(matches backend-loginUser + frontend-login). Cheap way to test one feature.",
@@ -223,6 +286,15 @@ def main() -> None:
     # Debugging<->Unit-Test<->Documentation phase on the very first pass. The only safe paths once
     # a checkpoint exists are --resume (continues the SAME state) or a --project name that has
     # never run before.
+    if args.fresh:
+        # Resolved BEFORE the guard below: picking an unused name is exactly what that guard asks
+        # the operator to do, so with --fresh there is nothing left for it to abort on.
+        args.project = _fresh_project_name(
+            args.project,
+            out_base=(args.out_dir or _DEFAULT_OUT_DIR).resolve(),
+            owner=_resolve_owner(args.owner) if do_publish else "",
+            check_github=do_publish and args.repo_name is None,
+        )
     _existing_thread_state = workflow.get_state(
         {"configurable": {"thread_id": args.project}}
     ).values
@@ -235,7 +307,8 @@ def main() -> None:
             f"that prior run and can skip whole phases of the pipeline without any error.\n\n"
             f"Pick one:\n"
             f"  --resume                    continue that run from its last completed node\n"
-            f"  --project <a-new-name>       start a genuinely fresh run\n\n"
+            f"  --project <a-new-name>       start a genuinely fresh run\n"
+            f"  --fresh                     keep this name; the run picks an unused variant\n\n"
             f"If this checkpoint is unexpected (e.g. you didn't think {args.project!r} had run "
             f"before), the file above is checked regardless of which directory this script is "
             f"launched from — delete it directly if it's stale.\n\n"
