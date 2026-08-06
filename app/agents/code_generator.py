@@ -590,6 +590,21 @@ def _repair_invalid_escapes(text: str) -> str:
     return _ESCAPE_TOKEN.sub(lambda m: m.group(0) if len(m.group(0)) > 1 else r"\\", text)
 
 
+# A second malformation seen live on the SAME work item that motivated the escape repair above
+# (resources pack, ``backend-root-2``, reproduced on demand): for some file entries the model wrote
+#     {"path":".env.example","content"># ---- Application ----\n...
+# i.e. a literal ``>`` where ``:"`` belongs, while the value body itself was correctly escaped AND
+# correctly closed. It reproduced on the first ask and on the retry, so no amount of re-asking
+# recovers it. Restricted to the three schema keys so a ``"...">`` sequence inside a string value
+# cannot be rewritten, and only ever applied on the salvage path (after normal parsing failed).
+_MISSING_COLON_QUOTE = re.compile(r'"(path|content|notes)">')
+
+
+def _repair_missing_colon_quote(text: str) -> str:
+    """Rewrite ``"content">…`` to ``"content":"…`` (likewise ``path``/``notes``)."""
+    return _MISSING_COLON_QUOTE.sub(r'"\1":"', text)
+
+
 def _extract_json(text: str) -> Any:
     """Best-effort JSON object extraction from a model reply.
 
@@ -597,7 +612,8 @@ def _extract_json(text: str) -> Any:
     (```json … ```), a prose preamble/postamble, **unescaped control characters** inside string
     values (raw newlines/tabs in generated source — ``strict=False`` accepts those), and
     **invalid backslash escapes** (``"\\."`` from a regex in an ESLint config — repaired to
-    ``"\\\\."`` as a last resort; see ``_repair_invalid_escapes``).
+    ``"\\\\."`` as a last resort; see ``_repair_invalid_escapes``), and a **missing ``:"`` after a
+    schema key** (``"content">…``; see ``_repair_missing_colon_quote``).
     """
     stripped = text.strip()
 
@@ -624,10 +640,17 @@ def _extract_json(text: str) -> Any:
                 return json.loads(attempt, strict=False)  # strict=False: allow raw \n/\t in strings
             except (ValueError, TypeError):
                 pass
-            try:
-                return json.loads(_repair_invalid_escapes(attempt), strict=False)
-            except (ValueError, TypeError):
-                pass
+            # Salvage passes, cheapest first. The two repairs compose because both malformations
+            # have been observed in the same reply — fixing only one still leaves it unparseable.
+            for salvaged in (
+                _repair_invalid_escapes(attempt),
+                _repair_missing_colon_quote(attempt),
+                _repair_invalid_escapes(_repair_missing_colon_quote(attempt)),
+            ):
+                try:
+                    return json.loads(salvaged, strict=False)
+                except (ValueError, TypeError):
+                    pass
     return None
 
 

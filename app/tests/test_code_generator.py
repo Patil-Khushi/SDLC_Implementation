@@ -122,6 +122,47 @@ def test_invalid_json_twice_records_failure_no_writes() -> None:
     assert out["attempt"] == 2
 
 
+def test_missing_colon_quote_after_a_schema_key_is_repaired() -> None:
+    # Second malformation seen live on backend-root-2 (reproduced on demand, first ask AND retry):
+    # the model wrote `"content">...` — a literal '>' where ':"' belongs — with the value body
+    # correctly escaped and closed. Re-asking never recovers it, so the salvage must.
+    from app.agents.code_generator import _extract_json
+
+    raw = ('{"files":[{"path":"knexfile.js","content":"module.exports = {};\\n"},'
+           '{"path":".env.example","content"># App\\nDB_HOST=localhost\\n"},'
+           '{"path":".gitignore","content">node_modules\\n.env\\n"}],"notes":""}')
+    obj = _extract_json(raw)
+    assert obj is not None, "structural repair failed to recover the reply"
+    files = {f["path"]: f["content"] for f in obj["files"]}
+    assert files["knexfile.js"] == "module.exports = {};\n"       # well-formed entry untouched
+    assert files[".env.example"] == "# App\nDB_HOST=localhost\n"  # repaired entry intact
+    assert files[".gitignore"] == "node_modules\n.env\n"
+
+
+def test_missing_colon_and_invalid_escape_in_one_reply_compose() -> None:
+    # Both defects at once: the two salvage passes must compose, not fix only one.
+    from app.agents.code_generator import _extract_json
+
+    raw = ('{"files":[{"path":".eslintrc.js","content":"ignore: \\"^\\d+$\\""},'
+           '{"path":".env.example","content"># env\\nKEY=1\\n"}],"notes":""}')
+    obj = _extract_json(raw)
+    assert obj is not None
+    files = {f["path"]: f["content"] for f in obj["files"]}
+    assert "\\d" in files[".eslintrc.js"]            # the regex survived, backslash intact
+    assert files[".env.example"] == "# env\nKEY=1\n"
+
+
+def test_repair_does_not_rewrite_a_quote_gt_sequence_inside_a_value() -> None:
+    # The repair is anchored to the three schema keys precisely so generated content containing
+    # `">` (JSX, HTML, a shell redirect) is never corrupted.
+    from app.agents.code_generator import _extract_json
+
+    html = '<a href="x">link</a> and 2 > 1'
+    raw = json.dumps({"files": [{"path": "a.jsx", "content": html}], "notes": ""})
+    obj = _extract_json(raw)
+    assert obj["files"][0]["content"] == html
+
+
 def test_invalid_regex_escapes_in_content_are_salvaged() -> None:
     # The backend-root-2 live failure: config/README items carry regex patterns, and the model
     # emits "\." / "\d" inside string values — invalid JSON escapes that json.loads rejects even
