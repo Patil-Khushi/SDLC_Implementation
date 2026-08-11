@@ -1,0 +1,335 @@
+[
+  {
+    "id": "CR-001",
+    "category": "Code Style",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "UP007"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/router.py",
+    "line": 37,
+    "column": 6,
+    "message": "Style issue",
+    "evidence": ") -> Union[TokenResponse, JSONResponse]:",
+    "tool_messages": [
+      "UP007 Use `X | Y` for type annotations"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "MODERNIZE_SYNTAX",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 1,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-002",
+    "category": "Code Style",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "UP035"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/schemas.py",
+    "line": 3,
+    "column": 1,
+    "message": "Style issue",
+    "evidence": "from typing import List, Optional",
+    "tool_messages": [
+      "UP035 `typing.List` is deprecated, use `list` instead"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "MODERNIZE_SYNTAX",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 1,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-003",
+    "category": "Code Style",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "UP045"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/schemas.py",
+    "line": 19,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "field: Optional[str] = None",
+    "tool_messages": [
+      "UP045 Use `X | None` for type annotations"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "MODERNIZE_SYNTAX",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 1,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-004",
+    "category": "Code Style",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "UP045",
+      "UP006"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/schemas.py",
+    "line": 26,
+    "column": 14,
+    "message": "Style issue",
+    "evidence": "details: Optional[List[ErrorDetail]] = None",
+    "tool_messages": [
+      "UP045 Use `X | None` for type annotations",
+      "UP006 Use `list` instead of `List` for type annotation"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "MODERNIZE_SYNTAX",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 1,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-005",
+    "category": "Code Style",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "UP045"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/service.py",
+    "line": 45,
+    "column": 15,
+    "message": "Style issue",
+    "evidence": "user: Optional[User] = (",
+    "tool_messages": [
+      "UP045 Use `X | None` for type annotations"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "MODERNIZE_SYNTAX",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 1,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-006",
+    "category": "Maintainability",
+    "severity": "Low",
+    "sources": [
+      "SonarQube"
+    ],
+    "rule_ids": [
+      "python:S8410"
+    ],
+    "file": "auth-backend/app/auth/router.py",
+    "line": 36,
+    "column": null,
+    "message": "Maintainability issue",
+    "evidence": "db: Session = Depends(get_db),",
+    "tool_messages": [
+      "Use \"Annotated\" type hints for FastAPI dependency injection"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "AI Refactoring",
+    "operation": "REDUCE_COMPLEXITY",
+    "auto_fix": "conditional",
+    "risk_level": "Low",
+    "requires_tests": true,
+    "phase": 4,
+    "confidence": 0.75,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-007",
+    "category": "Bug",
+    "severity": "Medium",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "B008"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/router.py",
+    "line": 36,
+    "column": 19,
+    "message": "Potential bug",
+    "evidence": "db: Session = Depends(get_db),",
+    "tool_messages": [
+      "B008 Do not perform function call `Depends` in argument defaults; instead, perform the call within the function, or read the default from a module-level singleton variable"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-008",
+    "category": "Naming",
+    "severity": "Low",
+    "sources": [
+      "Ruff"
+    ],
+    "rule_ids": [
+      "N815"
+    ],
+    "file": "/work/repo/auth-backend/app/auth/schemas.py",
+    "line": 14,
+    "column": 5,
+    "message": "Naming issue",
+    "evidence": "accessToken: str",
+    "tool_messages": [
+      "N815 Variable `accessToken` in class scope should not be mixedCase",
+      "N815 Variable `tokenType` in class scope should not be mixedCase"
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "RENAME_SYMBOL",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-009",
+    "category": "Security",
+    "severity": "High",
+    "sources": [
+      "SonarQube"
+    ],
+    "rule_ids": [
+      "docker:S6470"
+    ],
+    "file": "Dockerfile",
+    "line": 9,
+    "column": null,
+    "message": "Security issue",
+    "evidence": "COPY . .",
+    "tool_messages": [
+      "Copying recursively might inadvertently add sensitive data to the container. Make sure it is safe here."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "High",
+    "requires_tests": true,
+    "phase": 6,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-010",
+    "category": "Security",
+    "severity": "Low",
+    "sources": [
+      "SonarQube"
+    ],
+    "rule_ids": [
+      "docker:S6471"
+    ],
+    "file": "Dockerfile",
+    "line": 2,
+    "column": null,
+    "message": "Security issue",
+    "evidence": "FROM python:3.12-slim",
+    "tool_messages": [
+      "The \"python\" image runs with \"root\" as the default user. Make sure it is safe here."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "High",
+    "requires_tests": true,
+    "phase": 6,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  }
+]
