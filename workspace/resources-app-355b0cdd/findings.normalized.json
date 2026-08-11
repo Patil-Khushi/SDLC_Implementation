@@ -1,0 +1,3997 @@
+[
+  {
+    "id": "CR-001",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/app.js",
+    "line": 27,
+    "column": 22,
+    "message": "Unused code",
+    "evidence": "app.use((req, res, next) => {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'next' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-002",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/app.js",
+    "line": 32,
+    "column": 27,
+    "message": "Unused code",
+    "evidence": "app.use((err, req, res, next) => {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'next' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-003",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/middleware/errorHandler.js",
+    "line": 14,
+    "column": 38,
+    "message": "Unused code",
+    "evidence": "function errorHandler(err, req, res, next) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'next' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-004",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/admin/admin.service.js",
+    "line": 12,
+    "column": 9,
+    "message": "Unused code",
+    "evidence": "const dateFilter = from_date && to_date",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'dateFilter' is assigned a value but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-005",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/admin/admin.service.js",
+    "line": 16,
+    "column": 9,
+    "message": "Unused code",
+    "evidence": "const fromClause = from_date ? `AND created_at >= $1` : '';",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'fromClause' is assigned a value but never used.",
+      "@typescript-eslint/no-unused-vars: 'toClause' is assigned a value but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-006",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/checkout/checkout.service.js",
+    "line": 101,
+    "column": 38,
+    "message": "Unused code",
+    "evidence": "async function createPaymentIntent({ orderId, amount, currency, paymentMethod }) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'orderId' is defined but never used.",
+      "@typescript-eslint/no-unused-vars: 'paymentMethod' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-007",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/payments/adapters/payment.adapter.interface.js",
+    "line": 31,
+    "column": 23,
+    "message": "Unused code",
+    "evidence": "async createPayment(params) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'params' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-008",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/payments/adapters/payment.adapter.interface.js",
+    "line": 41,
+    "column": 24,
+    "message": "Unused code",
+    "evidence": "async capturePayment(paymentId) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'paymentId' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-009",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/payments/adapters/payment.adapter.interface.js",
+    "line": 51,
+    "column": 23,
+    "message": "Unused code",
+    "evidence": "async cancelPayment(paymentId) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'paymentId' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-010",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/payments/adapters/payment.adapter.interface.js",
+    "line": 64,
+    "column": 23,
+    "message": "Unused code",
+    "evidence": "async refundPayment(params) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'params' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-011",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/payments/adapters/payment.adapter.interface.js",
+    "line": 74,
+    "column": 26,
+    "message": "Unused code",
+    "evidence": "async getPaymentStatus(paymentId) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'paymentId' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-012",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/payments/adapters/payment.adapter.interface.js",
+    "line": 87,
+    "column": 24,
+    "message": "Unused code",
+    "evidence": "async createCustomer(params) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'params' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-013",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/payments/adapters/payment.adapter.interface.js",
+    "line": 99,
+    "column": 29,
+    "message": "Unused code",
+    "evidence": "async attachPaymentMethod(params) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'params' is defined but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-014",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/payments/payments.service.js",
+    "line": 119,
+    "column": 43,
+    "message": "Unused code",
+    "evidence": "const { referenceId, providerReference, status, provider, metadata } = callbackPayload;",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'status' is assigned a value but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-015",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/promotions/promotions.service.js",
+    "line": 18,
+    "column": 73,
+    "message": "Unused code",
+    "evidence": "async function validateAndCalculateDiscount({ code, orderTotal, userId, items = [] }) {",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'items' is assigned a value but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-016",
+    "category": "Unused Code",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-unused-vars"
+    ],
+    "file": "src/modules/users/users.service.js",
+    "line": 3,
+    "column": 24,
+    "message": "Unused code",
+    "evidence": "const { NotFoundError, ValidationError, UnauthorizedError } = require('../../utils/errors');",
+    "tool_messages": [
+      "@typescript-eslint/no-unused-vars: 'ValidationError' is assigned a value but never used."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Safe Auto-Fix",
+    "operation": "DELETE_UNUSED_VARIABLE",
+    "auto_fix": true,
+    "risk_level": "Low",
+    "requires_tests": false,
+    "phase": 3,
+    "confidence": 0.95,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-017",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/app.js",
+    "line": 3,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-018",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/app.js",
+    "line": 6,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const morgan = require('morgan');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-019",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/config/database.js",
+    "line": 3,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const config = require('./index');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-020",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/config/elasticsearch.js",
+    "line": 3,
+    "column": 20,
+    "message": "Style issue",
+    "evidence": "const { Client } = require('@elastic/elasticsearch');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-021",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/config/index.js",
+    "line": 3,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const dotenv = require('dotenv');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-022",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/config/jwt.js",
+    "line": 3,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const config = require('./index');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-023",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/config/rateLimit.js",
+    "line": 3,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const config = require('./index');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-024",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/addresses.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-025",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/brands.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-026",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/carts.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-027",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/categories.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-028",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/notifications.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-029",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/orders.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-030",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/payment_attempts.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-031",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/products.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-032",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/promo_codes.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-033",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/refunds.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-034",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/return_requests.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-035",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/roles.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-036",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/serviceable_pin_codes.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-037",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/skus.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-038",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/stock_reservations.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-039",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/repositories/users.repository.js",
+    "line": 3,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../knex');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-040",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/db/seeds/02_admin_user.js",
+    "line": 4,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const bcrypt = require('bcrypt');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-041",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/middleware/authenticate.js",
+    "line": 3,
+    "column": 13,
+    "message": "Style issue",
+    "evidence": "const jwt = require('jsonwebtoken');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-042",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/middleware/errorHandler.js",
+    "line": 3,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const logger = require('../utils/logger');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-043",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/middleware/rateLimiter.js",
+    "line": 3,
+    "column": 19,
+    "message": "Style issue",
+    "evidence": "const rateLimit = require('express-rate-limit');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-044",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/middleware/requestLogger.js",
+    "line": 3,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const morgan = require('morgan');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-045",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/addresses/addresses.controller.js",
+    "line": 1,
+    "column": 26,
+    "message": "Style issue",
+    "evidence": "const addressesService = require('./addresses.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-046",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/addresses/addresses.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-047",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/addresses/addresses.routes.js",
+    "line": 4,
+    "column": 58,
+    "message": "Style issue",
+    "evidence": "const { validateCreateAddress, validateUpdateAddress } = require('./addresses.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-048",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/addresses/addresses.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../config/db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-049",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/addresses/addresses.validator.js",
+    "line": 1,
+    "column": 36,
+    "message": "Style issue",
+    "evidence": "const { body, validationResult } = require('express-validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-050",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/admin/admin.controller.js",
+    "line": 1,
+    "column": 22,
+    "message": "Style issue",
+    "evidence": "const adminService = require('./admin.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-051",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/admin/admin.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-052",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/admin/admin.routes.js",
+    "line": 4,
+    "column": 25,
+    "message": "Style issue",
+    "evidence": "const { requireAuth } = require('../../middleware/auth.middleware');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-053",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/admin/admin.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../config/database');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-054",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/auth/auth.controller.js",
+    "line": 1,
+    "column": 21,
+    "message": "Style issue",
+    "evidence": "const authService = require('./auth.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-055",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/auth/auth.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-056",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/auth/auth.routes.js",
+    "line": 4,
+    "column": 115,
+    "message": "Style issue",
+    "evidence": "const { validateRegister, validateLogin, validateForgotPassword, validateResetPassword, validateGuestRegister } = require('./auth.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-057",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/auth/auth.service.js",
+    "line": 1,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const bcrypt = require('bcrypt');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-058",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/auth/auth.service.js",
+    "line": 4,
+    "column": 150,
+    "message": "Style issue",
+    "evidence": "const { getUserByEmail, createUser, savePasswordResetToken, getPasswordResetToken, deletePasswordResetToken, updateUserPassword, invalidateToken } = require('../../repositories/user.repository');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-059",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/auth/auth.validator.js",
+    "line": 1,
+    "column": 36,
+    "message": "Style issue",
+    "evidence": "const { body, validationResult } = require('express-validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-060",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/cart/cart.controller.js",
+    "line": 1,
+    "column": 21,
+    "message": "Style issue",
+    "evidence": "const cartService = require('./cart.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-061",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/cart/cart.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-062",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/cart/cart.routes.js",
+    "line": 4,
+    "column": 89,
+    "message": "Style issue",
+    "evidence": "const { validateCreateCart, validateAddItem, validateUpdateItem, validateApplyPromo } = require('./cart.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-063",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/cart/cart.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-064",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/cart/cart.validator.js",
+    "line": 1,
+    "column": 13,
+    "message": "Style issue",
+    "evidence": "const Joi = require('joi');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-065",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/catalogue/catalogue.controller.js",
+    "line": 1,
+    "column": 26,
+    "message": "Style issue",
+    "evidence": "const catalogueService = require('./catalogue.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-066",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/catalogue/catalogue.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-067",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/catalogue/catalogue.routes.js",
+    "line": 4,
+    "column": 42,
+    "message": "Style issue",
+    "evidence": "const { validateBody, validateParams } = require('./catalogue.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-068",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/catalogue/catalogue.routes.js",
+    "line": 19,
+    "column": 5,
+    "message": "Style issue",
+    "evidence": "} = require('./catalogue.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-069",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/catalogue/catalogue.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-070",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/catalogue/catalogue.validator.js",
+    "line": 1,
+    "column": 13,
+    "message": "Style issue",
+    "evidence": "const Joi = require('joi');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-071",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/checkout/checkout.controller.js",
+    "line": 1,
+    "column": 25,
+    "message": "Style issue",
+    "evidence": "const checkoutService = require('./checkout.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-072",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/checkout/checkout.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-073",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/checkout/checkout.routes.js",
+    "line": 4,
+    "column": 88,
+    "message": "Style issue",
+    "evidence": "const { validateCheckoutStart, validateCheckoutAddress, validateCheckoutPlaceOrder } = require('./checkout.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-074",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/checkout/checkout.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-075",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/checkout/checkout.validator.js",
+    "line": 1,
+    "column": 36,
+    "message": "Style issue",
+    "evidence": "const { body, validationResult } = require('express-validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-076",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/notifications/notifications.controller.js",
+    "line": 1,
+    "column": 30,
+    "message": "Style issue",
+    "evidence": "const notificationsService = require('./notifications.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-077",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/notifications/notifications.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-078",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/notifications/notifications.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-079",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/orders/orders.controller.js",
+    "line": 1,
+    "column": 23,
+    "message": "Style issue",
+    "evidence": "const ordersService = require('./orders.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-080",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/orders/orders.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-081",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/orders/orders.routes.js",
+    "line": 4,
+    "column": 78,
+    "message": "Style issue",
+    "evidence": "const { validateAdvanceOrder, validateCancelOrder, validateReturnRequest } = require('./orders.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-082",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/orders/orders.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-083",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/orders/orders.validator.js",
+    "line": 1,
+    "column": 36,
+    "message": "Style issue",
+    "evidence": "const { body, validationResult } = require('express-validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-084",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/payments/adapters/mock.adapter.js",
+    "line": 3,
+    "column": 33,
+    "message": "Style issue",
+    "evidence": "const PaymentAdapterInterface = require('./payment.adapter.interface');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-085",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/payments/payments.controller.js",
+    "line": 1,
+    "column": 25,
+    "message": "Style issue",
+    "evidence": "const paymentsService = require('./payments.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-086",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/payments/payments.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-087",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/payments/payments.routes.js",
+    "line": 4,
+    "column": 70,
+    "message": "Style issue",
+    "evidence": "const { validateInitiatePayment, validateCallback, validateRetry } = require('./payments.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-088",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/payments/payments.service.js",
+    "line": 1,
+    "column": 24,
+    "message": "Style issue",
+    "evidence": "const { v4: uuidv4 } = require('uuid');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-089",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "no-useless-catch"
+    ],
+    "file": "src/modules/payments/payments.service.js",
+    "line": 124,
+    "column": 3,
+    "message": "Style issue",
+    "evidence": "try {",
+    "tool_messages": [
+      "no-useless-catch: Unnecessary try/catch wrapper."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-090",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "no-useless-catch"
+    ],
+    "file": "src/modules/payments/payments.service.js",
+    "line": 168,
+    "column": 3,
+    "message": "Style issue",
+    "evidence": "try {",
+    "tool_messages": [
+      "no-useless-catch: Unnecessary try/catch wrapper."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-091",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/payments/payments.validator.js",
+    "line": 1,
+    "column": 43,
+    "message": "Style issue",
+    "evidence": "const { body, param, validationResult } = require('express-validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-092",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/promotions/promotions.controller.js",
+    "line": 1,
+    "column": 27,
+    "message": "Style issue",
+    "evidence": "const promotionsService = require('./promotions.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-093",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/promotions/promotions.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-094",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/promotions/promotions.routes.js",
+    "line": 4,
+    "column": 73,
+    "message": "Style issue",
+    "evidence": "const { validatePromoCode, validateCreatePromo, validateUpdatePromo } = require('./promotions.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-095",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/promotions/promotions.routes.js",
+    "line": 7,
+    "column": 28,
+    "message": "Style issue",
+    "evidence": "const { authorizeAdmin } = require('../../middleware/authorizeAdmin');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-096",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/promotions/promotions.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-097",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/promotions/promotions.validator.js",
+    "line": 1,
+    "column": 13,
+    "message": "Style issue",
+    "evidence": "const Joi = require('joi');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-098",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/returns/returns.controller.js",
+    "line": 1,
+    "column": 24,
+    "message": "Style issue",
+    "evidence": "const returnsService = require('./returns.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-099",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/returns/returns.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-100",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/returns/returns.routes.js",
+    "line": 4,
+    "column": 51,
+    "message": "Style issue",
+    "evidence": "const { validateReturnRequest, validateReview } = require('./returns.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-101",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/returns/returns.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-102",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/returns/returns.validator.js",
+    "line": 1,
+    "column": 36,
+    "message": "Style issue",
+    "evidence": "const { body, validationResult } = require('express-validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-103",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/roles/roles.controller.js",
+    "line": 1,
+    "column": 22,
+    "message": "Style issue",
+    "evidence": "const rolesService = require('./roles.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-104",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/roles/roles.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-105",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/roles/roles.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-106",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/search/adapters/elasticsearch.adapter.js",
+    "line": 3,
+    "column": 20,
+    "message": "Style issue",
+    "evidence": "const { Client } = require('@elastic/elasticsearch');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-107",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/search/adapters/elasticsearch.adapter.js",
+    "line": 38,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const fs = require('fs');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-108",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/search/search.controller.js",
+    "line": 1,
+    "column": 23,
+    "message": "Style issue",
+    "evidence": "const searchService = require('./search.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-109",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/search/search.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-110",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/search/search.routes.js",
+    "line": 4,
+    "column": 55,
+    "message": "Style issue",
+    "evidence": "const { validateSearchQuery, validateSuggestQuery } = require('./search.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-111",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/search/search.service.js",
+    "line": 1,
+    "column": 36,
+    "message": "Style issue",
+    "evidence": "const { getElasticsearchClient } = require('../../config/elasticsearch');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-112",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/search/search.validator.js",
+    "line": 1,
+    "column": 37,
+    "message": "Style issue",
+    "evidence": "const { query, validationResult } = require('express-validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-113",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/users/users.controller.js",
+    "line": 1,
+    "column": 22,
+    "message": "Style issue",
+    "evidence": "const usersService = require('./users.service');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-114",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/users/users.routes.js",
+    "line": 1,
+    "column": 17,
+    "message": "Style issue",
+    "evidence": "const express = require('express');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-115",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/users/users.routes.js",
+    "line": 4,
+    "column": 24,
+    "message": "Style issue",
+    "evidence": "const usersValidator = require('./users.validator');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-116",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/users/users.service.js",
+    "line": 1,
+    "column": 12,
+    "message": "Style issue",
+    "evidence": "const db = require('../../db');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-117",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/modules/users/users.validator.js",
+    "line": 1,
+    "column": 13,
+    "message": "Style issue",
+    "evidence": "const Joi = require('joi');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-118",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/server.js",
+    "line": 3,
+    "column": 19,
+    "message": "Style issue",
+    "evidence": "const createApp = require('./app');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-119",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/utils/logger.js",
+    "line": 1,
+    "column": 46,
+    "message": "Style issue",
+    "evidence": "const { createLogger, format, transports } = require('winston');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-120",
+    "category": "Code Style",
+    "severity": "Medium",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "@typescript-eslint/no-require-imports"
+    ],
+    "file": "src/utils/tokenUtils.js",
+    "line": 1,
+    "column": 16,
+    "message": "Style issue",
+    "evidence": "const crypto = require('crypto');",
+    "tool_messages": [
+      "@typescript-eslint/no-require-imports: A `require()` style import is forbidden."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  },
+  {
+    "id": "CR-121",
+    "category": "Code Style",
+    "severity": "Low",
+    "sources": [
+      "ESLint"
+    ],
+    "rule_ids": [
+      "eslint"
+    ],
+    "file": "src/middleware/errorHandler.js",
+    "line": 13,
+    "column": 1,
+    "message": "Style issue",
+    "evidence": "// eslint-disable-next-line no-unused-vars",
+    "tool_messages": [
+      "eslint: Unused eslint-disable directive (no problems were reported from 'no-unused-vars')."
+    ],
+    "verification": "Very High",
+    "status": "Open",
+    "suppressed_reason": "",
+    "suppressed_reason_kind": "",
+    "occurrences": 1,
+    "additional_locations": [],
+    "bucket": "Manual Review",
+    "operation": "MANUAL_REVIEW_REQUIRED",
+    "auto_fix": false,
+    "risk_level": "Medium",
+    "requires_tests": true,
+    "phase": 5,
+    "confidence": 0.6,
+    "verification_status": "Partially Verified"
+  }
+]
