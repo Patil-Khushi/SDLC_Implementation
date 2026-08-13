@@ -42,8 +42,17 @@ from app.graph.graph import resolve_checkpoint_db_path, workflow  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_executor  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
+from app.services.run_transcript import (  # noqa: E402
+    DEFAULT_REPLAY_SECONDS,
+    RunTranscript,
+    artifacts_from_state,
+)
 from scripts.feature_commit import _DEFAULT_OUT_DIR  # noqa: E402  (generated output goes outside the repo)
 from scripts.local_executor import LocalDiskExecutor  # noqa: E402
+
+#: Where each run's replayable transcript lands (one subfolder per --project). Inside the service
+#: dir, not next to the product repo: it is a recording of OUR pipeline, not part of the app built.
+_DEFAULT_TRANSCRIPT_DIR = Path(__file__).resolve().parent.parent / "run-transcripts"
 
 
 def _resolve_owner(owner_arg: str | None) -> str:
@@ -254,6 +263,15 @@ def main() -> None:
              "nothing to resume from — start a fresh run under a new --project name instead.",
     )
     parser.add_argument(
+        "--no-record", action="store_true",
+        help="do NOT record this run's output for replay (recording is on by default; a recorded "
+             "run can be replayed in ~2 min with scripts/demo_replay.py instead of re-run in hours)",
+    )
+    parser.add_argument(
+        "--transcript-dir", type=Path, default=None,
+        help=f"where to write this run's replayable transcript (default: {_DEFAULT_TRANSCRIPT_DIR})",
+    )
+    parser.add_argument(
         "--out-dir", type=Path, default=None,
         help=f"--real: base dir for the product repo (<out-dir>/<project>), OUTSIDE the repo "
              f"(default: {_DEFAULT_OUT_DIR}); --dry-run: dump in-memory files here",
@@ -267,14 +285,49 @@ def main() -> None:
     do_publish = mode == "real" and not args.no_publish
     make_public = not args.private
 
-    # Show the agents' live progress ([PLANNING]/[GENERATING]/[DONE]) in this terminal.
-    # This script drives the graph directly (it never imports app.main), so nothing has
-    # configured the root logger yet — without this, Python suppresses INFO lines.
+    if args.no_record:
+        _configure_logging()
+        _run(args, mode=mode, do_publish=do_publish, make_public=make_public)
+        return
+
+    # Recording is ON by default: a run takes hours, so "we forgot the flag" is unrecoverable
+    # without repeating them. The tee must be installed BEFORE logging is configured — a
+    # StreamHandler binds sys.stderr by VALUE, so configuring first would leave every agent
+    # progress line (the bulk of what a viewer watches) out of the recording.
+    transcript_dir = (args.transcript_dir or _DEFAULT_TRANSCRIPT_DIR).resolve()
+    state: dict[str, Any] | None = None
+    with RunTranscript(transcript_dir, project=args.project) as transcript:
+        _configure_logging()
+        try:
+            state = _run(args, mode=mode, do_publish=do_publish, make_public=make_public)
+        finally:
+            # In a finally: a crashed or Ctrl-C'd run still leaves a replayable transcript with a
+            # manifest describing how far it got.
+            transcript.finish(artifacts_from_state(
+                state or {}, extra={"design_pack": str(args.pack_dir), "mode": mode},
+            ))
+    print(f"\n[record] transcript: {transcript.dir}")
+    print(f"[record] replay it in ~{int(DEFAULT_REPLAY_SECONDS)}s with:  "
+          f"python scripts/demo_replay.py --project {args.project}")
+    if transcript.error:
+        print(f"[record] WARNING: recording stopped early ({transcript.error}) — the replay will "
+              "be truncated.")
+
+
+def _configure_logging() -> None:
+    """Show the agents' live progress ([PLANNING]/[GENERATING]/[DONE]) in this terminal.
+
+    This script drives the graph directly (it never imports app.main), so nothing has configured
+    the root logger yet — without this, Python suppresses INFO lines.
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+
+def _run(args: argparse.Namespace, *, mode: str, do_publish: bool,
+         make_public: bool) -> dict[str, Any] | None:
+    """Build (or resume) one run; returns its final WorkflowState, or None when nothing ran."""
     if args.resume:
-        _resume(args, mode=mode, make_public=make_public)
-        return
+        return _resume(args, mode=mode, make_public=make_public)
 
     # Every fresh (non --resume) invocation below calls new_state() + workflow.invoke(initial,
     # config) with thread_id == --project. new_state() only sets ~20 core fields and leaves
@@ -382,10 +435,10 @@ def main() -> None:
     workflow.invoke(initial, config)
     state = workflow.get_state(config).values  # runs to completion (auto-commit, no HITL)
 
-    _report(state, args, executor, push_enabled=push_enabled, git_remote=git_remote)
+    return _report(state, args, executor, push_enabled=push_enabled, git_remote=git_remote)
 
 
-def _resume(args: argparse.Namespace, *, mode: str, make_public: bool) -> None:
+def _resume(args: argparse.Namespace, *, mode: str, make_public: bool) -> dict[str, Any] | None:
     """Continue a run that crashed mid-graph, from its last completed node.
 
     Needs no pack/work_items — the checkpointed ``WorkflowState`` already has them; only the
@@ -418,7 +471,7 @@ def _resume(args: argparse.Namespace, *, mode: str, make_public: bool) -> None:
     if mode == "dry-run":
         print("--resume: --dry-run keeps files in-memory only (FakeExecutor) — nothing to "
               "reconnect to across a process restart. Re-run without --resume instead.")
-        return
+        return None
     if mode == "sandbox":
         executor = asyncio.run(MCPExecutor.connect(args.sandbox_url))
     else:
@@ -430,7 +483,7 @@ def _resume(args: argparse.Namespace, *, mode: str, make_public: bool) -> None:
     workflow.invoke(None, config)
     state = workflow.get_state(config).values
 
-    _report(
+    return _report(
         state, args, executor,
         push_enabled=bool(existing.get("push_enabled")), git_remote=existing.get("git_remote") or "",
     )
@@ -439,8 +492,11 @@ def _resume(args: argparse.Namespace, *, mode: str, make_public: bool) -> None:
 def _report(
     state: dict[str, Any], args: argparse.Namespace, executor: Executor, *,
     push_enabled: bool, git_remote: str,
-) -> None:
-    """Shared tail: print the run's outcome, dump in-memory files (dry-run), and report publish status."""
+) -> dict[str, Any]:
+    """Shared tail: print the run's outcome, dump in-memory files (dry-run), and report publish status.
+
+    Returns ``state`` so the caller can record the run's real artifacts in the transcript manifest.
+    """
     print("\n--- generation_summary ---")
     print(state.get("generation_summary", "(empty)"))
     print("--- workflow_status:", state.get("workflow_status"), "---")
