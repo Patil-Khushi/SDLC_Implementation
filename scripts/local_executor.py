@@ -103,6 +103,14 @@ class LocalDiskExecutor(Executor):
         workdir = self._resolve(cwd)
         workdir.mkdir(parents=True, exist_ok=True)
         try:
+            # Explicit utf-8/replace, NOT bare text=True: on Windows, text=True decodes with the
+            # locale's ANSI codepage (cp1252 here), which raises UnicodeDecodeError inside a
+            # background reader thread the moment npm/pytest/git emits a UTF-8 byte outside that
+            # codepage (e.g. an em dash in a generated file) — silently losing the captured
+            # stdout/stderr instead of raising where this call could see it. A check whose real
+            # failure output vanishes this way is worse than one that fails outright: the
+            # Debugging agent's repair prompt is built from `stderr`, so a swallowed error message
+            # means it has nothing to fix.
             proc = subprocess.run(
                 list(cmd), cwd=str(workdir), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=timeout or 120, env=env,
@@ -133,7 +141,7 @@ class LocalDiskExecutor(Executor):
         if manager == "npm":
             return self.run_command([_NPM, "install", "--no-audit", "--no-fund", package], cwd=project_dir)
         return self.run_command(
-            ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", package],
+            [sys.executable, "-m", "pip", "install", "--no-input", "--target", ".py_packages", package],
             cwd=project_dir,
         )
 
@@ -148,83 +156,158 @@ class LocalDiskExecutor(Executor):
     def _exists(self, project_dir: StrPath, rel: str) -> bool:
         return self._resolve(f"{project_dir}/{rel}").exists()
 
+    #: Subdirectories never worth treating as a second manifest location — build output / VCS /
+    #: dependency dirs, never a project root boilerplate.render_scaffold would emit a manifest into.
+    _MANIFEST_SKIP_DIRS = frozenset({"node_modules", ".git", ".py_packages", "__pycache__", ".venv", "venv"})
+
+    def _manifest_dirs(self, project_dir: StrPath, filename: str) -> list[str]:
+        """``cwd``-ready directories (``project_dir`` itself, or one of its immediate
+        subdirectories) that contain ``filename`` — the project root and EXACTLY one level down,
+        never deeper.
+
+        ``boilerplate.render_scaffold`` places a manifest either at the project root (a
+        shared-root pack) or inside exactly one per-side wrapper directory it computes via
+        ``_single_top_dir`` (e.g. ``auth-backend/requirements.txt``, ``auth-frontend/package.json``
+        for a pack with separate backend/frontend roots) — never nested any deeper. Checking ONLY
+        the root (the previous behavior) silently found nothing for a per-side-rooted project,
+        which made ``build``/``test``/``compile``'s frontend half a no-op that still reported
+        ``passed=True`` — the root cause of the Debugging/Unit-Test loop never actually compiling,
+        building or running the generated tests for such a project.
+        """
+        base = self._resolve(project_dir)
+        root = str(project_dir).replace("\\", "/").rstrip("/")
+        found: list[str] = []
+        if (base / filename).is_file():
+            found.append(root)
+        if base.is_dir():
+            for child in sorted(base.iterdir()):
+                if (
+                    child.is_dir()
+                    and child.name not in self._MANIFEST_SKIP_DIRS
+                    and (child / filename).is_file()
+                ):
+                    found.append(f"{root}/{child.name}")
+        return found
+
     def _npm_install(self, project_dir: StrPath) -> RunResult:
         return self.run_command([_NPM, "install", "--no-audit", "--no-fund"], cwd=project_dir, timeout=600)
 
-    @staticmethod
-    def _candidate_roots(project_dir: StrPath) -> list[tuple[str, str]]:
-        """(label-prefix, root) pairs to probe for a manifest.
+    def _py_packages_env(self, be_dir: StrPath) -> dict[str, str]:
+        """Env with ``be_dir``'s ``.py_packages`` (where ``build()``'s ``pip install --target``
+        lands the generated project's own backend dependencies) prepended to ``PYTHONPATH``.
 
-        The ADAPTIVE ``plan_builder`` path unconditionally re-roots every generated file under
-        exactly ``backend/`` and ``frontend/`` when both sides are enabled, so a split-root
-        project's manifests (``requirements.txt`` / ``package.json`` / ``tsconfig.json``) live
-        one level below ``project_dir``, not at it. Checking ``backend``/``frontend`` is
-        ADDITIVE to checking ``project_dir`` itself — never a replacement — so a combined-
-        manifest project, a legacy pack, or a backend-only/frontend-only project (manifest
-        directly at ``project_dir``) keeps working exactly as before.
+        ``--target`` populates that directory but does NOT put it on ``sys.path`` for a later,
+        separate process — without this, ``test()``'s pytest (run under THIS tool's own venv,
+        via ``sys.executable``) can import only what the tool's venv happens to already have,
+        and fails with ``ModuleNotFoundError`` on every dependency the generated project actually
+        declared (e.g. ``python-jose``/``passlib``/``bcrypt`` for an auth backend) — masking a
+        real compile/test outcome behind a false "missing dependency" failure.
         """
-        base = str(project_dir)
-        return [
-            ("", base),
-            ("backend/", f"{base}/backend"),
-            ("frontend/", f"{base}/frontend"),
-        ]
+        pkg_dir = str(self._resolve(f"{be_dir}/.py_packages"))
+        existing = os.environ.get("PYTHONPATH", "")
+        pythonpath = f"{pkg_dir}{os.pathsep}{existing}" if existing else pkg_dir
+        return {**os.environ, "PYTHONPATH": pythonpath}
+
+    #: Testing-tool families that must never be resolved out of a generated project's own
+    #: .py_packages: boilerplate.py's default scaffold unconditionally adds `pytest` to every
+    #: backend's requirements.txt (for the generated README's own "pip install && pytest"
+    #: instructions), so build()'s pip install would otherwise drop a SECOND, independently
+    #: versioned pytest into .py_packages — and because PYTHONPATH entries resolve before the
+    #: interpreter's own site-packages, _py_packages_env's PYTHONPATH would then make test()'s
+    #: `sys.executable -m pytest` silently run under THAT shadow copy instead of the tool's own
+    #: known-good pytest, version drift and all (confirmed: this venv has pytest 9.1.1, the
+    #: default scaffold pins "pytest>=8.3,<9.0"). pytest is a dev/test tool the application code
+    #: under test never imports, so removing it here costs the generated project nothing at
+    #: runtime — `import pytest` in its test files still resolves fine via the tool's own venv.
+    #: "_pytest" (leading underscore) is pytest's own implementation package — pytest's public
+    #: `__init__.py` imports from it directly, so leaving a mismatched-version copy behind while
+    #: only removing "pytest" itself produces a broken half-shadow (the host's newer pytest
+    #: package trying to import a symbol only its own, now-absent _pytest provides).
+    _SHADOW_EXCLUDE = ("pytest", "_pytest", "pluggy")
+
+    def _strip_shadowing_packages(self, py_packages_dir: Path) -> None:
+        """Remove any ``_SHADOW_EXCLUDE`` package build() just installed into ``.py_packages``."""
+        if not py_packages_dir.is_dir():
+            return
+        for entry in py_packages_dir.iterdir():
+            name = entry.name.lower()
+            if name.startswith(self._SHADOW_EXCLUDE):
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
 
     @staticmethod
-    def _aggregate(name: str, results: list[tuple[str, RunResult]]) -> CheckResult:
-        for label, run in results:
+    def _aggregate(name: str, results: list[tuple[str, RunResult, str]]) -> CheckResult:
+        """Combine per-tool ``(label, run, scope)`` results into one CheckResult.
+
+        ``scope`` is the project-relative directory that specific tool ran in (``""`` for a
+        root-level tool like the "py" compileall pass) — carried onto the failing CheckResult so
+        a consumer (the Debugging agent) can narrow which generated files a fix prompt needs,
+        instead of every file in the whole run regardless of which side actually failed.
+        """
+        for label, run, scope in results:
             if not run.ok:
+                # pytest (and several other tools) write their real diagnostic — the collection
+                # traceback, the assertion report — to STDOUT, not stderr; a stderr-only report
+                # can be empty even on a genuine failure. Combine both streams so the field every
+                # downstream consumer treats as "the diagnostic" (the Debugging agent's repair
+                # prompt, the SSE log) actually carries the text that explains what broke.
+                combined = "\n".join(s for s in (run.stdout, run.stderr) if s.strip())
                 return CheckResult(
-                    name=name, passed=False, stderr=f"[{label}] {run.stderr}",
+                    name=name, passed=False, stderr=f"[{label}] {combined}".strip(),
                     stdout=run.stdout, exit_code=run.exit_code, timed_out=run.timed_out,
+                    scope=scope,
                 )
         return CheckResult(name=name, passed=True)
 
     def compile(self, project_dir: StrPath) -> CheckResult:
-        results = [("py", self.run_command(["python", "-m", "compileall", "-q", "."], cwd=project_dir))]
-        for prefix, root in self._candidate_roots(project_dir):
-            if self._exists(root, "tsconfig.json"):  # frontend
-                # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all —
-                # unlike compileall (syntax-only, no import resolution), so node_modules must
-                # exist first.
-                results.append((f"{prefix}npm-install", self._npm_install(root)))
-                results.append((f"{prefix}tsc", self.run_command([_NPX, "tsc", "--noEmit"], cwd=root, timeout=180)))
+        # compileall recurses from project_dir root, so it already reaches Python files under a
+        # per-side wrapper dir (e.g. auth-backend/) with no discovery needed — hence scope "".
+        results: list[tuple[str, RunResult, str]] = [
+            ("py", self.run_command([sys.executable, "-m", "compileall", "-q", "."], cwd=project_dir), "")
+        ]
+        for fe_dir in self._manifest_dirs(project_dir, "tsconfig.json"):  # frontend(s)
+            # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all — unlike
+            # compileall (syntax-only, no import resolution), so node_modules must exist first.
+            results.append((f"npm-install[{fe_dir}]", self._npm_install(fe_dir), fe_dir))
+            results.append((f"tsc[{fe_dir}]", self.run_command([_NPX, "tsc", "--noEmit"], cwd=fe_dir, timeout=180), fe_dir))
         return self._aggregate("compile", results)
 
     def build(self, project_dir: StrPath) -> CheckResult:
-        results: list[tuple[str, RunResult]] = []
-        for prefix, root in self._candidate_roots(project_dir):
-            if self._exists(root, "requirements.txt"):
-                results.append((f"{prefix}pip", self.run_command(
-                    ["python", "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
-                    cwd=root, timeout=300,
-                )))
-            if self._exists(root, "package.json"):
-                # Mirrors the pip branch above: install before building. Without this, `npm run
-                # build` always fails on a fresh checkout (no node_modules).
-                results.append((f"{prefix}npm-install", self._npm_install(root)))
-                results.append((f"{prefix}npm", self.run_command([_NPM, "run", "build", "--if-present"], cwd=root, timeout=300)))
+        results: list[tuple[str, RunResult, str]] = []
+        for be_dir in self._manifest_dirs(project_dir, "requirements.txt"):
+            results.append((f"pip[{be_dir}]", self.run_command(
+                [sys.executable, "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
+                cwd=be_dir, timeout=300,
+            ), be_dir))
+            self._strip_shadowing_packages(self._resolve(f"{be_dir}/.py_packages"))
+        for node_dir in self._manifest_dirs(project_dir, "package.json"):
+            # Mirrors the pip branch above: install before building. Without this, `npm run
+            # build` always fails on a fresh checkout (no node_modules).
+            results.append((f"npm-install[{node_dir}]", self._npm_install(node_dir), node_dir))
+            results.append((f"npm[{node_dir}]", self.run_command([_NPM, "run", "build", "--if-present"], cwd=node_dir, timeout=300), node_dir))
         return self._aggregate("build", results) if results else CheckResult(name="build", passed=True)
 
     def test(self, project_dir: StrPath) -> CheckResult:
-        results: list[tuple[str, RunResult]] = []
-        for prefix, root in self._candidate_roots(project_dir):
-            if self._exists(root, "requirements.txt"):
-                # Gated (unlike the sandbox executor's unconditional pytest) — pytest exits 5
-                # ("no tests collected") on a project with zero Python files, which would
-                # otherwise mark a pure-JS project's test check as failed.
-                results.append((f"{prefix}pytest", self.run_command(["python", "-m", "pytest", "-q"], cwd=root, timeout=180)))
-            if self._exists(root, "package.json"):
-                results.append((f"{prefix}npm-test", self.run_command([_NPM, "test", "--if-present"], cwd=root, timeout=300)))
+        results: list[tuple[str, RunResult, str]] = []
+        for be_dir in self._manifest_dirs(project_dir, "requirements.txt"):
+            # Gated (unlike the sandbox executor's unconditional pytest) — pytest exits 5 ("no
+            # tests collected") on a project with zero Python files, which would otherwise mark a
+            # pure-JS project's test check as failed.
+            results.append((f"pytest[{be_dir}]", self.run_command(
+                [sys.executable, "-m", "pytest", "-q"], cwd=be_dir, timeout=180, env=self._py_packages_env(be_dir),
+            ), be_dir))
+        for node_dir in self._manifest_dirs(project_dir, "package.json"):
+            results.append((f"npm-test[{node_dir}]", self.run_command([_NPM, "test", "--if-present"], cwd=node_dir, timeout=300), node_dir))
         return self._aggregate("test", results) if results else CheckResult(name="test", passed=True)
 
     def lint(self, project_dir: StrPath) -> CheckResult:
-        results: list[tuple[str, RunResult]] = []
-        for prefix, root in self._candidate_roots(project_dir):
-            if self._exists(root, "requirements.txt"):
-                results.append((f"{prefix}ruff", self.run_command(["python", "-m", "ruff", "check", "."], cwd=root, timeout=120)))
-            if self._exists(root, "package.json"):
-                results.append((f"{prefix}eslint", self.run_command([_NPX, "eslint", "."], cwd=root, timeout=180)))
+        results: list[tuple[str, RunResult, str]] = []
+        for be_dir in self._manifest_dirs(project_dir, "requirements.txt"):
+            results.append((f"ruff[{be_dir}]", self.run_command([sys.executable, "-m", "ruff", "check", "."], cwd=be_dir, timeout=120), be_dir))
+        for node_dir in self._manifest_dirs(project_dir, "package.json"):
+            results.append((f"eslint[{node_dir}]", self.run_command([_NPX, "eslint", "."], cwd=node_dir, timeout=180), node_dir))
         return self._aggregate("lint", results) if results else CheckResult(name="lint", passed=True)
 
     # -- commit (real git) + optional publish to GitHub (real push) ----------

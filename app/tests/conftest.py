@@ -112,7 +112,7 @@ class ReplayGateway(FakeLLMGateway):
         raise AssertionError(f"no recorded LLM response for key {key!r} at {path} — run RECORD=1 first")
 
     def complete_with_tools(
-        self, prompt: str, *, system: str | None = None, tools: list | None = None, max_iters: int = 4
+        self, prompt: str, *, system: str | None = None, tools: list | None = None, max_iters: int = 6
     ) -> str:
         return self.complete(prompt, system=system)
 

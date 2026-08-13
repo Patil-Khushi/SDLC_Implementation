@@ -26,6 +26,10 @@ class GateCheck(TypedDict):
                        # put the actual failing assertions here, not on stderr; the repair path
                        # (app/agents/debugging.py) needs both to see the real failure reason
     exit_code: int
+    # Project-relative directory the failure is scoped to (mirrors Executor.CheckResult.scope);
+    # "" when the check isn't directory-scoped. Lets the Debugging agent narrow which generated
+    # files a fix prompt needs instead of every file in the whole run.
+    scope: str
 
 
 class GateResult(TypedDict):
@@ -80,8 +84,15 @@ class WorkflowState(TypedDict, total=False):
     # oscillating loop that keeps resetting debug_attempt forever (debugging.DEBUG_ROUNDS_CEILING).
     debug_rounds: int
     debug_result: GateResult | None        # most recent compile+build check outcome (Debugging phase fixed check)
+    # Debugging: the accumulated Markdown report (one section per attempt) + where it was saved
+    # (reports/…). Rewritten to disk on every attempt so a DEBUG_CAP escalation still leaves a
+    # full record, not just the last attempt.
+    debug_report: str
+    debug_report_path: str
     tests_ok: bool                        # did unit-test generation produce at least one parseable test file?
     test_result: GateResult | None        # most recent `test` check outcome (Unit Test phase fixed check)
+    unit_test_report: str          # Unit Test Generation: the Markdown report content
+    unit_test_report_path: str     # Unit Test Generation: where the report .md was saved (reports/…)
     generation_summary: str               # human-readable free-text summary of the run
     generation_metrics: dict[str, Any]    # run-level metrics (generation-metrics.json shape)
 
