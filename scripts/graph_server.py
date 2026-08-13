@@ -44,6 +44,7 @@ import argparse
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import sys
@@ -137,6 +138,16 @@ _NODE_LABEL: dict[str, str] = {
     "finalize": "Finalize",
     "package": "Package",
     "escalate": "Escalate",
+}
+
+#: Nodes that own a deterministic check result, and the state key holding it. A node's log level and
+#: tile status MUST come from ITS OWN result: nodes return the whole ``WorkflowState``, so a passing
+#: ``gate_result`` left over from the code-gen phase is present in every later delta and would paint
+#: every debug/test failure green if it were consulted first.
+_NODE_RESULT_KEY: dict[str, str] = {
+    "gate": "gate_result",
+    "debug_check": "debug_result",
+    "unit_test_run": "test_result",
 }
 
 # ---------------------------------------------------------------- canned LLM for dry-run mode
@@ -575,181 +586,365 @@ def _sse(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
+#: Longest log line forwarded to the UI (compile stderr and tracebacks can be enormous).
+_MAX_LOG_TEXT = 400
+#: Per-node ceiling, so one chatty node can never flood the log panel.
+_MAX_LOG_LINES_PER_NODE = 60
+
+#: Sentinel placed on the SSE queue by the driver thread once the run is fully finished (success,
+#: error, or early return) — tells the consuming generator to stop waiting for more items.
+_DONE = object()
+
+
+class _SSELogCapture(logging.Handler):
+    """Pushes ``app.*`` log records onto the run's SSE queue AS THEY HAPPEN.
+
+    The agents already log their real work — which test files the Unit Test agent wrote per work
+    item, that a Debugging fix failed to parse and nothing was written, why a check blew up — but
+    those records only ever reached the server console. This mirrors them into SSE ``log`` events.
+
+    A single-node ``workflow.stream()`` chunk only arrives once that WHOLE node has finished, so a
+    node that loops internally over many items (Unit Test Generation runs one LLM call per work
+    item inside ONE node invocation) used to have its logs buffered and dumped in one burst at the
+    end. Log records are emitted from LangGraph's OWN worker thread while the node's body is still
+    running (confirmed empirically: a ``stream_mode="tasks"`` start event for a node arrives before
+    that node's body executes a single line), so pushing straight onto the queue here — instead of
+    buffering into a list for the driver to drain later — makes every log line reach the frontend
+    the moment the agent emits it, node-boundary or not.
+
+    ``current_label`` is a 2-element list shared with the driver thread: ``[0]`` is the friendly
+    agent label to tag the NEXT emitted record with (flipped by the driver the instant a
+    ``stream_mode="tasks"`` start event names the node about to run — see ``_drive``), and ``[1]``
+    is a running count used to enforce ``_MAX_LOG_LINES_PER_NODE`` per node, reset alongside the
+    label. A benign, GIL-safe race (a handful of log lines from the tail of one node landing just
+    before the label flips to the next) is possible but immaterial — worst case one or two lines
+    are mislabeled by a few milliseconds' overlap, never lost or duplicated.
+    """
+
+    def __init__(self, sink: "queue.Queue[Any]", current_label: list[Any]) -> None:
+        super().__init__(level=logging.INFO)
+        self._sink = sink
+        self._current_label = current_label
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            text = record.getMessage().strip()
+        except Exception:  # noqa: BLE001 - a bad format string must never break the run
+            return
+        if not text or text.startswith("="):  # nodes.py's _stage() banner — the stage tile says this
+            return
+        if text.startswith("->"):  # ...and its "   -> <doing>" second line reads better unprefixed
+            text = text[2:].strip()
+        if len(text) > _MAX_LOG_TEXT:
+            text = text[: _MAX_LOG_TEXT - 1] + "..."
+        level = "warn" if record.levelno >= logging.WARNING else "info"
+
+        label = self._current_label[0]
+        count = self._current_label[1]
+        if count > _MAX_LOG_LINES_PER_NODE:
+            return  # already told the frontend lines are being omitted for this node
+        if count == _MAX_LOG_LINES_PER_NODE:
+            self._current_label[1] = count + 1
+            self._sink.put(_sse({"type": "log", "agent": label, "level": "info",
+                                  "text": "... further log lines omitted for this stage"}))
+            return
+        self._current_label[1] = count + 1
+        self._sink.put(_sse({"type": "log", "agent": label, "level": level, "text": text}))
+
+
+def _failed_checks(result: Any) -> list[tuple[str, str]]:
+    """``(check name, one-line stderr)`` for every failing check in a gate/debug/test result."""
+    out: list[tuple[str, str]] = []
+    if not isinstance(result, dict):
+        return out
+    for check in result.get("checks") or []:
+        if not isinstance(check, dict) or check.get("passed", True):
+            continue
+        stderr = " ".join(str(check.get("stderr", "")).split())
+        if len(stderr) > _MAX_LOG_TEXT:
+            stderr = stderr[: _MAX_LOG_TEXT - 1] + "..."
+        out.append((str(check.get("name", "check")), stderr))
+    return out
+
+
 def _run_events(
     *, pack: str, project: str, mode: str, publish: bool, only: str
 ) -> Iterator[str]:
-    """Drive the compiled workflow with .stream() and yield SSE lines as each node completes.
+    """Drive the compiled workflow and yield SSE lines in real time as the run progresses.
 
-    Mirrors run_fixture.py's setup exactly; the ONLY difference is .stream() (per-node events)
-    instead of .invoke() (blocking). No graph/agent logic is changed.
+    The graph itself is driven in a BACKGROUND THREAD (``_drive``, below) that pushes SSE-ready
+    strings onto ``sse_q``; this generator just drains that queue and yields. That split is what
+    makes a node's OWN log lines stream out AS THEY HAPPEN rather than in one lump when the whole
+    node finishes: LangGraph runs a node's body on its own worker thread and only hands the
+    ``updates`` chunk back to whoever is iterating ``.stream()`` once that body returns, so a node
+    that loops internally over many items (Unit Test Generation makes one LLM call per work item
+    inside a SINGLE node) used to buffer every one of those calls' log lines until the whole loop
+    was done. Adding ``stream_mode="tasks"`` alongside ``"updates"`` gives a task-START event the
+    instant a node is dispatched — confirmed empirically to arrive before that node's body runs a
+    single line — so the driver can flip ``current_label`` to the right agent name in time for
+    ``_SSELogCapture`` (which pushes straight onto the SAME queue from inside the node's own
+    thread) to tag that node's log lines correctly, live, from the very first line.
+
+    Mirrors run_fixture.py's setup exactly otherwise; no graph/agent logic is changed.
     """
     if not _run_lock.acquire(blocking=False):
         yield _sse({"type": "error", "message": "A run is already in progress. Try again shortly."})
         return
 
-    try:
-        pack_dir = _resolve_pack(pack)
-        design_package = _load_pack(pack_dir)
-        work_items = build_plan(pack_dir)
-        if only:
-            needle = only.lower()
-            work_items = [w for w in work_items if needle in w.id.lower()]
-        if not work_items:
-            yield _sse({"type": "error", "message": f"No work items for pack {pack!r} (only={only!r})."})
-            return
+    sse_q: "queue.Queue[Any]" = queue.Queue()
+    current_label: list[Any] = ["System", 0]  # [0]=agent label, [1]=lines emitted for it so far
+    capture = _SSELogCapture(sse_q, current_label)
+    app_logger = logging.getLogger("app")
 
-        yield _sse({
-            "type": "run_start",
-            "run_id": project,
-            "project": project,
-            "mode": mode,
-            "pack": pack_dir.name,
-            "publish": publish,
-        })
-        yield _sse({
-            "type": "plan",
-            "count": len(work_items),
-            "items": [_plan_item_dict(w) for w in work_items],
-        })
+    def _drive() -> None:
+        """Runs on a background thread, for the FULL lifetime of the run — independent of whether
+        anyone is still iterating the SSE generator below. A disconnected client (closed tab, lost
+        connection) must never abort, nor block on, a run that's still generating code; it must
+        also never be able to leave a SECOND request thinking a run is still in progress after the
+        first one actually finished. Both requirements mean this function — not the generator's own
+        teardown — is the ONLY place that installs/removes the "app" logger handler and acquires/
+        releases ``_run_lock``: this thread demonstrably keeps running (and keeps mutating
+        set_executor()/``_last_run``) after a client disconnects the SSE generator abandons its
+        iteration and calls ``GeneratorExit`` on whatever it's currently doing, which Starlette's
+        ``StreamingResponse`` can trigger from INSIDE the asyncio event loop's own thread on
+        teardown — a blocking join() there would freeze the entire server, not just this request,
+        for up to the run's full remaining duration.
+        """
+        restore_level: int | None = None
+        if not app_logger.isEnabledFor(logging.INFO):  # respect, then restore, the server's config
+            restore_level = app_logger.level
+            app_logger.setLevel(logging.INFO)
+        app_logger.addHandler(capture)
+        try:
+            pack_dir = _resolve_pack(pack)
+            design_package = _load_pack(pack_dir)
+            work_items = build_plan(pack_dir)
+            if only:
+                needle = only.lower()
+                work_items = [w for w in work_items if needle in w.id.lower()]
+            if not work_items:
+                sse_q.put(_sse({"type": "error", "message": f"No work items for pack {pack!r} (only={only!r})."}))
+                return
 
-        # Executor + push config — same choices as run_fixture.py.
-        executor: Executor
-        push_enabled = False
-        git_remote = ""
-        git_token = ""
-        if mode == "dry-run":
-            llm_gateway.llm_gateway.complete = _canned_llm_reply  # type: ignore[method-assign]
-            llm_gateway.llm_gateway.complete_with_tools = (  # type: ignore[method-assign]
-                lambda prompt, **kw: _canned_llm_reply(prompt)
+            sse_q.put(_sse({
+                "type": "run_start", "run_id": project, "project": project,
+                "mode": mode, "pack": pack_dir.name, "publish": publish,
+            }))
+            sse_q.put(_sse({
+                "type": "plan", "count": len(work_items),
+                "items": [_plan_item_dict(w) for w in work_items],
+            }))
+
+            # Executor + push config — same choices as run_fixture.py.
+            executor: Executor
+            push_enabled = False
+            git_remote = ""
+            git_token = ""
+            if mode == "dry-run":
+                llm_gateway.llm_gateway.complete = _canned_llm_reply  # type: ignore[method-assign]
+                llm_gateway.llm_gateway.complete_with_tools = (  # type: ignore[method-assign]
+                    lambda prompt, **kw: _canned_llm_reply(prompt)
+                )
+                executor = FakeExecutor()
+            else:  # real
+                out_base = (_DEFAULT_OUT_DIR).resolve()
+                # `out_base / project` is a FIXED, persistent directory (never scoped to a single
+                # run) — `project_id=project` below makes it the exact path every node.py check
+                # reads/writes. Left alone across runs, a second run of the same project name
+                # silently reuses yesterday's generated files AND its local .git history: commits
+                # stack on top of old ones, and publish()'s `git push origin --all` then pushes
+                # that whole retained history to a freshly (re)created GitHub repo — so a repo the
+                # user just deleted and expects to be empty shows old files with old commit dates.
+                # Wiping it here (real mode only — dry-run uses FakeExecutor, no disk footprint)
+                # guarantees every run starts from a genuinely clean project directory and .git.
+                # This runs BEFORE LocalDiskExecutor exists, so it can't rely on that executor's
+                # own _resolve() root-escape guard — `project` is a raw, unvalidated query param,
+                # so re-check the same invariant here before an unguarded shutil.rmtree.
+                stale_dir = (out_base / project).resolve()
+                if stale_dir != out_base and out_base not in stale_dir.parents:
+                    raise ValueError(f"project name escapes the output root: {project!r}")
+                if stale_dir.exists():
+                    sse_q.put(_sse({
+                        "type": "log", "agent": "System", "level": "info",
+                        "text": f"Clearing stale output from a previous run: {stale_dir}",
+                    }))
+                    shutil.rmtree(stale_dir, ignore_errors=True)
+                executor = LocalDiskExecutor(out_base, private=not publish)
+                if publish:
+                    owner = os.environ.get("GITHUB_OWNER", "").strip()
+                    if not owner:
+                        owner = executor.run_command(
+                            ["gh", "api", "user", "--jq", ".login"]
+                        ).stdout.strip()
+                    git_remote = f"{owner}/{project}"
+                    git_token = os.environ.get("GITHUB_PAT", "").strip()
+                    push_enabled = True
+                    sse_q.put(_sse({"type": "log", "agent": "System", "level": "info",
+                                    "text": f"Publishing to github.com/{git_remote} during the run"}))
+            set_executor(executor)
+
+            # Hand the Output endpoints everything they need to serve this run's real artifacts.
+            _last_run.clear()
+            _last_run.update({
+                "project": project, "pack": pack_dir.name, "mode": mode, "publish": publish,
+                "status": "running", "executor": executor, "state": {}, "reports": {},
+                "plan_count": len(work_items),
+                "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "finished_at": "",
+            })
+
+            initial = new_state(
+                run_id=project, attempt=0, project_id=project,
+                design_package=design_package, work_items=work_items,
+                push_enabled=push_enabled, git_remote=git_remote, git_token=git_token,
             )
-            executor = FakeExecutor()
-        else:  # real
-            out_base = (_DEFAULT_OUT_DIR).resolve()
-            executor = LocalDiskExecutor(out_base, private=not publish)
-            if publish:
-                owner = os.environ.get("GITHUB_OWNER", "").strip()
-                if not owner:
-                    owner = executor.run_command(
-                        ["gh", "api", "user", "--jq", ".login"]
-                    ).stdout.strip()
-                git_remote = f"{owner}/{project}"
-                git_token = os.environ.get("GITHUB_PAT", "").strip()
-                push_enabled = True
-                yield _sse({"type": "log", "agent": "System", "level": "info",
-                            "text": f"Publishing to github.com/{git_remote} during the run"})
-        set_executor(executor)
+            config = {"configurable": {"thread_id": project}, "recursion_limit": 1000}
 
-        # Hand the Output endpoints everything they need to serve this run's real artifacts.
-        _last_run.clear()
-        _last_run.update({
-            "project": project, "pack": pack_dir.name, "mode": mode, "publish": publish,
-            "status": "running", "executor": executor, "state": {}, "reports": {},
-            "plan_count": len(work_items),
-            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "finished_at": "",
-        })
+            seen_files: set[str] = set()
+            seen_reports: set[str] = set()
+            repo_sent = False
+            security_seen = False
 
-        initial = new_state(
-            run_id=project, attempt=0, project_id=project,
-            design_package=design_package, work_items=work_items,
-            push_enabled=push_enabled, git_remote=git_remote, git_token=git_token,
-        )
-        config = {"configurable": {"thread_id": project}, "recursion_limit": 1000}
-
-        seen_files: set[str] = set()
-        seen_reports: set[str] = set()
-        repo_sent = False
-        security_seen = False
-
-        # stream_mode="updates" yields {node_name: partial_state} after each node runs.
-        for chunk in workflow.stream(initial, config, stream_mode="updates"):
-            for node, delta in chunk.items():
-                if not isinstance(delta, dict):
+            # "tasks" gives a start event (node name) the instant a node is dispatched — BEFORE
+            # its body runs — so current_label is correct for that node's very first log line.
+            # "updates" still carries the per-node state delta, exactly as before.
+            for stream_mode_name, chunk in workflow.stream(initial, config, stream_mode=["updates", "tasks"]):
+                if stream_mode_name == "tasks":
+                    if "input" not in chunk:
+                        continue  # a task RESULT event — nothing here needs it; "updates" has the delta
+                    node = chunk.get("name", "")
+                    label = _NODE_LABEL.get(node, node)
+                    if node == "refactoring" and security_seen:
+                        label = "Refactoring (Security Loop)"
+                    current_label[0] = label
+                    current_label[1] = 0
                     continue
-                label = _NODE_LABEL.get(node, node)
 
-                # Emit newly-written source files.
-                for path in delta.get("generated_code", []) or []:
-                    if path not in seen_files:
-                        seen_files.add(path)
-                        yield _sse({"type": "file", "path": path})
-                for path in delta.get("unit_tests", []) or []:
-                    if path not in seen_files:
-                        seen_files.add(path)
-                        yield _sse({"type": "file", "path": path, "kind": "test"})
+                # stream_mode_name == "updates": chunk is {node_name: partial_state}, one key.
+                for node, delta in chunk.items():
+                    label = _NODE_LABEL.get(node, node)
+                    if node == "refactoring" and security_seen:
+                        label = "Refactoring (Security Loop)"
 
-                # Repo url (published live).
-                repo_url = delta.get("repo_url")
-                if repo_url and not repo_sent:
-                    repo_sent = True
-                    yield _sse({"type": "repo", "url": repo_url})
+                    if not isinstance(delta, dict):
+                        continue
 
-                # Reports as their paths are written.
-                for key, kind in (
-                    ("review_report_path", "code-review"),
-                    ("refactoring_report_path", "refactoring"),
-                    ("security_report_path", "security"),
-                ):
-                    rp = delta.get(key)
-                    if rp and rp not in seen_reports:
-                        seen_reports.add(rp)
-                        _last_run.setdefault("reports", {})[kind] = rp
-                        yield _sse({"type": "report", "kind": kind, "path": rp})
+                    # Emit newly-written source files, credited to the node that wrote them — the
+                    # Unit Test agent's tests and the Debugging agent's fixes are NOT Code
+                    # Generator output.
+                    for path in delta.get("generated_code", []) or []:
+                        if path not in seen_files:
+                            seen_files.add(path)
+                            sse_q.put(_sse({"type": "file", "path": path, "agent": label}))
+                    for path in delta.get("unit_tests", []) or []:
+                        if path not in seen_files:
+                            seen_files.add(path)
+                            sse_q.put(_sse({"type": "file", "path": path, "kind": "test", "agent": label}))
 
-                if node == "security":
-                    security_seen = True
+                    # Repo url (published live).
+                    repo_url = delta.get("repo_url")
+                    if repo_url and not repo_sent:
+                        repo_sent = True
+                        sse_q.put(_sse({"type": "repo", "url": repo_url}))
 
-                # Map the node to a frontend stage tile (or a log-only line).
-                stage_id = _NODE_TO_STAGE.get(node, None)
-                if node == "refactoring" and security_seen:
-                    stage_id = "refactoring-security-loop"
+                    # Reports as their paths are written.
+                    for key, kind in (
+                        ("review_report_path", "code-review"),
+                        ("refactoring_report_path", "refactoring"),
+                        ("security_report_path", "security"),
+                        ("debug_report_path", "debugging"),
+                        ("unit_test_report_path", "unit-test"),
+                    ):
+                        rp = delta.get(key)
+                        if rp and rp not in seen_reports:
+                            seen_reports.add(rp)
+                            _last_run.setdefault("reports", {})[kind] = rp
+                            sse_q.put(_sse({"type": "report", "kind": kind, "path": rp}))
 
-                if node == "escalate":
-                    yield _sse({"type": "log", "agent": label, "level": "warn",
-                                "text": "Escalated — needs human review"})
-                elif stage_id is None:
-                    yield _sse({"type": "log", "agent": label, "level": "info",
-                                "text": f"{label} completed"})
-                else:
-                    gate_result = delta.get("gate_result") or delta.get("debug_result") or delta.get("test_result")
-                    passed = gate_result.get("passed") if isinstance(gate_result, dict) else None
-                    level = "ok" if passed is not False else "warn"
-                    yield _sse({
-                        "type": "stage",
-                        "node": node,
-                        "stageId": stage_id,
-                        "status": "completed",
-                        "label": label,
-                    })
-                    yield _sse({"type": "log", "agent": label, "level": level,
-                                "text": f"{label} completed"})
+                    if node == "security":
+                        security_seen = True
 
-        state = workflow.get_state(config).values
-        status = state.get("workflow_status", "completed")
-        # Keep the finished state so the Output endpoints can report paths, repo/PR urls and the
-        # scaffold/test file classification after the stream has closed.
-        _last_run["state"] = dict(state)
-        _last_run["status"] = status
-        _last_run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        yield _sse({
-            "type": "done",
-            "status": status,
-            "summary": state.get("generation_summary", ""),
-            "repo_url": state.get("repo_url", ""),
-            "pr_url": state.get("pr_url", ""),
-            "package_path": state.get("package_path", ""),
-            "files": len(state.get("generated_code", []) or []),
-        })
-    except Exception as exc:  # noqa: BLE001 — surface any failure to the UI instead of a dead stream
-        logging.exception("run failed")
-        # Leave the snapshot in place: whatever the run DID produce before failing is still real
-        # output worth showing on the Output pages.
-        if _last_run.get("project"):
-            _last_run["status"] = "failed"
+                    # Map the node to a frontend stage tile (or a log-only line).
+                    stage_id = _NODE_TO_STAGE.get(node, None)
+                    if node == "refactoring" and security_seen:
+                        stage_id = "refactoring-security-loop"
+
+                    if node == "escalate":
+                        sse_q.put(_sse({"type": "log", "agent": label, "level": "warn",
+                                        "text": "Escalated — needs human review"}))
+                    elif stage_id is None:
+                        sse_q.put(_sse({"type": "log", "agent": label, "level": "info",
+                                        "text": f"{label} completed"}))
+                    else:
+                        # Only THIS node's own check result may decide pass/fail (_NODE_RESULT_KEY).
+                        result = delta.get(_NODE_RESULT_KEY[node]) if node in _NODE_RESULT_KEY else None
+                        passed = result.get("passed") if isinstance(result, dict) else None
+                        failed = passed is False
+                        sse_q.put(_sse({
+                            "type": "stage", "node": node, "stageId": stage_id,
+                            "status": "failed" if failed else "completed", "label": label,
+                        }))
+                        # Name what actually failed — otherwise a red tile is the only clue, and
+                        # the compile/pytest output the Debugging agent is about to fix stays hidden.
+                        for check_name, stderr in _failed_checks(result):
+                            sse_q.put(_sse({"type": "log", "agent": label, "level": "warn",
+                                            "text": f"{check_name} check FAILED: {stderr or '(no stderr captured)'}"}))
+                        sse_q.put(_sse({"type": "log", "agent": label, "level": "warn" if failed else "ok",
+                                        "text": f"{label} {'failed' if failed else 'completed'}"}))
+
+            state = workflow.get_state(config).values
+            status = state.get("workflow_status", "completed")
+            # Keep the finished state so the Output endpoints can report paths, repo/PR urls and
+            # the scaffold/test file classification after the stream has closed.
+            _last_run["state"] = dict(state)
+            _last_run["status"] = status
             _last_run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
-    finally:
+            sse_q.put(_sse({
+                "type": "done", "status": status,
+                "summary": state.get("generation_summary", ""),
+                "repo_url": state.get("repo_url", ""),
+                "pr_url": state.get("pr_url", ""),
+                "package_path": state.get("package_path", ""),
+                "files": len(state.get("generated_code", []) or []),
+            }))
+        except Exception as exc:  # noqa: BLE001 — surface any failure to the UI instead of a dead stream
+            logging.exception("run failed")
+            # Leave the snapshot in place: whatever the run DID produce before failing is still
+            # real output worth showing on the Output pages. Compare identity, not truthiness —
+            # _last_run may still hold a PRIOR (different) run's snapshot if this run failed
+            # before its own _last_run.clear()/update() below ever ran (e.g. a bad pack name);
+            # a bare truthy check would silently mislabel that unrelated, already-finished run as
+            # "failed" even though its own artifacts are completely intact on disk.
+            if _last_run.get("project") == project:
+                _last_run["status"] = "failed"
+                _last_run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            sse_q.put(_sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"}))
+        finally:
+            sse_q.put(_DONE)
+            app_logger.removeHandler(capture)
+            if restore_level is not None:
+                app_logger.setLevel(restore_level)
+            _run_lock.release()
+
+    driver = threading.Thread(target=_drive, name=f"run-driver-{project}", daemon=True)
+    try:
+        driver.start()
+    except Exception as exc:  # noqa: BLE001 - couldn't even start the background run (e.g. OS
+        # thread-limit pressure): nothing is running yet, so release synchronously right here —
+        # this is the "exception before the first yield" case, entirely on the calling thread.
         _run_lock.release()
+        yield _sse({"type": "error", "message": f"could not start run: {type(exc).__name__}: {exc}"})
+        return
+
+    # Just drain the queue for as long as this generator is iterated. If the client disconnects,
+    # iteration simply stops here — the run keeps going in the background regardless (see _drive's
+    # docstring) and _drive's own finally releases _run_lock/removes the handler when it actually
+    # finishes. Nothing to clean up on THIS side: this generator owns none of that thread's state.
+    while True:
+        item = sse_q.get()
+        if item is _DONE:
+            break
+        yield item
 
 
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
@@ -980,6 +1175,8 @@ _REPORT_DEFS: tuple[tuple[str, str, str, str, str], ...] = (
     ("code-review", "Code Review Report", "review_report_path", "review_report", "report.md"),
     ("refactoring", "Refactoring Report", "refactoring_report_path", "refactoring_report", "refactoring-report.md"),
     ("security", "Security Review Report", "security_report_path", "security_report", "security-report.md"),
+    ("debugging", "Debugging Report", "debug_report_path", "debug_report", "debug-report.md"),
+    ("unit-test", "Unit Test Generation Report", "unit_test_report_path", "unit_test_report", "unit-test-report.md"),
 )
 
 

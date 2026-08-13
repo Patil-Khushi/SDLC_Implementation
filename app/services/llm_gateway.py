@@ -183,7 +183,7 @@ class LLMGateway:
 		*,
 		system: str | None = None,
 		tools: list | None = None,
-		max_iters: int = 4,
+		max_iters: int = 6,
 	) -> str:
 		"""Tool-augmented completion: bind ``tools`` to the model and run a tool-use loop.
 
@@ -230,8 +230,28 @@ class LLMGateway:
 				logger.info("  tool_result %s -> %s", tu.name, _truncate(str(outcome)))
 				results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(outcome)})
 			messages.append({"role": "user", "content": results})
-		logger.warning("tool_loop exhausted max_iters=%d without a final (tool-free) reply", max_iters)
-		return final_text
+
+		# The model was STILL calling tools on the last allowed turn — every caller here (the
+		# Debugging/Refactoring/repair agents) parses this method's return value as the proposed
+		# fix, so returning the empty/irrelevant `final_text` from that last tool-calling turn
+		# means "no valid fix parsed - wrote nothing": the whole (possibly rate-limited, multi-call)
+		# investigation gets thrown away and the SAME failure recurs next attempt, burning the
+		# local repair/debug cap without ever trying a fix. Force exactly ONE more turn with NO
+		# tools available — the model can only reply in text, using everything it already
+		# gathered — instead of silently discarding all of that.
+		logger.warning(
+			"tool_loop exhausted max_iters=%d without a final (tool-free) reply; forcing one", max_iters,
+		)
+		messages.append({
+			"role": "user",
+			"content": "You have used all available tool calls. Reply now with your final answer in "
+			           "the required format - no more tool use is possible.",
+		})
+		final_kwargs: dict = {"model": self._model, "max_tokens": self._max_tokens, "messages": messages}
+		if system:
+			final_kwargs["system"] = system
+		response = _with_rate_limit_retry(lambda: client.messages.create(**final_kwargs))
+		return "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 
 	@staticmethod
 	def _tool_spec(tool: Any) -> dict:
@@ -313,7 +333,7 @@ class FakeLLMGateway(LLMGateway):
 		*,
 		system: str | None = None,
 		tools: list | None = None,
-		max_iters: int = 4,
+		max_iters: int = 6,
 	) -> str:
 		# Deterministic double: ignore tools, return the next scripted response.
 		# TODO: to catch accidental misuse (repair path calling the wrong method), tests could

@@ -23,6 +23,11 @@ lets a converging loop run to completion and still kills a genuinely stuck one p
 ``DEBUG_ROUNDS_CEILING`` is the backstop for the pathological case progress-sensitivity alone
 cannot catch: an oscillating loop whose every fix breaks something else, which would otherwise
 reset the counter forever.
+
+Also owns a running report (``debugging_report`` / ``debugging_report_path``, mirroring Code
+Review's/Security's report fields) that ACCUMULATES one section per round and is rewritten to
+disk on every call — so a run that hits the cap and escalates still leaves a full record of what
+each round tried, not just the last one.
 """
 
 from __future__ import annotations
@@ -307,6 +312,10 @@ class DebuggingAgent(BaseAgent):
                 if path not in generated:
                     generated.append(path)
             state["generated_code"] = generated
+            logger.info(
+                "[debugging] run=%s | round %s: wrote %d fixed file(s): %s",
+                state.get("run_id") or "-", state["debug_rounds"], len(written_paths), ", ".join(written_paths),
+            )
         else:
             # Proposal didn't parse even after the retry: write nothing (no partial garbage). The
             # check re-runs and will re-fail/escalate; log it so the no-op fix is debuggable.
