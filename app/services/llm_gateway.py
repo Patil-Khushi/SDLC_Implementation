@@ -64,45 +64,97 @@ def _summarize_tool_input(tool_input: Any) -> str:
 _T = TypeVar("_T")
 
 
-# Transient failures worth retrying alongside 429s. Mid-stream drops surface as RAW httpx
-# errors (httpx.ReadError / RemoteProtocolError, e.g. WinError 10054 connection reset): once
-# the response has started streaming, the Anthropic SDK does NOT wrap them in APIConnectionError
-# — that wrapper only covers failures while ESTABLISHING the request. A multi-call run (unit
-# test generation fires one call per module) must survive a single dropped connection.
-_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+# --- transient-failure retry policy ---------------------------------------
+#
+# A run fires MANY LLM calls (one per file/module); a single transient blip must not discard all
+# prior progress. So we retry the WHOLE transient set with backoff and let only PERMANENT errors
+# surface. Retryability is decided by CLASS + HTTP STATUS (below), not by enumerating one concrete
+# exception at a time — that way a new transient flavor (today a 529 "overloaded", tomorrow a 503
+# or a mid-stream socket reset) is already covered without another patch.
+
+# HTTP statuses worth retrying: 408 request-timeout, 409 conflict, 425 too-early, 429 rate-limit,
+# plus ANY 5xx (500/502/503/504 and 529 "overloaded"). Every OTHER 4xx — 400 bad-request, 401/403
+# auth, 404 not-found, 422 unprocessable — is a PERMANENT client error: retrying only burns
+# time/tokens and hides the real bug, so it surfaces immediately.
+_RETRYABLE_STATUS_CODES = frozenset({408, 409, 425, 429})
+
+# Connection/transport failures carry no HTTP status and are always transient. anthropic wraps
+# connect-time failures in APIConnectionError (incl. APITimeoutError); but once a response has
+# STARTED streaming, a mid-stream drop surfaces as a RAW httpx error the SDK does NOT wrap.
+# httpx.TransportError is the BASE of every connect/read/write/pool/timeout/protocol variant, so it
+# covers them all — not just the handful (ReadError/WriteError/RemoteProtocolError) we hit before.
+_CONNECTION_ERRORS: tuple[type[BaseException], ...] = (
 	anthropic.APIConnectionError,
-	httpx.ReadError,
-	httpx.WriteError,
-	httpx.RemoteProtocolError,
+	httpx.TransportError,
 )
+
+# Kept as an alias for older imports; the loop no longer keys off this tuple directly.
+_TRANSIENT_ERRORS = _CONNECTION_ERRORS
+
+# What the loop CATCHES: every anthropic SDK error + every raw httpx transport error. Whether a
+# caught error is actually retried is decided by :func:`_retryable_reason`; this tuple only bounds
+# what we inspect vs. let propagate untouched (KeyboardInterrupt/SystemExit are never caught).
+_MAYBE_RETRYABLE: tuple[type[BaseException], ...] = (anthropic.AnthropicError, httpx.TransportError)
+
+
+def _error_body_type(exc: BaseException) -> str:
+	"""The ``error.type`` discriminator from an anthropic error body (e.g. ``'overloaded_error'``),
+	or ``''`` — a fallback for a transient error whose HTTP status isn't a clean 5xx we can key on."""
+	body = getattr(exc, "body", None)
+	if isinstance(body, dict):
+		err = body.get("error")
+		if isinstance(err, dict):
+			return str(err.get("type", ""))
+	return ""
+
+
+def _retryable_reason(exc: BaseException) -> str | None:
+	"""A short reason string if ``exc`` is a TRANSIENT failure worth retrying, else ``None``.
+
+	Retryable: any connection/timeout/transport drop; HTTP 408/409/425/429 or any 5xx (incl. 529
+	``overloaded``); or an error body typed ``*overloaded*``/``*timeout*`` when no clean status is
+	present. Non-retryable: every other 4xx (permanent client errors) and non-API SDK errors — they
+	won't succeed on retry, so they surface immediately with their original traceback."""
+	if isinstance(exc, _CONNECTION_ERRORS):
+		return f"connection/{type(exc).__name__}"
+	if isinstance(exc, anthropic.APIStatusError):
+		status = getattr(exc, "status_code", None)
+		if isinstance(status, int) and (status in _RETRYABLE_STATUS_CODES or status >= 500):
+			return f"http {status}"
+		etype = _error_body_type(exc)
+		if "overloaded" in etype or "timeout" in etype:
+			return etype
+		return None  # permanent 4xx (400/401/403/404/422)
+	return None  # non-status, non-connection SDK error (e.g. response-validation) — don't retry
+
+
+def _backoff_seconds(exc: BaseException, attempt: int) -> float:
+	"""Seconds to wait before the next attempt: honor an explicit Retry-After when the server sent
+	one (429s carry it), else exponential backoff — 2, 4, 8, 16, … capped at 30s."""
+	return _retry_after_seconds(exc, default=min(2.0 ** attempt, 30.0))
 
 
 def _with_rate_limit_retry(call: Callable[[], _T], *, max_attempts: int = 6) -> _T:
-	"""Run ``call`` and retry on ``anthropic.RateLimitError`` (429, honoring the API's requested
-	wait) and on transient network drops (see ``_TRANSIENT_ERRORS``, fixed 10s backoff), up to
-	``max_attempts`` total tries. Shared by :meth:`LLMGateway.complete` (streaming) and
-	:meth:`LLMGateway.complete_with_tools` (the repair path's tool-use loop) — chunked generation
-	fires many calls per feature, and either path can hit the per-minute limit or lose a socket."""
+	"""Run ``call``, retrying every TRANSIENT failure with backoff, up to ``max_attempts`` tries.
+
+	Transient = any connection/timeout/network drop, HTTP 408/409/425/429, or any 5xx (incl. 529
+	``overloaded``) — see :func:`_retryable_reason`. PERMANENT client errors (400/401/403/404/422)
+	re-raise immediately so a real bug fails fast instead of looping. Shared by
+	:meth:`LLMGateway.complete` (streaming) and :meth:`LLMGateway.complete_with_tools`; a run fires
+	one call per file/module, so a single transient blip must not discard all prior progress."""
 	for attempt in range(1, max_attempts + 1):
 		try:
 			return call()
-		except anthropic.RateLimitError as exc:
-			if attempt == max_attempts:
+		except _MAYBE_RETRYABLE as exc:
+			reason = _retryable_reason(exc)
+			if reason is None or attempt == max_attempts:
 				raise
-			wait = _retry_after_seconds(exc, default=15.0)
+			wait = _backoff_seconds(exc, attempt)
 			logger.warning(
-				"llm_call 429 rate-limited; waiting %.0fs then retrying (attempt %d/%d)",
-				wait, attempt, max_attempts,
+				"llm_call transient error [%s] (%s); waiting %.0fs then retrying (attempt %d/%d)",
+				reason, type(exc).__name__, wait, attempt, max_attempts,
 			)
 			time.sleep(wait)
-		except _TRANSIENT_ERRORS as exc:
-			if attempt == max_attempts:
-				raise
-			logger.warning(
-				"llm_call transient network error (%s: %s); waiting 10s then retrying (attempt %d/%d)",
-				type(exc).__name__, exc, attempt, max_attempts,
-			)
-			time.sleep(10.0)
 	raise AssertionError("unreachable")  # loop always returns or raises
 
 
