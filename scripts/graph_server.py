@@ -304,7 +304,13 @@ def _refactored_paths(rec: dict[str, Any]) -> list[str]:
     calls recorded in ``WorkflowState["refactored_files"]`` — see ``app/agents/refactoring.py``).
     Normalized the same way ``_run_file_paths`` reports paths, so the two lists can be compared
     directly (e.g. to badge a file "edited by Refactoring" alongside its scaffold/source/test kind).
+
+    Prefers the live value captured the moment the ``refactoring`` node fires (``rec["state"]``
+    itself isn't backfilled until the WHOLE run finishes — see the streaming loop) so this reflects
+    reality while later stages (Debugging, Security, ...) are still running, not just after "done".
     """
+    if "refactored_files" in rec:
+        return sorted({_norm_rel(p) for p in (rec.get("refactored_files") or [])})
     state = rec.get("state") or {}
     return sorted({_norm_rel(p) for p in (state.get("refactored_files") or [])})
 
@@ -871,6 +877,16 @@ def _run_events(
                             _last_run.setdefault("reports", {})[kind] = rp
                             sse_q.put(_sse({"type": "report", "kind": kind, "path": rp}))
 
+                    # Refactoring's own bookkeeping, captured the moment its node fires — `_last_run
+                    # ["state"]` (line ~909, below) isn't filled in until the WHOLE run finishes, so
+                    # without this the Edits page (/api/run/refactored-files) would show nothing
+                    # until Security/Documentation/etc. have also completed, minutes after
+                    # Refactoring itself is done. A later security-loop re-entry overwrites this with
+                    # its own (superset) edit list, same as the state field it mirrors.
+                    if "refactored_files" in delta:
+                        _last_run["refactored_files"] = list(delta.get("refactored_files") or [])
+                        _last_run["refactored_code"] = str(delta.get("refactored_code") or "")
+
                     if node == "security":
                         security_seen = True
 
@@ -1061,9 +1077,10 @@ def run_refactored_files() -> dict[str, Any]:
     if not project:
         return {"available": False, "reason": "No run has been started yet.", "count": 0, "files": []}
 
-    state = rec.get("state") or {}
     current_paths = set(_run_file_paths(rec))
     paths = _refactored_paths(rec)
+    # Same live-first preference as _refactored_paths: the summary should match the file list.
+    summary = str(rec.get("refactored_code") or (rec.get("state") or {}).get("refactored_code") or "")
 
     files = [
         {
@@ -1080,7 +1097,7 @@ def run_refactored_files() -> dict[str, Any]:
         "count": len(files),
         "files": files,
         # The agent's own one-line summary of what it fixed/skipped/left unreached this run.
-        "summary": str(state.get("refactored_code") or ""),
+        "summary": summary,
     }
 
 
