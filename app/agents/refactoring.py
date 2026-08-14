@@ -66,8 +66,19 @@ logger = logging.getLogger(__name__)
 MAX_FILES_PER_RUN = 25
 
 #: Tool-loop budget for the agentic edit session. Each iteration can read/write MANY files (the
-#: gateway executes every tool call in a turn), so this is turns-of-reasoning, not files.
+#: gateway executes every tool call in a turn), so this is turns-of-reasoning, not files. This is
+#: a FLOOR — ``_max_iters_for`` scales it up with the file count so a large review isn't starved
+#: (a fixed 16-turn budget against 25 files needing a read+write pair each was the root cause of
+#: files silently landing in "unreached"; see _write_report's Section 4).
 REFACTOR_MAX_ITERS = 16
+
+#: Tool turns to budget per flagged file (one turn to read it, one to write the fix — the floor
+#: the model needs even if it can't batch multiple files into a single turn).
+REFACTOR_ITERS_PER_FILE = 2
+
+#: Hard ceiling on the scaled budget regardless of file count, so one huge review can't turn into
+#: an unbounded number of LLM round-trips (MAX_FILES_PER_RUN already caps the file count itself).
+REFACTOR_MAX_ITERS_CEILING = 80
 
 #: Cap on how much of the sibling human-readable report (report.md / security-report.md) is fed to
 #: the model as extra context. The reports embed huge finding tables (100s of KB); the structured
@@ -86,6 +97,15 @@ class RefactoringAgent(BaseAgent):
 
     def _resolve_executor(self) -> Executor:
         return self._executor if self._executor is not None else get_executor()
+
+    @staticmethod
+    def _max_iters_for(file_count: int) -> int:
+        """Scale the tool-loop budget with how many files are actually in play, so a review that
+        names more files than the old fixed 16-turn budget could cover doesn't strand files in
+        "unreached". Floor is ``REFACTOR_MAX_ITERS`` (small reviews keep today's behavior); ceiling
+        is ``REFACTOR_MAX_ITERS_CEILING`` (bounded regardless of file count)."""
+        scaled = file_count * REFACTOR_ITERS_PER_FILE
+        return max(REFACTOR_MAX_ITERS, min(scaled, REFACTOR_MAX_ITERS_CEILING))
 
     def execute(self, state: WorkflowState) -> WorkflowState:
         in_security_loop = "security_verdict" in state
@@ -175,8 +195,9 @@ class RefactoringAgent(BaseAgent):
         touched: list[str] = []
         tools = self._editing_tools(executor, project_dir, touched)
         prompt = self._build_prompt(present, by_file, review_context)
+        max_iters = self._max_iters_for(len(present))
         notes = self.llm.complete_with_tools(
-            prompt=prompt, system=system, tools=tools, max_iters=REFACTOR_MAX_ITERS
+            prompt=prompt, system=system, tools=tools, max_iters=max_iters
         )
 
         generated = list(state.get("generated_code", []))
@@ -206,10 +227,19 @@ class RefactoringAgent(BaseAgent):
         log = logger.warning if unreached else logger.info
         log(
             "refactoring: edited %d/%d present file(s), applied ~%d finding(s), skipped %d, "
-            "deferred %d, not-modified %d (run %s) | notes: %s",
+            "deferred %d, not-modified %d, max_iters=%d (run %s) | notes: %s",
             len(touched), len(present), applied, len(skipped), len(deferred), len(unreached),
-            state.get("run_id"), (notes or "").strip()[:160],
+            max_iters, state.get("run_id"), (notes or "").strip()[:160],
         )
+        # Explicit file-level log line — separate from the summary counts above — so "which files
+        # did the agent actually edit" is answerable straight from the run log without opening the
+        # Markdown report.
+        logger.info("refactoring: files edited (run %s): %s", state.get("run_id"), sorted(touched) or "(none)")
+        if unreached:
+            logger.warning(
+                "refactoring: files NOT edited despite being flagged (run %s): %s",
+                state.get("run_id"), unreached,
+            )
         return state
 
     # -- agentic editing tools ----------------------------------------------

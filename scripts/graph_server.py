@@ -299,6 +299,22 @@ def _file_kinds(rec: dict[str, Any]) -> dict[str, str]:
     return kinds
 
 
+def _refactored_paths(rec: dict[str, Any]) -> list[str]:
+    """Workspace-relative paths the Refactoring agent actually edited this run (``write_file``
+    calls recorded in ``WorkflowState["refactored_files"]`` — see ``app/agents/refactoring.py``).
+    Normalized the same way ``_run_file_paths`` reports paths, so the two lists can be compared
+    directly (e.g. to badge a file "edited by Refactoring" alongside its scaffold/source/test kind).
+
+    Prefers the live value captured the moment the ``refactoring`` node fires (``rec["state"]``
+    itself isn't backfilled until the WHOLE run finishes — see the streaming loop) so this reflects
+    reality while later stages (Debugging, Security, ...) are still running, not just after "done".
+    """
+    if "refactored_files" in rec:
+        return sorted({_norm_rel(p) for p in (rec.get("refactored_files") or [])})
+    state = rec.get("state") or {}
+    return sorted({_norm_rel(p) for p in (state.get("refactored_files") or [])})
+
+
 def _project_relative(rec: dict[str, Any], path: str) -> str:
     """Strip the project-dir prefix — git commands run with ``cwd=project``."""
     project = str(rec.get("project") or "")
@@ -861,6 +877,16 @@ def _run_events(
                             _last_run.setdefault("reports", {})[kind] = rp
                             sse_q.put(_sse({"type": "report", "kind": kind, "path": rp}))
 
+                    # Refactoring's own bookkeeping, captured the moment its node fires — `_last_run
+                    # ["state"]` (line ~909, below) isn't filled in until the WHOLE run finishes, so
+                    # without this the Edits page (/api/run/refactored-files) would show nothing
+                    # until Security/Documentation/etc. have also completed, minutes after
+                    # Refactoring itself is done. A later security-loop re-entry overwrites this with
+                    # its own (superset) edit list, same as the state field it mirrors.
+                    if "refactored_files" in delta:
+                        _last_run["refactored_files"] = list(delta.get("refactored_files") or [])
+                        _last_run["refactored_code"] = str(delta.get("refactored_code") or "")
+
                     if node == "security":
                         security_seen = True
 
@@ -1002,6 +1028,7 @@ def run_files() -> dict[str, Any]:
 
     executor = rec.get("executor")
     kinds = _file_kinds(rec)
+    refactored = set(_refactored_paths(rec))
     root = executor.root if isinstance(executor, LocalDiskExecutor) else None
     memory_files = getattr(executor, "files", {}) if root is None else {}
 
@@ -1019,6 +1046,9 @@ def run_files() -> dict[str, Any]:
             "language": _language_for(path),
             "size": size,
             "kind": kinds.get(path, "source"),
+            # True when the Refactoring agent's write_file tool touched this path this run —
+            # independent of "kind" (a refactored file is still a "source" or "test" file).
+            "editedByRefactoring": path in refactored,
         })
 
     return {
@@ -1029,6 +1059,45 @@ def run_files() -> dict[str, Any]:
         "root": str(root) if root is not None else "(in-memory — dry-run)",
         "count": len(files),
         "files": files,
+    }
+
+
+@app.get("/api/run/refactored-files")
+def run_refactored_files() -> dict[str, Any]:
+    """Files the Refactoring agent edited this run — a Claude-Code-style "edited files" list.
+
+    Source of truth is ``WorkflowState["refactored_files"]`` (the ``write_file`` tool's own
+    record, set in ``app/agents/refactoring.py::execute``), not a guess from git or file mtimes,
+    so this reflects exactly what the agent touched regardless of publish/push state. Each entry
+    also carries whether the path still exists in the run's current file listing (a since-deleted
+    or renamed path would otherwise 404 from ``/api/run/diff``/``/api/run/file``).
+    """
+    rec = _last_run
+    project = str(rec.get("project") or "")
+    if not project:
+        return {"available": False, "reason": "No run has been started yet.", "count": 0, "files": []}
+
+    current_paths = set(_run_file_paths(rec))
+    paths = _refactored_paths(rec)
+    # Same live-first preference as _refactored_paths: the summary should match the file list.
+    summary = str(rec.get("refactored_code") or (rec.get("state") or {}).get("refactored_code") or "")
+
+    files = [
+        {
+            "path": path,
+            "language": _language_for(path),
+            "existsNow": path in current_paths,
+        }
+        for path in paths
+    ]
+
+    return {
+        "available": True,
+        "project": project,
+        "count": len(files),
+        "files": files,
+        # The agent's own one-line summary of what it fixed/skipped/left unreached this run.
+        "summary": summary,
     }
 
 
