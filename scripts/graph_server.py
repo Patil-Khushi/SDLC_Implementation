@@ -299,6 +299,16 @@ def _file_kinds(rec: dict[str, Any]) -> dict[str, str]:
     return kinds
 
 
+def _refactored_paths(rec: dict[str, Any]) -> list[str]:
+    """Workspace-relative paths the Refactoring agent actually edited this run (``write_file``
+    calls recorded in ``WorkflowState["refactored_files"]`` — see ``app/agents/refactoring.py``).
+    Normalized the same way ``_run_file_paths`` reports paths, so the two lists can be compared
+    directly (e.g. to badge a file "edited by Refactoring" alongside its scaffold/source/test kind).
+    """
+    state = rec.get("state") or {}
+    return sorted({_norm_rel(p) for p in (state.get("refactored_files") or [])})
+
+
 def _project_relative(rec: dict[str, Any], path: str) -> str:
     """Strip the project-dir prefix — git commands run with ``cwd=project``."""
     project = str(rec.get("project") or "")
@@ -1002,6 +1012,7 @@ def run_files() -> dict[str, Any]:
 
     executor = rec.get("executor")
     kinds = _file_kinds(rec)
+    refactored = set(_refactored_paths(rec))
     root = executor.root if isinstance(executor, LocalDiskExecutor) else None
     memory_files = getattr(executor, "files", {}) if root is None else {}
 
@@ -1019,6 +1030,9 @@ def run_files() -> dict[str, Any]:
             "language": _language_for(path),
             "size": size,
             "kind": kinds.get(path, "source"),
+            # True when the Refactoring agent's write_file tool touched this path this run —
+            # independent of "kind" (a refactored file is still a "source" or "test" file).
+            "editedByRefactoring": path in refactored,
         })
 
     return {
@@ -1029,6 +1043,44 @@ def run_files() -> dict[str, Any]:
         "root": str(root) if root is not None else "(in-memory — dry-run)",
         "count": len(files),
         "files": files,
+    }
+
+
+@app.get("/api/run/refactored-files")
+def run_refactored_files() -> dict[str, Any]:
+    """Files the Refactoring agent edited this run — a Claude-Code-style "edited files" list.
+
+    Source of truth is ``WorkflowState["refactored_files"]`` (the ``write_file`` tool's own
+    record, set in ``app/agents/refactoring.py::execute``), not a guess from git or file mtimes,
+    so this reflects exactly what the agent touched regardless of publish/push state. Each entry
+    also carries whether the path still exists in the run's current file listing (a since-deleted
+    or renamed path would otherwise 404 from ``/api/run/diff``/``/api/run/file``).
+    """
+    rec = _last_run
+    project = str(rec.get("project") or "")
+    if not project:
+        return {"available": False, "reason": "No run has been started yet.", "count": 0, "files": []}
+
+    state = rec.get("state") or {}
+    current_paths = set(_run_file_paths(rec))
+    paths = _refactored_paths(rec)
+
+    files = [
+        {
+            "path": path,
+            "language": _language_for(path),
+            "existsNow": path in current_paths,
+        }
+        for path in paths
+    ]
+
+    return {
+        "available": True,
+        "project": project,
+        "count": len(files),
+        "files": files,
+        # The agent's own one-line summary of what it fixed/skipped/left unreached this run.
+        "summary": str(state.get("refactored_code") or ""),
     }
 
 
