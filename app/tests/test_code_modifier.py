@@ -224,3 +224,18 @@ def test_the_gate_router_is_pure() -> None:
     state = {"gate_result": {"passed": False, "checks": []}, "repair_attempt": 1}
     route_after_change_gate(state)
     assert state["repair_attempt"] == 1
+
+
+def test_each_work_items_account_is_kept_not_overwritten() -> None:
+    """Found by a real run: `modifier_notes` was assigned per item, so the report and the PR body
+    described only the LAST item's edit and silently dropped the rest of the plan."""
+    item_two = WorkItem(id="second-item", action="modify", change_intent="also change this",
+                        target_files=["src/auth/login.py"])
+
+    out, ex = _run(_StubLLM([("src/auth/token.py", "one\n")]))
+    out["current_work_item"] = item_two
+    out["work_items"] = [_ITEM, item_two]
+    out = CodeModifierAgent(executor=ex, llm=_StubLLM([("src/auth/login.py", "two\n")])).execute(out)
+
+    assert "auth-token-expiry" in out["modifier_notes"]     # the first item survived...
+    assert "second-item" in out["modifier_notes"]           # ...alongside the second
