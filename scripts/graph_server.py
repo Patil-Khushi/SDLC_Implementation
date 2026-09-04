@@ -93,6 +93,17 @@ _UPLOADS_DIR = _REPO_ROOT / "uploads"
 #: the first pass maps to "refactoring"; once Security has run, later passes are the security loop.
 _NODE_TO_STAGE: dict[str, str | None] = {
     "scaffold": "scaffold",
+    # Brownfield entry (the peer of "scaffold"). Mapped to None ON PURPOSE: the frontend's
+    # 23-stage visual (SDLC_Frontend/src/mocks/stages.ts) has no brownfield tiles yet, and emitting
+    # a stage id it does not know would leave the UI with an unrenderable stage rather than no
+    # stage. It streams as a log line until the frontend grows a brownfield input path — at which
+    # point this becomes "acquire-repo" and a tile is added there in the same change.
+    "acquire": None,
+    "change_plan": None,
+    "code_modifier": None,
+    "change_gate": None,
+    "change_verify": None,
+    "change_commit": None,
     "select": "select-work-item",
     "code_generator": "code-generator",
     "gate": "gate",
@@ -118,6 +129,12 @@ _NODE_TO_STAGE: dict[str, str | None] = {
 #: Friendly agent label per node, used for the log stream.
 _NODE_LABEL: dict[str, str] = {
     "scaffold": "Scaffold",
+    "acquire": "Acquire Repo",
+    "change_plan": "Change Planner",
+    "code_modifier": "Code Modifier",
+    "change_gate": "Change Gate",
+    "change_verify": "Change Verify",
+    "change_commit": "Change Commit",
     "select": "Select Work Item",
     "code_generator": "Code Generator",
     "gate": "Gate",
@@ -1165,8 +1182,11 @@ def _parse_unified_diff(text: str, path: str) -> dict[str, Any] | None:
 
 @app.get("/api/run/diff")
 def run_diff(path: str) -> dict[str, Any]:
-    """Real ``git diff main...dev`` for one generated file — what the feature commits changed on
-    top of the scaffold. Only meaningful for a real run (dry-run creates no git history)."""
+    """Real ``git diff <base>...<branch>`` for one file — what this run's commits changed.
+
+    The branch pair comes from the run's own state, not from a literal: greenfield works main...dev,
+    brownfield works <repo default>...sdlc/cr-<run>. Only meaningful for a real run (dry-run keeps
+    files in memory with no git history)."""
     rec = _last_run
     executor = rec.get("executor")
     project = str(rec.get("project") or "")
@@ -1176,10 +1196,20 @@ def run_diff(path: str) -> dict[str, Any]:
         return {"available": False, "reason": "The generated project has no git repository yet."}
 
     branches = _git_branch_names(executor, project)
-    base = next((b for b in ("main", "master") if b in branches), "")
-    feature = "dev" if "dev" in branches else ""
-    if not base or not feature:
-        return {"available": False, "reason": "No main/dev branch pair to diff in the generated repo."}
+    # The run's OWN branch pair when it recorded one, falling back to the greenfield main/dev
+    # convention. A brownfield run works on `sdlc/cr-<run>` off whatever the repo's default branch
+    # actually is, so a hardcoded main...dev would either diff the wrong pair or claim there is
+    # nothing to diff at all.
+    state = rec.get("state") or {}
+    base = str(state.get("base_branch") or "").strip()
+    feature = str(state.get("branch") or "").strip()
+    if base not in branches:
+        base = next((b for b in ("main", "master") if b in branches), "")
+    if feature not in branches:
+        feature = "dev" if "dev" in branches else ""
+    if not base or not feature or base == feature:
+        return {"available": False,
+                "reason": f"No branch pair to diff in {project} (branches: {', '.join(branches) or 'none'})."}
 
     result = executor.run_command(
         ["git", "diff", f"{base}...{feature}", "--", _project_relative(rec, path)], cwd=project

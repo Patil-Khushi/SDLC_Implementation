@@ -35,10 +35,24 @@ CONTRACT_MODELS: dict[str, type[BaseModel]] = {
 }
 
 
+#: This service's own root (models -> app -> <service root>), whatever it is checked out as.
+_SERVICE_ROOT = Path(__file__).resolve().parents[2]
+
+
 def contracts_dir() -> Path:
-    """Absolute path to contracts/implementation-to-testing/ (models→app→implementation→services→repo)."""
-    repo_root = Path(__file__).resolve().parents[4]
-    return repo_root / "contracts" / "implementation-to-testing"
+    """Absolute path to contracts/implementation-to-testing/.
+
+    In the monorepo the contracts live at ``<repo>/contracts/``, two levels above this service
+    (``<repo>/services/implementation/``). Checked out STANDALONE there is no such ancestor, and a
+    blind ``parents[4]`` walks clean out of the checkout onto an unrelated directory — which is why
+    ``test_contracts.py`` could never pass here and the schemas were never published at all. So look
+    for a real ``contracts/`` on the way up (nearest monorepo root first) and fall back to a
+    service-local one, which ``export_json_schemas`` creates on demand.
+    """
+    for candidate in (_SERVICE_ROOT.parents[1], _SERVICE_ROOT.parent, _SERVICE_ROOT):
+        if (candidate / "contracts").is_dir():
+            return candidate / "contracts" / "implementation-to-testing"
+    return _SERVICE_ROOT / "contracts" / "implementation-to-testing"
 
 
 def schema_text(model: type[BaseModel]) -> str:

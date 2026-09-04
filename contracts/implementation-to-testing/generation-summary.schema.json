@@ -1,0 +1,45 @@
+{
+  "additionalProperties": false,
+  "description": "Per-work-item outcome of code generation.",
+  "properties": {
+    "compile_passed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Gate verdict: True=all files compiled, False=escalated, None=not evaluated yet. Code generation leaves this None; the gate/repair nodes fill it in.",
+      "title": "Compile Passed"
+    },
+    "files_produced": {
+      "description": "Workspace-relative paths written for this item.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Files Produced",
+      "type": "array"
+    },
+    "repairs_used": {
+      "default": 0,
+      "description": "Local repair attempts consumed (0 == compiled without rewrite).",
+      "minimum": 0,
+      "title": "Repairs Used",
+      "type": "integer"
+    },
+    "work_item_id": {
+      "description": "Id of the WorkItem this summarizes.",
+      "minLength": 1,
+      "title": "Work Item Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "work_item_id"
+  ],
+  "title": "GenerationSummary",
+  "type": "object"
+}

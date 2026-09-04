@@ -9,10 +9,17 @@ tests).
 from __future__ import annotations
 
 import logging
+import os
 import re
+from pathlib import Path
 
+from app.agents.change_planner import ChangePlannerAgent
 from app.agents.code_generator import CodeGeneratorAgent
-from app.agents.code_review import CodeReviewAgent
+from app.agents.code_modifier import CodeModifierAgent
+# _slug is the report-folder naming convention Code Review and Refactoring already share; the
+# change report lands in the SAME reports/<project>-<run>/ folder, so it reuses it rather than
+# adding a third copy of the same regex that could drift out of step with them.
+from app.agents.code_review import CodeReviewAgent, _slug
 from app.agents.documentation import DocumentationAgent
 from app.agents.security import SecurityAgent
 from app.agents.unit_test import UnitTestAgent
@@ -22,12 +29,29 @@ from app.integrations.executor import get_executor
 from app.integrations.github import get_github_client
 from app.integrations.review_sandbox import is_allowed_repo_url
 from app.services.boilerplate import render_scaffold
+from app.services.change_gate import classify_regressions, evaluate
+from app.services.change_plan import normalize_target, render_plan, validate_plan
 from app.services.packaging import build_project_zip
-from app.services.wiring import find_unresolved_imports, reconcile_wiring
+from app.services.test_command import detect as detect_test_command
+from app.services.test_command import run as run_tests
+from app.services.repo_inventory import (
+    RepoInventory,
+    detect_default_branch,
+    digests,
+    inventory,
+)
+from app.services.wiring import (
+    build_import_graph,
+    dependents_of,
+    find_unresolved_imports,
+    reconcile_wiring,
+)
 
 logger = logging.getLogger(__name__)
 
+_change_planner = ChangePlannerAgent()
 _code_generator = CodeGeneratorAgent()
+_code_modifier = CodeModifierAgent()
 _code_review = CodeReviewAgent()
 _unit_test_agent = UnitTestAgent()
 _documentation_agent = DocumentationAgent()
@@ -246,21 +270,541 @@ def feature_publish_node(state: WorkflowState) -> WorkflowState:
     if not (push and work_item is not None and hasattr(executor, "publish_feature")):
         return state
     project_dir = state.get("project_id") or state.get("run_id") or "project"
+    # Honour state["branch"] like refactoring_publish_node does, instead of letting publish_feature
+    # fall back to its own "dev" default: the run's working branch is a state field, and a caller
+    # that set it was previously ignored here while being respected two nodes later.
+    branch = (state.get("branch") or get_settings().working_branch or "").strip() or "dev"
     message = _item_commit_message(work_item)
     try:
         res = executor.publish_feature(
-            project_dir, message, list(work_item.target_files), token=state.get("git_token") or None
+            project_dir, message, list(work_item.target_files),
+            feature_branch=branch, token=state.get("git_token") or None,
         )
     except Exception as exc:  # noqa: BLE001 - a publish failure must never crash the run
         logger.exception("feature publish failed for run %s", state.get("run_id"))
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[publish] feature push FAILED: {exc}\n"
         return state
     ok = getattr(res, "exit_code", 1) == 0
-    logger.info("[publish] feature pushed to 'dev': %s (%s)", message, "ok" if ok else "PUSH FAILED")
+    logger.info("[publish] feature pushed to '%s': %s (%s)", branch, message, "ok" if ok else "PUSH FAILED")
     state["generation_summary"] = (state.get("generation_summary") or "") + (
-        f"[publish] {message} pushed to 'dev'" + ("" if ok else " (PUSH FAILED)") + "\n"
+        f"[publish] {message} pushed to '{branch}'" + ("" if ok else " (PUSH FAILED)") + "\n"
     )
     return state
+
+
+#: Clone timeout. A large repo over a slow link legitimately takes minutes; the default 120s
+#: run_command timeout would abort those runs before any work started.
+_CLONE_TIMEOUT = 600.0
+
+#: Switches that make git fail instead of blocking. ``GIT_TERMINAL_PROMPT=0`` is the important one:
+#: without it, a URL that passes the allowlist but is private or misspelled makes git BLOCK on a
+#: username prompt against a dead stdin until the timeout — a run that hangs instead of failing.
+#: ``GIT_ASKPASS`` closes the same door for the credential-helper/GUI path.
+_GIT_NONINTERACTIVE = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo", "GCM_INTERACTIVE": "never"}
+
+
+def _git_env() -> dict[str, str]:
+    """The non-interactive switches LAYERED ON TOP of the real environment.
+
+    ``env=`` REPLACES the child's environment rather than extending it, so handing subprocess a
+    bare dict of switches strips PATH, SystemRoot and everything else — git then fails to resolve
+    DNS at all ("Could not resolve host: github.com"), which reads exactly like a network outage
+    rather than a caller bug. ``local_executor._pat_env`` merges for the same reason.
+    """
+    return {**os.environ, **_GIT_NONINTERACTIVE}
+
+
+def _acquire_failed(state: WorkflowState, reason: str) -> WorkflowState:
+    """Abandon acquisition with a stated reason. Nothing has been written to any remote at this
+    point, so failing here is always safe — and it is where EVERY brownfield precondition is
+    checked, so a bad request can never reach a node that edits or pushes."""
+    logger.warning("[acquire] %s", reason)
+    state["workflow_status"] = "needs_human_review"
+    return _note(state, f"[acquire] FAILED - {reason}")
+
+
+def acquire_repo_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic: clone the EXISTING repo a change request targets, and survey it.
+
+    The brownfield counterpart to ``scaffold_node``, and deliberately a SEPARATE node rather than a
+    flag on it. ``scaffold_node`` unconditionally overwrites .gitignore, README.md, package.json /
+    requirements.txt, Dockerfile, docker-compose.yml and the jest/babel configs from
+    ``DEFAULT_CAPABILITIES`` (never reading disk), then calls ``publish_scaffold`` -> ``git checkout
+    -B main`` + ``gh repo create`` + ``git push -u origin main``. Against a clone that push is a
+    clean FAST-FORWARD onto the user's default branch: their manifests replaced, committed, pushed,
+    no PR, no review. A guard inside that node would leave the landmine armed for whoever adds the
+    next write; routing around it cannot regress.
+
+    Writes nothing to the remote and nothing into the working tree - it clones, branches locally,
+    and records what it found.
+    """
+    _stage("Acquire Repo", "cloning the target repository and surveying what it contains")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    repo_url = (state.get("source_repo_url") or "").strip()
+
+    if not repo_url:
+        return _acquire_failed(state, "no source_repo_url was provided")
+    # Validate BEFORE any network call. The in-graph sandbox clones were always allowlisted, but the
+    # host clone below runs with the operator's own git/gh credentials, and until now nothing ever
+    # handed it a caller-supplied URL. `git clone <anything>` with real credentials is exactly the
+    # SSRF-shaped primitive review_sandbox's allowlist exists to prevent.
+    if not is_allowed_repo_url(repo_url):
+        return _acquire_failed(
+            state,
+            f"'{repo_url}' is not an allowed repository URL (expected a public "
+            "https://github.com/<owner>/<repo>)",
+        )
+    if not state.get("change_request"):
+        return _acquire_failed(state, "no change_request was provided - nothing to implement")
+    # The exec-sandbox has no egress to github.com by design (tools/exec-sandbox/squid.conf), so it
+    # can neither clone the target nor push the result. Fail at the boundary rather than 40 minutes
+    # into a run. `publish_feature` is the marker for the local-disk executor.
+    if not hasattr(executor, "publish_feature"):
+        return _acquire_failed(
+            state,
+            "the active executor cannot reach GitHub (the exec-sandbox has no egress to it) - "
+            "brownfield runs need the local-disk executor",
+        )
+
+    clone = executor.run_command(
+        ["git", "clone", "--no-recurse-submodules", "--", repo_url, "."],
+        cwd=project_dir, timeout=_CLONE_TIMEOUT, env=_git_env(),
+    )
+    if clone.exit_code != 0:
+        detail = (clone.stderr or clone.stdout or "").strip()[:300]
+        return _acquire_failed(state, f"git clone failed: {detail or 'no output'}")
+
+    base_branch = detect_default_branch(executor, project_dir)
+    state["base_branch"] = base_branch
+
+    base_ref = (state.get("base_ref") or "").strip()
+    if base_ref:
+        checkout = executor.run_command(
+            ["git", "checkout", base_ref], cwd=project_dir, env=_git_env()
+        )
+        if checkout.exit_code != 0:
+            detail = (checkout.stderr or checkout.stdout or "").strip()[:200]
+            return _acquire_failed(state, f"could not check out base_ref '{base_ref}': {detail}")
+
+    head = executor.run_command(["git", "rev-parse", "HEAD"], cwd=project_dir)
+    state["base_sha"] = head.stdout.strip() if head.exit_code == 0 else ""
+
+    # A dedicated per-run branch, never the repo's default and never `dev`: on a real repo `dev` is
+    # often a shared integration branch, so reusing it would both land commits on someone's shared
+    # work and make finalize's PR diff every unrelated commit already on it rather than this change.
+    work_branch = f"sdlc/cr-{state.get('run_id') or 'run'}"
+    branched = executor.run_command(
+        ["git", "checkout", "-b", work_branch], cwd=project_dir, env=_git_env()
+    )
+    if branched.exit_code != 0:
+        detail = (branched.stderr or branched.stdout or "").strip()[:200]
+        return _acquire_failed(state, f"could not create working branch '{work_branch}': {detail}")
+    state["branch"] = work_branch
+
+    inv = inventory(executor, project_dir)
+    if inv.is_empty:
+        return _acquire_failed(state, "the cloned repository contains no readable files")
+    state["repo_inventory"] = inv.as_dict()
+    state["baseline_digests"] = digests(executor, project_dir, inv.files)
+
+    # Run the repo's OWN suite before touching anything. Without this baseline a post-change
+    # failure cannot be attributed: a repo is not obliged to be green when we find it, and blaming
+    # the change for a test that was already red would send the run off fixing code it never wrote.
+    _record_baseline_tests(state, executor, project_dir, inv.as_dict())
+
+    # repo_url is what every downstream node already reads (code_review/security clone it, finalize
+    # parses owner/repo out of it). Copying the input across here is the ONE authorised crossing
+    # point between the two fields, so `repo_url` keeps its "this is the repo we work on" meaning
+    # without source_repo_url losing its "this one was handed to us" meaning.
+    state["repo_url"] = repo_url
+    # generated_code stays the CHANGE SET, not the repo. Its own contract is "files written this
+    # run", and documentation_node reads every entry into one prompt while packaging zips them —
+    # seeding a 2,000-file repo here would blow up both.
+    state["generated_code"] = []
+    state["workflow_status"] = "repo_acquired"
+
+    logger.info(
+        "[acquire] %s @ %s (base=%s, branch=%s) | %d files, %d source, %d modules, primary=%s",
+        repo_url, (state["base_sha"] or "?")[:8], base_branch, work_branch,
+        len(inv.files), len(inv.source_files), len(inv.by_dir), inv.primary_language or "unknown",
+    )
+    _write_change_report(state, inv)
+    return _note(
+        state,
+        f"[acquire] cloned {repo_url} @ {(state['base_sha'] or '?')[:8]} "
+        f"(base '{base_branch}', working on '{work_branch}') - "
+        f"{len(inv.files)} file(s), {len(inv.source_files)} source, {len(inv.by_dir)} module(s)",
+    )
+
+
+#: Cap on how many source files are read to build the reverse import graph. Reading is per-file, so
+#: an unbounded graph over a large monorepo would dominate the run. Overflow is reported, not
+#: silently ignored — a partial graph means "dependents may be under-reported", and whoever reviews
+#: the pull request needs to know that rather than trusting an incomplete blast radius.
+_MAX_GRAPH_FILES = 800
+
+
+def change_plan_node(state: WorkflowState) -> WorkflowState:
+    """LLM: decide which files the change request must touch — then CHECK that answer.
+
+    Three steps, deliberately in this order: the planner proposes, ``change_plan.validate_plan``
+    checks the proposal against the repository that was actually cloned, and the reverse import
+    graph records what else imports the files it wants to touch. Validation runs before anything
+    downstream sees the plan, because the failure mode is quiet: a plan naming plausible files the
+    planner never opened is indistinguishable from a good one, and every later step trusts it.
+
+    A rejected plan clears ``work_items`` (which is what routes the run to escalate) but KEEPS the
+    plan and the reasons in the report — a rejected plan is the most useful thing to hand a human.
+    """
+    _stage("Change Planner", "deciding which files the change request must touch, then validating "
+           "that plan against the repository")
+    state = _change_planner.execute(state)
+
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    inv = state.get("repo_inventory") or {}
+    items = list(state.get("work_items") or [])
+
+    # The planner already failed/refused — nothing to validate, and its reason is already recorded.
+    if not items:
+        state["change_plan_errors"] = state.get("change_plan_errors") or []
+        _append_plan_to_report(state, items, state["change_plan_errors"], {})
+        return state
+
+    _, errors = validate_plan(items, inv.get("files") or [])
+    state["change_plan_errors"] = errors
+
+    impacts = _blast_radius(state, executor, project_dir, inv, items)
+    state["change_impacts"] = impacts
+
+    if errors:
+        logger.warning(
+            "[plan] run=%s | plan REJECTED (%d problem(s)): %s",
+            state.get("run_id"), len(errors), "; ".join(errors[:5]),
+        )
+        state["work_items"] = []          # nothing may act on a rejected plan
+        state["workflow_status"] = "needs_human_review"
+        for err in errors:
+            _note(state, f"[plan] REJECTED - {err}")
+    else:
+        touched = sum(len(i.target_files) for i in items)
+        impacted = sorted({d for deps in impacts.values() for d in deps})
+        logger.info(
+            "[plan] run=%s | plan accepted: %d item(s), %d file(s), %d dependent file(s)",
+            state.get("run_id"), len(items), touched, len(impacted),
+        )
+        _note(state, f"[plan] {len(items)} item(s) over {touched} file(s); "
+                     f"{len(impacted)} other file(s) import them")
+
+    _append_plan_to_report(state, items, errors, impacts)
+    return state
+
+
+def _record_baseline_tests(state: WorkflowState, executor, project_dir: str, inv: dict) -> None:
+    """Detect and run the repository's own suite, and record the result as the baseline."""
+    command = detect_test_command(executor, project_dir, inv)
+    if command is None:
+        state["test_command"] = ""
+        state["baseline_test"] = {"status": "inconclusive",
+                                  "summary": "no test suite was detected in this repository"}
+        logger.warning("[acquire] no test suite detected - the change cannot be verified by tests")
+        _note(state, "[tests] NONE DETECTED - this repository has no suite this pipeline can run, "
+                     "so the change will not be test-verified")
+        return
+
+    state["test_command"] = f"{command.label} ({command.evidence})"
+    logger.info("[acquire] baseline: running %s (%s) ...", command.label, command.evidence)
+    outcome = run_tests(executor, project_dir, command)
+    state["baseline_test"] = {"status": outcome.status, "summary": outcome.summary,
+                              "label": outcome.label}
+    if outcome.status == "inconclusive":
+        # Not a failure of anything — it means the suite could not run here (a missing dev
+        # dependency, usually). Say so; the alternative is silently gating on a broken baseline.
+        _note(state, f"[tests] baseline INCONCLUSIVE - {outcome.summary}; the change cannot be "
+                     "verified against this suite")
+    else:
+        _note(state, f"[tests] baseline: {outcome.summary}")
+
+
+def change_verify_node(state: WorkflowState) -> WorkflowState:
+    """FIXED: re-run the repository's own suite and compare it against the baseline.
+
+    The change gate proves the right FILES changed. This proves the change did not BREAK anything
+    the repository could already do — the only evidence of correctness this pipeline can produce
+    without understanding the code.
+
+    Only a REGRESSION gates: a check that passed before and fails now. A repo arriving with failing
+    tests is common, and treating those as ours would block every change to it. A baseline that
+    could not run gates nothing at all, and that is reported rather than quietly treated as green.
+    """
+    _stage("Change Verify", "re-running the repository's own tests and comparing to the baseline")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    baseline = state.get("baseline_test") or {}
+
+    if baseline.get("status") not in ("passed", "failed"):
+        state["verify_test"] = dict(baseline) or {"status": "inconclusive", "summary": "no baseline"}
+        state["verify_verdict"] = "unverified"
+        return _note(state, "[verify] SKIPPED - there was no conclusive baseline to compare "
+                            "against, so this change is NOT test-verified")
+
+    command = detect_test_command(executor, project_dir, state.get("repo_inventory") or {})
+    if command is None:
+        state["verify_test"] = {"status": "inconclusive", "summary": "the suite disappeared"}
+        state["verify_verdict"] = "unverified"
+        return _note(state, "[verify] SKIPPED - no runnable suite after the change")
+
+    outcome = run_tests(executor, project_dir, command)
+    state["verify_test"] = {"status": outcome.status, "summary": outcome.summary,
+                            "label": outcome.label, "output": outcome.output}
+
+    verdict = classify_regressions(
+        baseline={"tests": baseline.get("status") == "passed"},
+        current={"tests": outcome.status == "passed"},
+    )
+    if outcome.status == "inconclusive":
+        state["verify_verdict"] = "unverified"
+        return _note(state, f"[verify] INCONCLUSIVE - {outcome.summary}; the change is NOT "
+                            "test-verified (it was not rejected either)")
+    if verdict["regressed"]:
+        state["verify_verdict"] = "regressed"
+        logger.warning("[verify] REGRESSION: %s", outcome.summary)
+        return _note(state, f"[verify] REGRESSION - the suite passed before this change and fails "
+                            f"now: {outcome.summary}")
+    if verdict["fixed"]:
+        state["verify_verdict"] = "fixed"
+        return _note(state, f"[verify] the suite was already failing and now passes: {outcome.summary}")
+    if outcome.status == "failed":
+        state["verify_verdict"] = "preexisting"
+        return _note(state, f"[verify] the suite still fails, exactly as it did BEFORE the change "
+                            f"({outcome.summary}) - not caused by this change")
+    state["verify_verdict"] = "passed"
+    return _note(state, f"[verify] the repository's own tests pass: {outcome.summary}")
+
+
+def code_modifier_node(state: WorkflowState) -> WorkflowState:
+    """LLM: implement the current work item against the EXISTING codebase."""
+    item = state.get("current_work_item")
+    label = getattr(item, "id", "?") if item is not None else "?"
+    _stage("Code Modifier", f"implementing work item {label} in the existing codebase")
+    return _code_modifier.execute(state)
+
+
+def change_gate_node(state: WorkflowState) -> WorkflowState:
+    """FIXED, deterministic: prove the change was made, and that ONLY the change was made.
+
+    Replaces ``files_complete`` on the brownfield lane, where that check is vacuous — every target
+    already exists, so it passes whether or not the editing agent wrote anything, and a run could
+    report success with a zero-line diff.
+
+    Writes the same ``gate_result`` shape ``gate_node`` writes, so ``repair_attempt`` accounting and
+    the escalate path work over it unchanged.
+    """
+    _stage("Change Gate", "verifying the targets really changed and nothing else did")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    item = state.get("current_work_item")
+
+    if item is None:
+        state["gate_result"] = {"passed": False, "checks": [
+            {"name": "files_changed", "passed": False, "stderr": "no current work item",
+             "stdout": "", "exit_code": 1, "scope": ""}]}
+        return state
+
+    # Every path the ACCEPTED plan claims — so a file another item legitimately owns is not
+    # reported as collateral damage by this item's gate.
+    claimed = {
+        normalize_target(p)
+        for other in (state.get("work_items") or [])
+        for p in (other.target_files or [])
+    }
+    try:
+        result = evaluate(
+            executor, project_dir,
+            action=item.action,
+            target_files=list(item.target_files or []),
+            baseline_digests=dict(state.get("baseline_digests") or {}),
+            claimed_paths=claimed,
+        )
+    except Exception as exc:  # noqa: BLE001 - an executor blow-up is a gate FAILURE, not a crash
+        logger.exception("[change_gate] evaluation failed for item %s", item.id)
+        result = {"passed": False, "checks": [
+            {"name": "files_changed", "passed": False, "stderr": f"gate error: {exc}",
+             "stdout": "", "exit_code": 1, "scope": ""}]}
+
+    state["gate_result"] = result
+    failed = [c for c in result["checks"] if not c["passed"]]
+    if failed:
+        logger.warning("[change_gate] item=%s FAILED: %s", item.id,
+                       "; ".join(c["stderr"][:160] for c in failed))
+        _note(state, f"[gate] '{item.id}' FAILED: " + "; ".join(c["name"] for c in failed))
+    else:
+        logger.info("[change_gate] item=%s passed", item.id)
+    return state
+
+
+def change_commit_node(state: WorkflowState) -> WorkflowState:
+    """FIXED: commit the change set on the run's own branch, and push it only if asked.
+
+    Deliberately NOT ``publish_sweep``, which greenfield uses: that runs ``git add -A``, which in a
+    repository whose ``.gitignore`` we do not control would stage whatever happens to be untracked.
+    Here only the files the plan claimed and the gate verified are staged, by explicit path.
+
+    Push is opt-in (``push_enabled``). Without it the run still commits locally, so the diff is
+    inspectable, and nothing leaves the machine.
+    """
+    _stage("Change Commit", "committing the verified change set to the run's branch")
+    executor = get_executor()
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    branch = (state.get("branch") or "").strip() or "sdlc/change"
+    changed = list(state.get("changed_files") or [])
+
+    if not changed:
+        state["workflow_status"] = "needs_human_review"
+        return _note(state, "[commit] nothing was changed - no commit made")
+
+    rel_paths = [p[len(project_dir) + 1:] if p.startswith(f"{project_dir}/") else p for p in changed]
+    cr = state.get("change_request") or {}
+    subject = cr.get("title") or cr.get("id") or "apply change request"
+    kind = {"bug": "fix", "feature": "feat"}.get(str(cr.get("kind") or ""), "chore")
+    message = f"{kind}: {subject}"
+    push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
+
+    try:
+        if push and hasattr(executor, "publish_feature"):
+            res = executor.publish_feature(
+                project_dir, message, rel_paths,
+                feature_branch=branch, token=state.get("git_token") or None,
+            )
+            ok = getattr(res, "exit_code", 1) == 0
+            logger.info("[commit] change pushed to '%s' (%s)", branch, "ok" if ok else "PUSH FAILED")
+            _note(state, f"[commit] {len(rel_paths)} file(s) pushed to '{branch}'"
+                         + ("" if ok else " (PUSH FAILED)"))
+        else:
+            res = executor.git_commit(project_dir, message)
+            ok = bool(getattr(res, "committed", False))
+            _note(state, f"[commit] {len(rel_paths)} file(s) committed locally to '{branch}'"
+                         + ("" if ok else " (COMMIT FAILED)")
+                         + ("" if push else " - push not requested"))
+    except Exception as exc:  # noqa: BLE001 - a publish failure must never crash the run
+        logger.exception("[commit] failed for run %s", state.get("run_id"))
+        return _note(state, f"[commit] FAILED: {exc}")
+
+    state["workflow_status"] = "change_committed"
+    return state
+
+
+def _blast_radius(
+    state: WorkflowState, executor, project_dir: str, inv: dict, items: list
+) -> dict[str, list[str]]:
+    """For each planned target, the files that import it.
+
+    This is the closest thing the pipeline has to impact analysis, and it is REPORTED rather than
+    acted on: file-level import edges cannot tell whether a particular edit actually breaks a
+    caller, so the honest move is to put the list in front of whoever reviews the pull request
+    (see the "KNOWN GAP" note in agents/code_review.py). Never fatal — no graph just means no
+    blast-radius section.
+    """
+    targets = [normalize_target(p) for item in items for p in item.target_files]
+    if not targets:
+        return {}
+
+    all_source = list(inv.get("source_files") or [])
+    source = all_source[:_MAX_GRAPH_FILES]
+    contents: dict[str, str] = {}
+    for rel in source:
+        try:
+            contents[rel] = executor.read_file(f"{project_dir}/{rel}")
+        except Exception:  # noqa: BLE001 - an unreadable file contributes no edges
+            continue
+    if not contents:
+        return {}
+
+    try:
+        graph = build_import_graph(contents)
+    except Exception:  # noqa: BLE001 - analysis must never sink the run
+        logger.exception("[plan] building the import graph failed")
+        return {}
+
+    if len(all_source) > len(source):
+        # Say so. An under-built graph makes `dependents_of` return [] for a file that was never
+        # scanned, which renders as "nothing imports this" — an affirmative claim about code the
+        # analysis never looked at, and the report is the whole deliverable a human reviews.
+        logger.warning(
+            "[plan] import graph covers %d of %d source files - dependents may be under-reported",
+            len(source), len(all_source),
+        )
+        _note(state, f"[plan] NOTE: blast radius computed over {len(source)} of {len(all_source)} "
+                     "source files; dependents may be under-reported")
+
+    # Only report a target the graph actually covers. Omitting an unscanned target lets render_plan
+    # print "(not analysed)" instead of an unearned "-".
+    return {t: dependents_of(graph, [t]) for t in targets if t in graph}
+
+
+def _append_plan_to_report(
+    state: WorkflowState, items: list, errors: list[str], impacts: dict[str, list[str]]
+) -> None:
+    """Add the plan section to the change report acquisition already started, and rewrite it."""
+    notes = (state.get("change_plan_notes") or "").strip()
+    section = render_plan(items, errors, impacts)
+    if notes:
+        section += "\n## Planner notes\n\n" + notes + "\n"
+
+    report = (state.get("change_report") or "") + "\n" + section
+    state["change_report"] = report
+    path = state.get("change_report_path")
+    if not path:
+        return
+    try:
+        Path(path).write_text(report, encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 - a report that cannot be written must not fail the run
+        logger.warning("[plan] could not update the change report: %s", exc)
+
+
+def _write_change_report(state: WorkflowState, inv: RepoInventory) -> None:
+    """Persist what acquisition found, in the same reports/<project>-<run>/ folder Code Review and
+    Refactoring use — so a brownfield run leaves a readable artifact even when it stops here."""
+    cr = state.get("change_request") or {}
+    lines = [
+        f"# Change Request - {cr.get('title') or cr.get('id') or 'untitled'}",
+        "",
+        "## Request",
+        f"- **ID:** {cr.get('id') or '-'}",
+        f"- **Kind:** {cr.get('kind') or '-'}",
+        "",
+        (cr.get("description") or "_No description supplied._"),
+        "",
+    ]
+    criteria = cr.get("acceptance_criteria") or []
+    if criteria:
+        lines += ["### Acceptance criteria", ""] + [f"- {c}" for c in criteria] + [""]
+    lines += [
+        "## Target repository",
+        "",
+        f"- **Repo:** {state.get('source_repo_url') or '-'}",
+        f"- **Base branch:** `{state.get('base_branch') or '-'}`",
+        f"- **Base commit:** `{state.get('base_sha') or '-'}`",
+        f"- **Working branch:** `{state.get('branch') or '-'}`",
+        "",
+        "## Inventory",
+        "",
+        inv.render(),
+        "",
+    ]
+    report = "\n".join(lines)
+    state["change_report"] = report
+
+    settings = get_settings()
+    folder = Path(settings.reports_dir) / f"{_slug(state.get('project_id') or 'project')}-{_slug(state.get('run_id') or 'run')}"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "change-report.md"
+        path.write_text(report, encoding="utf-8")
+        state["change_report_path"] = str(path)
+    except OSError as exc:  # noqa: BLE001 - a report that cannot be written must not fail the run
+        logger.warning("[acquire] could not write change report: %s", exc)
 
 
 def gate_node(state: WorkflowState) -> WorkflowState:
@@ -395,7 +939,11 @@ def debug_publish_node(state: WorkflowState) -> WorkflowState:
     # No-op guard: if the loop produced nothing (no tests generated and the debug agent never ran),
     # there is nothing to persist. Mirrors refactoring_publish's "nothing edited -> skip".
     produced_tests = bool(state.get("unit_tests"))
-    debug_ran = int(state.get("debug_attempt", 0)) > 0
+    # ``debug_rounds``, NOT ``debug_attempt``: the latter is progress-SENSITIVE and resets to 0 on
+    # any round that reduced the failure count (see debugging.py), so a debug loop that ran and
+    # succeeded reports 0 and this guard would skip publishing the very fixes it just made.
+    # ``debug_rounds`` is the monotonic count of rounds actually executed.
+    debug_ran = int(state.get("debug_rounds", 0)) > 0
     if not (produced_tests or debug_ran):
         return state
 
@@ -403,16 +951,19 @@ def debug_publish_node(state: WorkflowState) -> WorkflowState:
            "Security's re-scan and the PR carry the tested code and the tests")
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
+    branch = (state.get("branch") or get_settings().working_branch or "").strip() or "dev"
     message = f"test({state.get('run_id') or 'run'}): debug fixes + unit tests"
     push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
 
     try:
         if push and hasattr(executor, "publish_sweep"):
-            res = executor.publish_sweep(project_dir, token=state.get("git_token") or None)
+            res = executor.publish_sweep(
+                project_dir, feature_branch=branch, token=state.get("git_token") or None
+            )
             ok = getattr(res, "exit_code", 1) == 0
-            logger.info("[publish] debug/test output pushed to 'dev' (%s)", "ok" if ok else "PUSH FAILED")
+            logger.info("[publish] debug/test output pushed to '%s' (%s)", branch, "ok" if ok else "PUSH FAILED")
             state["generation_summary"] = (state.get("generation_summary") or "") + (
-                "[publish] debug fixes + unit tests pushed to 'dev'" + ("" if ok else " (PUSH FAILED)") + "\n"
+                f"[publish] debug fixes + unit tests pushed to '{branch}'" + ("" if ok else " (PUSH FAILED)") + "\n"
             )
         else:
             res = executor.git_commit(project_dir, message)  # LLM never forms/executes this (rule 2)
@@ -453,16 +1004,102 @@ def security_node(state: WorkflowState) -> WorkflowState:
     return _security_agent.execute(state)
 
 
+def _change_pr_text(state: WorkflowState) -> tuple[str, str]:
+    """Title and body for a brownfield pull request.
+
+    Deliberately NOT the security report greenfield uses. In brownfield that report describes the
+    user's OWN pre-existing code, and this PR may be opened on a public repository — publishing a
+    vulnerability list about someone else's codebase into a public thread is a disclosure, not a
+    courtesy. The body carries the change request, what was edited, and what else imports it.
+    """
+    cr = state.get("change_request") or {}
+    title = str(cr.get("title") or cr.get("id") or "Automated change")
+    project_dir = state.get("project_id") or state.get("run_id") or "project"
+    changed = [p[len(project_dir) + 1:] if p.startswith(f"{project_dir}/") else p
+               for p in (state.get("changed_files") or [])]
+    impacts = state.get("change_impacts") or {}
+
+    lines = [
+        f"## {title}", "",
+        str(cr.get("description") or "").strip() or "_No description supplied._", "",
+    ]
+    if criteria := cr.get("acceptance_criteria") or []:
+        lines += ["### Acceptance criteria", ""] + [f"- {c}" for c in criteria] + [""]
+
+    lines += ["### Files changed", ""] + [f"- `{p}`" for p in changed] + [""]
+
+    impacted = sorted({d for path in changed for d in (impacts.get(path) or [])})
+    if impacted:
+        lines += [
+            "### Other files that import these", "",
+            "Not modified by this change — listed so a reviewer can check them:", "",
+            *(f"- `{d}`" for d in impacted[:20]),
+            "",
+        ]
+    if notes := (state.get("modifier_notes") or "").strip():
+        lines += ["### What the change does", "", notes, ""]
+
+    lines += ["### Verification", "", _verification_line(state), ""]
+
+    lines += [
+        "---", "",
+        "Opened as a **draft** by an automated change-request run. It has not been merged and "
+        "will not be: a human decides whether this is correct.",
+        "",
+        "This pipeline does not compute a call graph, so it cannot verify that callers outside the "
+        "files above still work. Please review accordingly.",
+    ]
+    return title, "\n".join(lines)[:60000]
+
+
+def _verification_line(state: WorkflowState) -> str:
+    """One honest sentence about what the tests did or did not prove.
+
+    ``unverified`` must never read like a pass. A reviewer skimming a draft PR needs to know
+    immediately whether "the tests are green" is a claim being made at all — the most damaging
+    thing this report could do is imply verification that never happened.
+    """
+    verdict = state.get("verify_verdict") or "unverified"
+    verify = state.get("verify_test") or {}
+    baseline = state.get("baseline_test") or {}
+    command = state.get("test_command") or "no suite detected"
+    summary = verify.get("summary") or baseline.get("summary") or "no result"
+
+    if verdict == "passed":
+        return f"The repository's own tests pass after this change (`{command}`): {summary}."
+    if verdict == "fixed":
+        return (f"The repository's tests were already failing before this change and now pass "
+                f"(`{command}`): {summary}.")
+    if verdict == "preexisting":
+        return (f"The repository's tests still fail exactly as they did BEFORE this change "
+                f"(`{command}`): {summary}. Not caused by this change.")
+    if verdict == "regressed":
+        return (f"**The tests passed before this change and fail now** (`{command}`): {summary}.")
+    return (f"⚠️ **This change is NOT test-verified.** The repository's suite could not be run "
+            f"here ({summary}), so nothing was proven either way — please run the tests yourself "
+            "before merging.")
+
+
 def finalize_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic (never LLM-formed): Security approved, so open (or find) the
     `dev -> main` pull request. Never merges — a human approves the merge on GitHub; this keeps a
     shared remote safe. Reached only on ``security_verdict == "approve"`` (see
     ``router.route_after_security``) — a ``changes_requested`` verdict escalates directly instead.
     """
-    _stage("Finalize", "opening (or finding) the dev -> main pull request")
+    brownfield = state.get("source_mode") == "brownfield"
+    _stage("Finalize", "opening (or finding) the pull request")
     run_id = state.get("run_id") or "-"
     repo_url = (state.get("repo_url") or "").strip()
     head = (state.get("branch") or "dev").strip()
+
+    # A PR needs a branch that exists ON THE REMOTE. Greenfield always pushed (the scaffold created
+    # the repo), but brownfield push is opt-in — without it the branch is local only, and asking
+    # GitHub to open a PR from it yields a confusing "field head is invalid" rather than the honest
+    # "you did not ask me to push anything".
+    if brownfield and not (state.get("push_enabled") and state.get("git_remote")):
+        state["finalize_status"] = "skipped"
+        return _note(state, "[finalize] SKIPPED - the change was committed locally only "
+                            "(push was not requested), so there is no remote branch to open a PR from")
 
     if not repo_url or not is_allowed_repo_url(repo_url):
         logger.info("[finalize] run=%s | no repo_url / not an allowed GitHub URL - skipping PR", run_id)
@@ -477,13 +1114,23 @@ def finalize_node(state: WorkflowState) -> WorkflowState:
         return _note(state, f"[finalize] SKIPPED — could not parse owner/repo from {repo_url}")
     owner, repo = match.group(1), match.group(2)
 
-    title = f"Security-approved: merge {head} into main"
-    body = (state.get("security_report") or "Security scan passed.")[:60000]
-    logger.info("[finalize] run=%s | opening PR %s -> main for %s/%s ...", run_id, head, owner, repo)
+    base = (state.get("base_branch") or "main").strip()
+    if brownfield:
+        title, body = _change_pr_text(state)
+    else:
+        title = f"Security-approved: merge {head} into {base}"
+        body = (state.get("security_report") or "Security scan passed.")[:60000]
+    logger.info("[finalize] run=%s | opening %sPR %s -> %s for %s/%s ...",
+                run_id, "draft " if brownfield else "", head, base, owner, repo)
     # Pass the credential THIS run pushed with; the client falls back to the configured PAT and
     # then to the `gh` CLI's token, since only the identity that owns the repo can open a PR on it.
     client = get_github_client(token=(state.get("git_token") or "").strip() or None)
-    result = client.create_or_update_pull_request(owner, repo, head, "main", title, body)
+    # Brownfield PRs open as DRAFTS: this is a change to a repository the service does not own, and
+    # a draft cannot be merged until a person marks it ready — which is the entire safety model,
+    # given there is no call-graph analysis to prove the change is safe for callers.
+    result = client.create_or_update_pull_request(
+        owner, repo, head, base, title, body, draft=brownfield,
+    )
     if result.ok:
         state["pr_url"] = result.url
         state["finalize_status"] = "pr_created"
@@ -493,7 +1140,7 @@ def finalize_node(state: WorkflowState) -> WorkflowState:
     logger.warning("[finalize] run=%s | PR failed: %s", run_id, result.error)
     # Record it in the run summary too: a PR failure used to be a log line only, so a run could
     # finish "completed" with a zip and nobody noticed the PR never got opened.
-    return _note(state, f"[finalize] PR FAILED ({head} -> main on {owner}/{repo}): {result.error}")
+    return _note(state, f"[finalize] PR FAILED ({head} -> {base} on {owner}/{repo}): {result.error}")
 
 
 def package_node(state: WorkflowState) -> WorkflowState:
@@ -704,8 +1351,11 @@ def commit_node(state: WorkflowState) -> WorkflowState:
     push = bool(state.get("push_enabled")) and bool(state.get("git_remote"))
     if push and hasattr(executor, "publish_scaffold"):
         note = ""
+        sweep_branch = (state.get("branch") or get_settings().working_branch or "").strip() or "dev"
         try:
-            res = executor.publish_sweep(project_dir, token=state.get("git_token") or None)
+            res = executor.publish_sweep(
+                project_dir, feature_branch=sweep_branch, token=state.get("git_token") or None
+            )
             if getattr(res, "exit_code", 0) != 0:
                 note = " (sweep push FAILED)"
         except Exception as exc:  # noqa: BLE001 - a sweep failure must not crash the run

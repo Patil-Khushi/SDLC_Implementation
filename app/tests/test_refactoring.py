@@ -325,3 +325,64 @@ def test_defers_files_over_the_fan_out_cap(tmp_path: Path) -> None:
     assert "proj/src/f29.py" not in executor.writes               # an over-cap file was NOT fixed
     assert "Deferred" in state["refactored_code"]                  # and it's reported, not dropped
     assert state["workflow_status"] == "refactored"
+
+
+# --- truncation / oversize guards on the whole-file overwrite -------------------------------
+# write_file replaces a file with whatever the model emitted, and the reply is bounded by
+# settings.llm_max_tokens. A file that doesn't fit comes back cut off, and the truncated result was
+# written, recorded in refactored_files, committed and pushed — corruption that looked like success.
+
+
+def test_refuses_a_truncated_rewrite_and_leaves_the_file_intact(tmp_path: Path) -> None:
+    original = "".join(f"line {i}\n" for i in range(400))           # ~4KB of real content
+    executor = FakeExecutor(files={"proj/src/big.py": original})
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/big.py")]))
+
+    # The model replies with only the first few lines — the classic max_tokens cut-off.
+    llm = _StubLLM(content="line 0\nline 1\n")
+    RefactoringAgent(executor=executor, llm=llm).execute(state)
+
+    assert executor.files["proj/src/big.py"] == original            # NOT corrupted
+    assert "proj/src/big.py" not in executor.writes                 # the write never happened
+    assert state.get("refactored_files", []) == []                  # so nothing is claimed as edited
+
+
+def test_refuses_to_overwrite_a_file_too_large_to_round_trip(tmp_path: Path) -> None:
+    from app.agents.refactoring import MAX_EDITABLE_FILE_CHARS
+
+    original = "x = 1\n" * (MAX_EDITABLE_FILE_CHARS // 6 + 100)     # comfortably over the ceiling
+    executor = FakeExecutor(files={"proj/src/huge.py": original})
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/huge.py")]))
+
+    # Even a same-size reply is refused: the file cannot be carried back in one turn at all.
+    RefactoringAgent(executor=executor, llm=_StubLLM(content=original)).execute(state)
+
+    assert executor.files["proj/src/huge.py"] == original
+    assert "proj/src/huge.py" not in executor.writes
+
+
+def test_refusal_message_tells_the_model_what_to_do(tmp_path: Path) -> None:
+    # llm_gateway._run_tool feeds a handler's return value straight back as the tool result, so the
+    # refusal is the model's only signal — it has to be actionable, not just a failure.
+    from app.agents.refactoring import _rewrite_refusal
+
+    truncated = _rewrite_refusal("src/a.py", "a\n" * 500, "a\n")
+    assert "REFUSED" in truncated and "COMPLETE" in truncated
+
+    oversize = _rewrite_refusal("src/b.py", "b" * 70_000, "b" * 70_000)
+    assert "REFUSED" in oversize and "Do NOT retry" in oversize
+
+    assert _rewrite_refusal("src/c.py", "print(0)\n", "print(1)\n") == ""   # a normal edit passes
+
+
+def test_a_legitimate_small_edit_is_never_blocked(tmp_path: Path) -> None:
+    # The guard must not fire on ordinary lint fixes, which barely change a file's size.
+    original = "".join(f"line {i}\n" for i in range(400))
+    fixed = original.replace("line 0\n", "line 0  # fixed\n")
+    executor = FakeExecutor(files={"proj/src/ok.py": original})
+    state = _state(review_findings_path=_findings_file(tmp_path, [_open("src/ok.py")]))
+
+    RefactoringAgent(executor=executor, llm=_StubLLM(content=fixed)).execute(state)
+
+    assert executor.files["proj/src/ok.py"] == fixed
+    assert "proj/src/ok.py" in executor.writes

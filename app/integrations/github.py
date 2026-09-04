@@ -111,9 +111,15 @@ class GitHubClient(ABC):
 
     @abstractmethod
     def create_or_update_pull_request(
-        self, owner: str, repo: str, head: str, base: str, title: str, body: str
+        self, owner: str, repo: str, head: str, base: str, title: str, body: str,
+        *, draft: bool = False,
     ) -> PRResult:
-        """Return the existing open PR for head->base if one exists, else create it."""
+        """Return the existing open PR for head->base if one exists, else create it.
+
+        ``draft`` opens the PR in GitHub's draft state — it cannot be merged until a human marks it
+        ready. Used for changes made to a repository this service did not create, where "a person
+        must look at this before it can land" is the whole point.
+        """
 
 
 # --------------------------------------------------------------------------- fake impl
@@ -134,9 +140,11 @@ class FakeGitHubClient(GitHubClient):
         self._next_number = 1000
 
     def create_or_update_pull_request(
-        self, owner: str, repo: str, head: str, base: str, title: str, body: str
+        self, owner: str, repo: str, head: str, base: str, title: str, body: str,
+        *, draft: bool = False,
     ) -> PRResult:
-        self.calls.append({"owner": owner, "repo": repo, "head": head, "base": base, "title": title})
+        self.calls.append({"owner": owner, "repo": repo, "head": head, "base": base,
+                           "title": title, "body": body, "draft": draft})
         key = f"{owner}/{repo}/{head}/{base}"
         if key in self._existing:
             return self._existing[key]
@@ -173,7 +181,8 @@ class RealGitHubClient(GitHubClient):
         return ordered
 
     def create_or_update_pull_request(
-        self, owner: str, repo: str, head: str, base: str, title: str, body: str
+        self, owner: str, repo: str, head: str, base: str, title: str, body: str,
+        *, draft: bool = False,
     ) -> PRResult:
         credentials = self._credentials()
         if not credentials:
@@ -183,7 +192,7 @@ class RealGitHubClient(GitHubClient):
             )
         result = PRResult(ok=False, error="no attempt made")
         for i, token in enumerate(credentials):
-            result = self._attempt(owner, repo, head, base, title, body, token)
+            result = self._attempt(owner, repo, head, base, title, body, token, draft=draft)
             if result.ok or not result.retryable:
                 return result  # success, or a real error that another token would not fix
             if i + 1 < len(credentials):
@@ -196,7 +205,7 @@ class RealGitHubClient(GitHubClient):
         return result
 
     def _attempt(self, owner: str, repo: str, head: str, base: str, title: str, body: str,
-                 token: str) -> PRResult:
+                 token: str, *, draft: bool = False) -> PRResult:
         """One full find-then-create pass with a single credential."""
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         try:
@@ -205,7 +214,7 @@ class RealGitHubClient(GitHubClient):
                 return existing
             status, payload = self._request(
                 "POST", f"{self._API}/repos/{owner}/{repo}/pulls",
-                json_body={"title": title, "head": head, "base": base, "body": body},
+                json_body={"title": title, "head": head, "base": base, "body": body, "draft": draft},
                 headers=headers,
             )
         except Exception as exc:  # noqa: BLE001 - a GitHub API failure must not crash the run

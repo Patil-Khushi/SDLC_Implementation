@@ -41,7 +41,15 @@ _IMPL_DIR = Path(__file__).resolve().parent.parent
 if str(_IMPL_DIR) not in sys.path:
     sys.path.insert(0, str(_IMPL_DIR))
 
-from app.integrations.executor import CheckResult, CommitResult, Executor, RunResult, StrPath, cap_output
+from app.integrations.executor import (
+    CheckResult,
+    CommitResult,
+    Executor,
+    RunResult,
+    StrPath,
+    clean_listing,
+    cap_output,
+)
 
 # On Windows, npm/npx ship as `.cmd` shims; `subprocess.run(["npm", ...])` without `shell=True`
 # does NOT resolve the PATHEXT extension the way a shell would, and fails with "command not
@@ -128,6 +136,22 @@ class LocalDiskExecutor(Executor):
 
     def read_file(self, path: StrPath) -> str:
         return self._resolve(path).read_text(encoding="utf-8")
+
+    def list_files(self, project_dir: StrPath, prefix: str = "") -> list[str]:
+        """``git ls-files`` when the project is a git repo, else a filesystem walk.
+
+        Tracked-files-first matches the sandbox implementation AND honours the project's own
+        .gitignore for free. The walk is the fallback for a tree that was written but not yet
+        ``git init``-ed — which is every run before the first publish."""
+        res = self.run_command(["git", "ls-files"], cwd=project_dir)
+        if res.exit_code == 0 and res.stdout.strip():
+            return clean_listing(res.stdout, prefix)
+        try:
+            root = self._resolve(project_dir)
+            rels = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()]
+        except (OSError, ValueError):  # missing dir, or a path escaping the demo root
+            return []
+        return clean_listing("\n".join(rels), prefix)
 
     def git_status(self, project_dir: StrPath) -> str:
         r = self.run_command(["git", "status", "--porcelain"], cwd=project_dir)

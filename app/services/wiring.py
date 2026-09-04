@@ -703,3 +703,214 @@ def reconcile_wiring(files: dict[str, str]) -> dict[str, str]:
     changed.update(reconcile_package_dependencies({**files, **changed}))
     changed.update(reconcile_package_peerdeps({**files, **changed}))
     return changed
+
+
+# --- reverse import graph (who depends on this file?) -------------------------------------------
+#
+# The documented impact-analysis gap: nothing in this pipeline computes whether editing a file
+# breaks a CALLER of it (see agents/code_review.py's "KNOWN GAP" callout). That is tolerable when
+# generating a new app — every file is new, so there are no pre-existing callers — but it is the
+# central risk when CHANGING an existing codebase, where a two-line edit to a shared helper can
+# break code the run never looked at.
+#
+# This is not a full call graph and does not pretend to be: it is file-level import edges, which is
+# the coarsest useful answer and the one that can be computed deterministically with no model. Two
+# consumers: the change planner sees which files depend on the ones it is about to touch, and test
+# targeting can cover a changed module's dependents as well as the module itself.
+
+#: Python imports. Deliberately regex, not ``ast``: the JS side is already regex-based, a syntax
+#: error in one file must not sink the whole survey, and a brownfield repo may well contain Python
+#: this interpreter cannot parse (a different target version).
+#: ``from X import (a, b)`` may wrap across lines, so the names group has to be allowed to cross
+#: newlines when — and only when — the clause opened a parenthesis. Without the parenthesised
+#: alternative, ``from . import (\n routes,\n users,\n)`` yields only the package and every module
+#: it imports is missed, which under-reports dependents exactly where a package barrel is the thing
+#: most likely to be imported.
+_PY_FROM_RE = re.compile(
+    r"^[^\S\n]*from\s+(?P<mod>\.*[\w.]*)\s+import\s+(?:\((?P<paren>[^)]*)\)|(?P<names>[^\n#]*))",
+    re.MULTILINE,
+)
+_PY_IMPORT_RE = re.compile(r"^[^\S\n]*import\s+(?P<mods>[\w.]+(?:\s*,\s*[\w.]+)*)", re.MULTILINE)
+
+_PY_SOURCE_RE = re.compile(r"\.pyi?$", re.IGNORECASE)
+
+
+def _is_py_source(path: str) -> bool:
+    return bool(_PY_SOURCE_RE.search(_basename(path)))
+
+
+_PY_TRIPLE_QUOTE_RE = re.compile(r'("""|\'\'\')')
+
+
+def _strip_py_comments(text: str) -> str:
+    """Blank out ``#`` comments AND the bodies of triple-quoted strings, preserving line structure.
+
+    The docstring case is not cosmetic. A usage example is the single most common thing to put in a
+    module docstring::
+
+        \"\"\"Usage:
+        from mypkg import thing
+        \"\"\"
+
+    and ``_PY_FROM_RE``/``_PY_IMPORT_RE`` are MULTILINE-anchored at the start of a line, so that
+    example would be read as a real import and INVENT a dependency edge — a phantom caller in the
+    blast-radius report a reviewer is relying on. Under-reporting a dependent is bad; asserting one
+    that does not exist is worse, because it is indistinguishable from a true one.
+
+    Line structure is preserved (bodies are blanked, not removed) so the anchors keep working.
+    Single-quoted strings are left alone: an import-shaped single-line string literal starting at
+    column 0 is vanishingly rare, and scanning them properly needs a real tokenizer.
+    """
+    out: list[str] = []
+    delimiter: str | None = None            # the triple-quote we are currently inside, if any
+    for line in text.splitlines():
+        if delimiter is None:
+            hash_at = line.find("#")
+            line = line if hash_at < 0 else line[:hash_at]
+
+        rest, kept = line, ""
+        while rest:
+            if delimiter is None:
+                match = _PY_TRIPLE_QUOTE_RE.search(rest)
+                if not match:
+                    kept += rest
+                    break
+                kept += rest[: match.start()]
+                delimiter = match.group(1)
+                rest = rest[match.end():]
+            else:
+                close = rest.find(delimiter)
+                if close < 0:
+                    break                   # the whole remainder is inside the string
+                rest = rest[close + len(delimiter):]
+                delimiter = None
+        out.append(kept)
+    return "\n".join(out)
+
+
+def _py_module_candidates(importer: str, spec: str) -> list[str]:
+    """Project-relative paths a Python import specifier could name.
+
+    Python resolution depends on sys.path, packaging and namespace packages, none of which are
+    knowable from a file list — so this returns CANDIDATES and the caller keeps only those that
+    exist. Guessing one answer would be wrong more often than offering several.
+    """
+    if not spec:
+        return []
+    if spec.startswith("."):                       # relative: leading dots walk up from this file
+        dots = len(spec) - len(spec.lstrip("."))
+        rest = spec.lstrip(".").replace(".", "/")
+        base = posixpath.dirname(_norm(importer))
+        for _ in range(dots - 1):                  # one dot == this package, two == its parent
+            base = posixpath.dirname(base)
+        joined = _norm(posixpath.join(base, rest)) if rest else base
+        if joined.startswith("..") or joined in (".", ""):
+            return []
+        return [f"{joined}.py", f"{joined}/__init__.py"]
+
+    rel = spec.replace(".", "/")
+    # An absolute import may be rooted at the repo or under a src/-style layout root. Only
+    # candidates that actually exist survive in build_import_graph, so listing a few is safe.
+    roots = ("", "src/", "app/", "lib/")
+    return [f"{r}{rel}.py" for r in roots] + [f"{r}{rel}/__init__.py" for r in roots]
+
+
+def _py_imported_names(raw: str) -> list[str]:
+    """The bound names in a ``from X import a, b as c, (d)`` clause. ``*`` yields nothing."""
+    cleaned = raw.replace("(", " ").replace(")", " ").strip().rstrip("\\").strip()
+    names = []
+    for part in cleaned.split(","):
+        token = part.strip().split(" as ")[0].strip()
+        if token and token != "*" and re.fullmatch(r"\w+", token):
+            names.append(token)
+    return names
+
+
+def _py_imported_specifiers(content: str) -> list[str]:
+    """Every module specifier a Python file imports, first-seen order, deduplicated.
+
+    ``from X import a`` contributes BOTH ``X`` and ``X.a``: in ``from . import routes`` or
+    ``from mypkg import helpers`` the imported name IS the module, and only the names clause says
+    so. Emitting both is safe because ``build_import_graph`` keeps only candidates that exist as
+    files — a specifier naming a function simply resolves to nothing. Missing this shape would
+    silently UNDER-report dependents, and an impact report that says "nothing imports this" when
+    something does is worse than no report.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    text = _strip_py_comments(content)
+    for m in _PY_FROM_RE.finditer(text):
+        module = m.group("mod") or ""
+        candidates = [module] if module else []
+        for name in _py_imported_names(m.group("paren") or m.group("names") or ""):
+            candidates.append(f"{module}.{name}" if not module.endswith(".") else f"{module}{name}")
+        for spec in candidates:
+            if spec and spec not in seen:
+                seen.add(spec)
+                out.append(spec)
+    for m in _PY_IMPORT_RE.finditer(text):
+        for part in m.group("mods").split(","):
+            spec = part.strip()
+            if spec and spec not in seen:
+                seen.add(spec)
+                out.append(spec)
+    return out
+
+
+def build_import_graph(files: dict[str, str]) -> dict[str, set[str]]:
+    """Reverse import edges: ``{file: {files that import it}}``.
+
+    Only edges BETWEEN files in the given set are recorded — a package import (``express``,
+    ``fastapi``) has no in-set target and is not a dependency question this answers. Every file in
+    ``files`` appears as a key, so a file with no dependents maps to an empty set rather than being
+    absent (the caller can then tell "nothing imports this" from "I never looked at this").
+
+    Handles JS/TS (via the existing specifier extraction and Node resolution) and Python. Any other
+    language contributes keys but no edges, which is the honest answer rather than a guessed one.
+    """
+    all_paths = {_norm(p) for p in files}
+    dependents: dict[str, set[str]] = {_norm(p): set() for p in files}
+
+    for path, content in sorted(files.items()):
+        importer = _norm(path)
+        if _is_js_source(path):
+            from_dir = posixpath.dirname(importer)
+            for spec in _imported_specifiers(content):
+                if not (spec.startswith("./") or spec.startswith("../")):
+                    continue                       # bare specifier -> a package, not an in-set file
+                resolved = _resolve_module(_norm(posixpath.join(from_dir, spec)), all_paths)
+                if resolved and resolved != importer:
+                    dependents.setdefault(resolved, set()).add(importer)
+        elif _is_py_source(path):
+            for spec in _py_imported_specifiers(content):
+                for candidate in _py_module_candidates(importer, spec):
+                    target = _norm(candidate)
+                    if target in all_paths and target != importer:
+                        dependents.setdefault(target, set()).add(importer)
+                        break                      # first existing candidate wins
+    return dependents
+
+
+def dependents_of(
+    graph: dict[str, set[str]], paths: "set[str] | list[str]", depth: int = 1
+) -> list[str]:
+    """Files that (transitively, up to ``depth``) import anything in ``paths``.
+
+    ``depth=1`` — direct importers only — is the default because that is the blast radius a
+    reviewer can actually check; deeper quickly returns most of a repo and stops being actionable.
+    The seed paths themselves are excluded, so the result is "what ELSE this change touches".
+    """
+    seeds = {_norm(p) for p in paths}
+    seen: set[str] = set()
+    frontier = set(seeds)
+    for _ in range(max(0, depth)):
+        nxt: set[str] = set()
+        for path in frontier:
+            for importer in graph.get(path, ()):
+                if importer not in seen and importer not in seeds:
+                    seen.add(importer)
+                    nxt.add(importer)
+        if not nxt:
+            break
+        frontier = nxt
+    return sorted(seen)
