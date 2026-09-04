@@ -223,3 +223,35 @@ def test_an_import_error_inside_a_test_is_still_a_real_failure() -> None:
         exit_code=1,
     )
     assert got.status == "failed"
+
+
+def test_a_change_request_written_by_powershell_keeps_its_title(tmp_path) -> None:
+    """Found by a real run. PowerShell's `Set-Content -Encoding utf8` writes a UTF-8 BOM; read as
+    plain utf-8 the heading test fails and the title degrades to the filename, which then becomes
+    the commit subject and the pull-request title (observed: `chore: cr`)."""
+    import sys
+
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2] / "scripts"))
+    from run_change_request import _load_change_request
+
+    cr = tmp_path / "cr.md"
+    cr.write_bytes("﻿# Reject an empty secret key\n\nThe body.\n".encode("utf-8"))
+    got = _load_change_request(cr)
+
+    assert got["title"] == "Reject an empty secret key"
+    assert got["description"] == "The body."
+    assert "﻿" not in got["title"] + got["description"]
+
+
+def test_a_bom_prefixed_json_change_request_still_parses(tmp_path) -> None:
+    import json as _json
+    import sys
+
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2] / "scripts"))
+    from run_change_request import _load_change_request
+
+    cr = tmp_path / "cr.json"
+    payload = {"id": "CR-9", "title": "Do the thing", "description": "Details."}
+    cr.write_bytes("﻿".encode("utf-8") + _json.dumps(payload).encode("utf-8"))
+
+    assert _load_change_request(cr)["title"] == "Do the thing"

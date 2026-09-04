@@ -97,7 +97,13 @@ def _load_change_request(path: Path) -> dict[str, Any]:
     ticket export). Requiring JSON would mean every caller hand-converting first, and a
     hand-converted description is one more place to drop the acceptance criteria.
     """
-    text = path.read_text(encoding="utf-8")
+    # utf-8-SIG, not utf-8: PowerShell's `Set-Content -Encoding utf8` (the obvious way to write this
+    # file on Windows, and what our own instructions recommend) emits a UTF-8 BOM. Read as plain
+    # utf-8 the BOM survives as a leading ﻿, `.lstrip()` does not remove it (it is not
+    # whitespace), the "# Heading" test fails, and the title silently degrades to the filename —
+    # which then propagates into the commit subject and the pull request title. json.loads chokes on
+    # it outright. utf-8-sig strips a BOM when present and is a no-op when it is not.
+    text = path.read_text(encoding="utf-8-sig")
     if path.suffix.lower() == ".json":
         data = json.loads(text)
         if not isinstance(data, dict):
