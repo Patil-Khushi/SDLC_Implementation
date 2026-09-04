@@ -54,6 +54,12 @@ from typing import Any
 
 from app.agents.base import BaseAgent
 from app.agents.code_generator import _project_dir, _project_path
+from app.agents.editing import (
+    MAX_EDITABLE_FILE_CHARS,
+    MIN_REWRITE_SIZE_RATIO,
+    editing_tools,
+    rewrite_refusal as _rewrite_refusal,
+)
 from app.config.settings import get_settings
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, RepairTool, get_executor
@@ -84,7 +90,6 @@ REFACTOR_MAX_ITERS_CEILING = 80
 #: the model as extra context. The reports embed huge finding tables (100s of KB); the structured
 #: findings.json is the authoritative "what to fix", so the prose is bounded supporting context.
 MAX_REPORT_CONTEXT_CHARS = 16_000
-
 
 class RefactoringAgent(BaseAgent):
     name = "refactoring"
@@ -245,47 +250,13 @@ class RefactoringAgent(BaseAgent):
     # -- agentic editing tools ----------------------------------------------
 
     def _editing_tools(self, executor: Executor, project_dir: str, touched: list[str]) -> list[Any]:
-        """Project-scoped read/write tools the model drives itself (the agentic edit loop).
+        """The shared agentic edit loop (app/agents/editing.py).
 
-        Paths are repo-relative; both handlers resolve them under ``<project_dir>/`` (via
-        ``_project_path``, which won't double-prefix an already-prefixed path). ``write_file``
-        records every path it saves in ``touched`` so the caller knows what changed. A failed read
-        returns an error string (never raises) so the model can recover — see llm_gateway._run_tool.
+        Refactoring passes no ``allowed_paths``: it edits whatever the review flagged, and the
+        finding list is itself the authorization. The Change Modifier confines writes to its work
+        item's targets instead — see that module for why the two differ.
         """
-        def _read(path: str) -> str:
-            try:
-                return executor.read_file(_project_path(project_dir, path))
-            except Exception as exc:  # noqa: BLE001 - report to the model, don't crash the loop
-                return f"ERROR: could not read {path}: {type(exc).__name__}: {exc}"
-
-        def _write(path: str, content: str) -> str:
-            out_path = _project_path(project_dir, path)
-            executor.write_file(out_path, content)
-            if out_path not in touched:
-                touched.append(out_path)
-            return f"wrote {path} ({len(content)} chars)"
-
-        return [
-            RepairTool(
-                name="read_file",
-                description="Read a file's current text content. Path is repo-relative.",
-                handler=_read,
-                input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-            ),
-            RepairTool(
-                name="write_file",
-                description=(
-                    "Save the corrected FULL content of a file (overwrites it). Path is repo-relative. "
-                    "Use this to apply each fix."
-                ),
-                handler=_write,
-                input_schema={
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                    "required": ["path", "content"],
-                },
-            ),
-        ]
+        return editing_tools(executor, project_dir, touched, label=self.name)
 
     # -- findings ------------------------------------------------------------
 

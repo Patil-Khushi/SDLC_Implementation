@@ -5,6 +5,13 @@ from app.models import WorkItem
 
 ALL_FIELDS = {
     "project_id", "run_id", "attempt", "design_package", "repo_url", "branch", "commit_sha",
+    "base_branch",
+    # brownfield: an existing codebase + a change request, instead of a design pack
+    "source_mode", "source_repo_url", "change_request", "base_ref",
+    "base_sha", "baseline_digests", "repo_inventory",
+    "change_plan_notes", "change_plan_errors", "change_impacts",
+    "changed_files", "modifier_notes", "change_report", "change_report_path",
+    "test_command", "baseline_test", "verify_test", "verify_verdict",
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
     "codegen_ok", "gate_result", "repair_attempt", "debug_attempt", "debug_last_failure_count",
     "debug_last_failure_kind", "debug_rounds", "debug_result", "debug_report", "debug_report_path",
@@ -29,6 +36,9 @@ INITIALIZED_FIELDS = {
     "debug_result", "generation_summary",
     "generation_metrics",
     "push_enabled", "git_remote", "git_token", "security_loop_attempt", "workflow_status",
+    # brownfield INPUTS are always seeded (defaulting to greenfield) so route_entry reads a real
+    # value rather than an absent key — the mode decision is never left implicit.
+    "source_mode", "source_repo_url", "change_request", "base_ref",
 }
 
 

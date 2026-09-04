@@ -48,7 +48,9 @@ __all__ = [
     "Executor",
     "FakeExecutor",
     "MCPExecutor",
+    "LIST_SKIP_DIRS",
     "cap_output",
+    "clean_listing",
     "get_executor",
     "set_executor",
 ]
@@ -184,14 +186,53 @@ _GIT_WRITE_SUBCOMMANDS = frozenset(
 )
 
 
+#: Directory names ``list_files`` never descends into. VCS internals, installed dependencies and
+#: build output are not "files in the project" in any sense a caller cares about, and node_modules
+#: alone would swamp a listing with tens of thousands of entries.
+LIST_SKIP_DIRS = frozenset({
+    ".git", "node_modules", ".py_packages", "__pycache__", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", ".venv", "venv", "dist", "build", ".next", ".vite", "coverage", "htmlcov",
+})
+
+
+def _is_listable(rel_path: str) -> bool:
+    """True unless any segment of ``rel_path`` is a skipped directory."""
+    return not any(seg in LIST_SKIP_DIRS for seg in rel_path.replace("\\", "/").split("/"))
+
+
+def clean_listing(stdout: str, prefix: str = "") -> list[str]:
+    """Normalize ``git ls-files`` / ``find`` output into the sorted, filtered contract list_files
+    promises. ``find .`` emits a leading ``./`` that ``git ls-files`` does not — strip it so the two
+    backends return identical paths for the same tree."""
+    out: set[str] = set()
+    for raw in stdout.splitlines():
+        rel = raw.strip().replace("\\", "/").removeprefix("./")
+        if rel and _is_listable(rel) and rel.startswith(prefix):
+            out.add(rel)
+    return sorted(out)
+
+
 class Executor(ABC):
     """The one interface both hybrid paths use."""
 
     # -- shared primitives ---------------------------------------------------
 
     @abstractmethod
-    def run_command(self, cmd: Sequence[str], cwd: StrPath = ".", timeout: float | None = None) -> RunResult:
-        """Run ``cmd`` (argv list) in ``cwd`` inside the sandbox."""
+    def run_command(
+        self,
+        cmd: Sequence[str],
+        cwd: StrPath = ".",
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunResult:
+        """Run ``cmd`` (argv list) in ``cwd`` inside the sandbox.
+
+        ``env`` replaces the child's environment when the implementation runs a real process — the
+        way to pass a credential or a ``GIT_*`` switch WITHOUT putting it in argv, where it would be
+        visible to anything that can list processes. ``LocalDiskExecutor`` has always accepted it
+        while this signature did not declare it, so anything typed against this interface could not
+        pass it; sandbox implementations own their own environment and ignore it.
+        """
 
     @abstractmethod
     def write_file(self, path: StrPath, content: str) -> None:
@@ -200,6 +241,21 @@ class Executor(ABC):
     @abstractmethod
     def read_file(self, path: StrPath) -> str:
         """Return the text content of ``path``."""
+
+    @abstractmethod
+    def list_files(self, project_dir: StrPath, prefix: str = "") -> list[str]:
+        """Project-relative paths of the files in ``project_dir``, optionally under ``prefix``.
+
+        The one tree primitive on this interface. Until now the only way to enumerate a tree was an
+        ad-hoc ``run_command(["git", "ls-files"])`` — which every caller re-rolled, and which
+        ``FakeExecutor`` cannot answer at all (it returns one canned RunResult), so anything needing
+        a file list was untestable through the normal fake.
+
+        Sorted, and excludes VCS/dependency/build noise. Returns ``[]`` rather than raising when the
+        directory is missing or unreadable: "nothing to list" is a legitimate answer for a caller
+        surveying a tree, and every existing consumer of this interface treats read failure as
+        degraded-not-fatal.
+        """
 
     @abstractmethod
     def git_status(self, project_dir: StrPath) -> str:
@@ -357,6 +413,7 @@ class FakeExecutor(Executor):
         diff_text: str = "",
         run_result: RunResult | None = None,
         install_result: RunResult | None = None,
+        command_results: Callable[[list[str]], RunResult | None] | None = None,
     ) -> None:
         self._queues: dict[str, deque[bool | CheckResult]] = {
             "compile": deque(compile_results or []),
@@ -370,7 +427,12 @@ class FakeExecutor(Executor):
         self._diff_text = diff_text
         self._run_result = run_result or RunResult(stdout="", stderr="", exit_code=0)
         self._install_result = install_result or RunResult(stdout="", stderr="", exit_code=0)
+        # Per-argv scripting: ``run_result`` is ONE canned answer for every command, which cannot
+        # express a flow that runs several different commands and needs a different answer for each
+        # (git clone, then rev-parse, then ls-files). Return None to fall through to ``run_result``.
+        self._command_results = command_results
         self.commands: list[list[str]] = []
+        self.command_envs: list[dict[str, str] | None] = []
         self.installs: list[tuple[str, str, str]] = []
         self.commits: list[tuple[str, str]] = []
         self.writes: list[str] = []
@@ -389,8 +451,19 @@ class FakeExecutor(Executor):
             exit_code=0 if passed else 1,
         )
 
-    def run_command(self, cmd: Sequence[str], cwd: StrPath = ".", timeout: float | None = None) -> RunResult:
+    def run_command(
+        self,
+        cmd: Sequence[str],
+        cwd: StrPath = ".",
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunResult:
         self.commands.append(list(cmd))
+        self.command_envs.append(env)
+        if self._command_results is not None:
+            scripted = self._command_results(list(cmd))
+            if scripted is not None:
+                return scripted
         return self._run_result
 
     def write_file(self, path: StrPath, content: str) -> None:
@@ -403,6 +476,13 @@ class FakeExecutor(Executor):
             return self.files[str(path)]
         except KeyError as exc:
             raise FileNotFoundError(str(path)) from exc
+
+    def list_files(self, project_dir: StrPath, prefix: str = "") -> list[str]:
+        """The seeded ``files`` dict IS the tree — so a test can express "a repo that already
+        exists" as ``FakeExecutor(files={...})`` and have it enumerate like a real one."""
+        root = f"{str(project_dir).rstrip('/')}/"
+        rels = [p[len(root):] for p in self.files if p.startswith(root)]
+        return sorted(r for r in rels if _is_listable(r) and r.startswith(prefix))
 
     def git_status(self, project_dir: StrPath) -> str:
         return self._status_text
@@ -525,7 +605,17 @@ class MCPExecutor(Executor):
         return _run_async(self._tools[name].ainvoke(args))
 
     # shared primitives
-    def run_command(self, cmd: Sequence[str], cwd: StrPath = ".", timeout: float | None = None) -> RunResult:
+    def run_command(
+        self,
+        cmd: Sequence[str],
+        cwd: StrPath = ".",
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunResult:
+        # ``env`` is accepted for interface parity but NOT forwarded: the exec-sandbox owns its own
+        # child environment (tools/exec-sandbox/server.py::_child_env) and its run_command tool has
+        # no env parameter. Silently dropping it is correct here — a caller that needs to inject a
+        # credential is on the wrong executor anyway (the sandbox has no egress to reach a remote).
         d = _as_dict(self._invoke("run_command", {"cmd": list(cmd), "cwd": str(cwd), "timeout": timeout}))
         # `.get(key, default)` only substitutes the default when the KEY IS ABSENT — a sandbox
         # payload with the key present but JSON null (e.g. {"stderr": null}) passes straight
@@ -552,6 +642,20 @@ class MCPExecutor(Executor):
 
     def read_file(self, path: StrPath) -> str:
         return _as_text(self._invoke("read_file", {"path": str(path)}))
+
+    def list_files(self, project_dir: StrPath, prefix: str = "") -> list[str]:
+        """``git ls-files`` in the sandbox, falling back to ``find`` for a non-git tree.
+
+        There is no MCP ``list_files`` tool, so this goes through ``run_command`` — the sandbox's
+        only enumeration route. Tracked-files-first is deliberate: it is the cheap answer and it
+        already excludes whatever the project's own .gitignore excludes.
+        """
+        res = self.run_command(["git", "ls-files"], cwd=project_dir)
+        if res.exit_code != 0 or not res.stdout.strip():
+            res = self.run_command(["find", ".", "-type", "f"], cwd=project_dir)
+            if res.exit_code != 0:
+                return []
+        return clean_listing(res.stdout, prefix)
 
     def git_status(self, project_dir: StrPath) -> str:
         return _as_text(self._invoke("git_status", {"project_dir": str(project_dir)}))

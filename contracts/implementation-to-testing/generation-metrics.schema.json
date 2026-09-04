@@ -1,0 +1,44 @@
+{
+  "additionalProperties": false,
+  "description": "Aggregate code-generation metrics for one run.",
+  "properties": {
+    "compile_failures": {
+      "default": 0,
+      "description": "Files belonging to escalated work items.",
+      "minimum": 0,
+      "title": "Compile Failures",
+      "type": "integer"
+    },
+    "compile_passes": {
+      "default": 0,
+      "description": "Files belonging to work items that cleared the gate.",
+      "minimum": 0,
+      "title": "Compile Passes",
+      "type": "integer"
+    },
+    "files_produced": {
+      "default": 0,
+      "description": "Total files written. DENOMINATOR for '% accepted without rewrite'.",
+      "minimum": 0,
+      "title": "Files Produced",
+      "type": "integer"
+    },
+    "repairs_used": {
+      "default": 0,
+      "description": "Total local repair attempts across every work item.",
+      "minimum": 0,
+      "title": "Repairs Used",
+      "type": "integer"
+    },
+    "seconds_per_item": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "description": "Wall-clock seconds per work item, keyed by WorkItem.id.",
+      "title": "Seconds Per Item",
+      "type": "object"
+    }
+  },
+  "title": "GenerationMetrics",
+  "type": "object"
+}

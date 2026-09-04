@@ -51,6 +51,40 @@ class WorkflowState(TypedDict, total=False):
     # name. Values are the artifact content (str) or parsed structures. Schema = 27 inputs, TBD.
     design_package: dict[str, Any]
 
+    # --- Brownfield input (an EXISTING codebase + a change request, instead of a design pack) ---
+    # "greenfield" (default, and what an absent value means) builds a new app from design_package.
+    # "brownfield" clones source_repo_url and implements change_request against it. Read ONLY by
+    # router.route_entry — no node branches on it (CLAUDE.md rule 3: branching lives in the router).
+    source_mode: str
+    # The EXISTING repo to modify. Deliberately NOT ``repo_url``: that one is an OUTPUT, written by
+    # the scaffold/commit push steps, and overloading it would make "did we create this repo or was
+    # it handed to us?" unanswerable — the single most dangerous ambiguity in brownfield mode.
+    source_repo_url: str
+    # {id, title, kind, description, acceptance_criteria[], constraints[]}. A plain dict, not a
+    # model: graph._build_checkpointer allow-lists WorkItem alone for msgpack, so any other pydantic
+    # type on state silently deserialises to a bare dict after a checkpoint round-trip. Shape is
+    # validated at the API boundary instead (api/request_models.py).
+    change_request: dict[str, Any]
+    base_ref: str          # branch/tag/sha to start from; "" = the repo's default branch
+
+    # --- Brownfield internals (written by acquire_repo_node) ---
+    base_sha: str                       # commit the clone was pinned at — the diff baseline
+    baseline_digests: dict[str, str]    # project-relative path -> sha256 BEFORE any edit
+    repo_inventory: dict[str, Any]      # RepoInventory.as_dict(): what the acquired repo contains
+    change_plan_notes: str              # the planner's rationale / refusal reason, for the report
+    change_plan_errors: list[str]       # why a proposed plan was rejected ([] = it was accepted)
+    change_impacts: dict[str, list[str]]  # planned target -> files importing it (blast radius)
+    changed_files: list[str]            # the change set this run actually wrote
+    test_command: str                   # how this repo tests itself, and the evidence for it
+    baseline_test: dict[str, Any]       # the suite's result BEFORE any edit
+    verify_test: dict[str, Any]         # ...and after
+    # passed | regressed | preexisting | fixed | unverified. 'unverified' is NOT a pass: it
+    # means the suite could not run, so nothing was proven either way.
+    verify_verdict: str
+    modifier_notes: str                 # the editing agent's own account of what it changed
+    change_report: str                  # Markdown record of the brownfield run
+    change_report_path: str
+
     # --- Code Generation (IMP-001) internals ---
     work_items: list[WorkItem]            # design package decomposed into units of work
     work_item_index: int                  # graph cursor: index of the NEXT item to select
@@ -117,6 +151,11 @@ class WorkflowState(TypedDict, total=False):
     # ``commit_sha`` is the exact commit Code Review pinned for the audit trail.
     branch: str
     commit_sha: str
+    # The branch ``finalize`` opens its PR AGAINST. Empty/absent means "main" — correct for a repo
+    # this service scaffolded, since publish_scaffold creates main itself. It is a field rather than
+    # a literal because a repo we did NOT create may use master/develop/trunk, and a PR against a
+    # branch that does not exist fails at the very last step of a multi-hour run.
+    base_branch: str
 
     # --- Downstream pipeline agent outputs (each agent writes only its own) ---
     review_report: str          # Code Review: the Markdown report content
@@ -172,6 +211,10 @@ def new_state(
     push_enabled: bool = False,
     git_remote: str = "",
     git_token: str = "",
+    source_mode: str = "greenfield",
+    source_repo_url: str = "",
+    change_request: dict[str, Any] | None = None,
+    base_ref: str = "",
 ) -> WorkflowState:
     """Build the initial state for a run.
 
@@ -193,6 +236,12 @@ def new_state(
         "run_id": run_id,
         "attempt": attempt,
         "design_package": design_package or {},
+        # Brownfield inputs. Defaulted so every existing (greenfield) caller is byte-identical:
+        # route_entry sends anything that is not "brownfield" to the scaffold lane.
+        "source_mode": source_mode,
+        "source_repo_url": source_repo_url,
+        "change_request": change_request or {},
+        "base_ref": base_ref,
         "work_items": work_items or [],
         "work_item_index": 0,
         "current_work_item": None,

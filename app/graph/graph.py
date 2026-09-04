@@ -91,14 +91,20 @@ from app.agents.repair import repair_node
 from app.config.settings import get_settings
 from app.graph import nodes
 from app.graph.router import (
+    route_after_acquire,
+    route_after_change_gate,
+    route_after_change_plan,
+    route_after_change_verify,
     route_after_codegen,
     route_after_debug_check,
     route_after_gate,
+    route_after_modify,
     route_after_refactoring,
     route_after_security,
     route_after_select,
     route_after_test_generate,
     route_after_test_run,
+    route_entry,
 )
 from app.graph.state import WorkflowState
 from app.models import WorkItem
@@ -160,6 +166,19 @@ def build_graph():
     graph = StateGraph(WorkflowState)
 
     graph.add_node("scaffold", nodes.scaffold_node)
+    # Brownfield entry: clone + survey an EXISTING repo. The greenfield peer of scaffold, and
+    # separate from it on purpose — see acquire_repo_node's docstring for why routing around
+    # scaffold (rather than guarding inside it) is the only safe shape.
+    graph.add_node("acquire", nodes.acquire_repo_node)
+    # Decides WHICH files the change request touches (the brownfield peer of plan_builder),
+    # then validates that proposal against the repo actually cloned.
+    graph.add_node("change_plan", nodes.change_plan_node)
+    # The brownfield edit loop: implement one planned item, then PROVE it changed what it
+    # claimed and nothing else (files_complete cannot — every target already exists).
+    graph.add_node("code_modifier", nodes.code_modifier_node)
+    graph.add_node("change_gate", nodes.change_gate_node)
+    graph.add_node("change_verify", nodes.change_verify_node)
+    graph.add_node("change_commit", nodes.change_commit_node)
     graph.add_node("select", nodes.select_work_item_node)
     graph.add_node("code_generator", nodes.code_generator_node)
     graph.add_node("gate", nodes.gate_node)
@@ -183,12 +202,48 @@ def build_graph():
     graph.add_node("finalize", nodes.finalize_node)
     graph.add_node("package", nodes.package_node)
 
-    graph.add_edge(START, "scaffold")
+    # The one place the two modes diverge. Absent/any-other source_mode -> scaffold, so every
+    # existing greenfield caller takes the identical path it always did.
+    graph.add_conditional_edges(
+        START, route_entry, {"scaffold": "scaffold", "acquire": "acquire"},
+    )
     graph.add_edge("scaffold", "select")
+    graph.add_conditional_edges(
+        "acquire", route_after_acquire,
+        {"change_plan": "change_plan", "escalate": "escalate"},
+    )
+    graph.add_conditional_edges(
+        "change_plan", route_after_change_plan,
+        {"select": "select", "escalate": "escalate"},
+    )
+    graph.add_conditional_edges(
+        "code_modifier", route_after_modify,
+        {"change_gate": "change_gate", "escalate": "escalate"},
+    )
+    # Pass -> next item; fail under the cap -> back to the SAME agent with the gate's reasons
+    # (they are written to be actionable by it); at the cap -> escalate. Same shape and same
+    # REPAIR_CAP as the greenfield gate/repair loop.
+    graph.add_conditional_edges(
+        "change_gate", route_after_change_gate,
+        {"select": "select", "code_modifier": "code_modifier", "escalate": "escalate"},
+    )
+    # Verify BEFORE committing: a regression should not produce a commit and a pull request.
+    graph.add_conditional_edges(
+        "change_verify", route_after_change_verify,
+        {"change_commit": "change_commit", "escalate": "escalate"},
+    )
+    # The shared quality back half (code_review -> refactoring -> debug/test -> security) is
+    # deliberately NOT on this lane: it needs Docker, and Refactoring has no allowed_paths fence,
+    # so it would edit files outside the validated plan and break the containment property the
+    # change gate exists to enforce. Verification here is the repo's OWN suite instead.
+    graph.add_edge("change_commit", "finalize")
     graph.add_conditional_edges(
         "select",
         route_after_select,
-        {"code_generator": "code_generator", "commit": "reconcile"},
+        {
+            "code_generator": "code_generator", "commit": "reconcile",   # greenfield
+            "code_modifier": "code_modifier", "change_commit": "change_verify",  # brownfield
+        },
     )
     graph.add_edge("reconcile", "commit")  # deterministic wiring pass, then the run-level commit
     graph.add_conditional_edges(

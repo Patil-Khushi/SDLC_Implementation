@@ -1,0 +1,102 @@
+{
+  "additionalProperties": false,
+  "description": "A single, independently generatable unit of work.",
+  "properties": {
+    "acceptance_criteria": {
+      "description": "Observable conditions that make this item done, carried from the change request so generated tests can target the requested behaviour rather than just the module's existing surface.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Acceptance Criteria",
+      "type": "array"
+    },
+    "action": {
+      "default": "create",
+      "description": "What this item does to its target_files. 'create' (the default, and what a design-pack plan always means) writes files that do not exist yet. 'modify' edits files that DO exist \u2014 the distinction the completeness gate cannot make on its own, since an already-present file passes files_complete without being touched. 'delete' removes them.",
+      "enum": [
+        "create",
+        "modify",
+        "delete"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "change_intent": {
+      "default": "",
+      "description": "For a brownfield item: what must change in these files and why, in prose. The per-item slice of the change request, and the editing agent's actual instruction \u2014 file_specs describes what a file must CONTAIN, this describes what must CHANGE about it.",
+      "title": "Change Intent",
+      "type": "string"
+    },
+    "endpoints": {
+      "description": "API endpoints covered, e.g. 'POST /login' (FastAPI).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Endpoints",
+      "type": "array"
+    },
+    "feature_id": {
+      "default": "",
+      "description": "User-feature this item belongs to, e.g. '4.1' (from user_features.json) or 'F-02' (from user-features.md). Items sharing a feature_id are committed together as ONE feat(...) commit. Empty = ungrouped (committed on its own, keyed by id).",
+      "title": "Feature Id",
+      "type": "string"
+    },
+    "feature_title": {
+      "default": "",
+      "description": "Human-readable feature name for the commit subject, e.g. 'User Registration and Authentication'.",
+      "title": "Feature Title",
+      "type": "string"
+    },
+    "file_specs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Optional per-target-file spec (path -> what the file must contain), taken verbatim from the design package's structure tree. Grounds generation of files that aren't tied to a single endpoint/screen (app entrypoints, config, middleware, stores).",
+      "title": "File Specs",
+      "type": "object"
+    },
+    "id": {
+      "description": "Stable id, e.g. 'WI-001'. Join key for summaries/metrics.",
+      "minLength": 1,
+      "title": "Id",
+      "type": "string"
+    },
+    "requirement_ids": {
+      "description": "REQ IDs this work item implements (traceability).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Requirement Ids",
+      "type": "array"
+    },
+    "screens": {
+      "description": "UI screens covered (React/TS).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Screens",
+      "type": "array"
+    },
+    "tables": {
+      "description": "Database tables/entities this work item touches.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Tables",
+      "type": "array"
+    },
+    "target_files": {
+      "description": "Workspace-relative file paths this item should produce.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Target Files",
+      "type": "array"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "WorkItem",
+  "type": "object"
+}

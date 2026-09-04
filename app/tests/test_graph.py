@@ -255,10 +255,15 @@ def test_security_approve_opens_pr_and_builds_package(monkeypatch) -> None:
     assert final["security_verdict"] == "approve"
     assert final["finalize_status"] == "pr_created"
     assert final["pr_url"] == "https://github.com/acme/generated-app/pull/1000"
-    assert fake_github.calls == [
-        {"owner": "acme", "repo": "generated-app", "head": "dev", "base": "main",
-         "title": "Security-approved: merge dev into main"}
-    ]
+    assert len(fake_github.calls) == 1                      # idempotent: one PR, not one per retry
+    call = fake_github.calls[0]
+    assert {k: call[k] for k in ("owner", "repo", "head", "base", "title")} == {
+        "owner": "acme", "repo": "generated-app", "head": "dev", "base": "main",
+        "title": "Security-approved: merge dev into main",
+    }
+    # Greenfield PRs are NOT drafts: this service created the repo, so there is no third party
+    # whose code is being changed. Only brownfield opens drafts.
+    assert call["draft"] is False
     assert Path(final["package_path"]).exists()
 
 

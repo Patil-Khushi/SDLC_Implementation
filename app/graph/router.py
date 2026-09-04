@@ -34,15 +34,83 @@ DEBUG_CAP = 10
 SECURITY_LOOP_CAP = 3
 
 
-def route_after_select(state: WorkflowState) -> str:
-    """After selecting: generate the next item, or auto-commit when the plan is exhausted.
+def route_entry(state: WorkflowState) -> str:
+    """Which lane a run enters: build a new app, or change an existing one.
 
-    With human-in-the-loop removed, an exhausted plan goes straight to the single run-level
-    commit — there is no batch-review approval and no rework queue.
+    The ONE place the two modes diverge. Anything that is not explicitly ``"brownfield"`` — an
+    absent field, an empty string, a legacy checkpoint written before this field existed — takes
+    the greenfield lane, so every existing caller is byte-identical.
+
+    An explicit field rather than the key-presence trick ``route_after_refactoring`` uses: this
+    decision determines whether ``scaffold_node`` runs, and ``scaffold_node`` against a clone
+    overwrites the repo's manifests and fast-forwards them onto its default branch. A decision
+    with that blast radius has to be readable in a checkpoint, not inferred.
     """
+    return "acquire" if state.get("source_mode") == "brownfield" else "scaffold"
+
+
+def route_after_acquire(state: WorkflowState) -> str:
+    """After acquiring a repo: plan the change, or escalate a failed acquisition.
+
+    Routes on the PRODUCT of acquisition (an inventory) rather than on a status string: the
+    inventory is what the planner needs, so "is there one?" is the question that actually matters,
+    and it cannot drift the way a status label can.
+    """
+    return "change_plan" if state.get("repo_inventory") else "escalate"
+
+
+def route_after_change_plan(state: WorkflowState) -> str:
+    """After planning: implement the plan, or escalate when there isn't one.
+
+    ``work_items`` is empty for all three failure shapes — the planner refused as out-of-scope, its
+    reply was unusable, or the validator rejected the plan — and populated only when a plan
+    survived validation. So this one check covers every way planning can fail to produce work.
+    """
+    return "select" if state.get("work_items") else "escalate"
+
+
+def route_after_modify(state: WorkflowState) -> str:
+    """After an edit attempt: verify it, or escalate an item the model declined to implement.
+
+    Mirrors ``route_after_codegen``. ``codegen_ok`` is False when the modifier wrote nothing —
+    which the change gate would fail anyway, but escalating here reports the model's OWN reason
+    ("the code does not do what the work item assumes") instead of the gate's symptom
+    ("no change detected").
+    """
+    return "change_gate" if state.get("codegen_ok", True) else "escalate"
+
+
+def route_after_change_gate(state: WorkflowState) -> str:
+    """After verifying an edit: next item, retry, or escalate at the cap.
+
+    Deliberately the same shape and the same ``REPAIR_CAP`` as ``route_after_gate``. A retry goes
+    back to the MODIFIER (not to a separate repair agent): the gate's failure text — "no change
+    detected in X", "file(s) changed that no work item claimed" — is written to be actionable by
+    the same agent that made the edit, and a second agent would have to re-read everything the
+    first one just read.
+    """
+    result = state.get("gate_result")
+    if result and result.get("passed"):
+        return "select"
+    # Pure, like every other router here: the counter is incremented by the node that retries
+    # (CodeModifierAgent on re-entry), exactly as repair_node owns it on the greenfield lane.
+    return "code_modifier" if int(state.get("repair_attempt", 0)) < REPAIR_CAP else "escalate"
+
+
+def route_after_select(state: WorkflowState) -> str:
+    """After selecting: work the next item, or wrap up when the plan is exhausted.
+
+    With human-in-the-loop removed, an exhausted plan goes straight to the commit step — there is
+    no batch-review approval and no rework queue.
+
+    Both lanes share ``select`` (the cursor walk over ``work_items`` is identical) and diverge
+    here, because what "work an item" means is the whole difference between the modes: greenfield
+    GENERATES a file that does not exist, brownfield EDITS one that does.
+    """
+    brownfield = state.get("source_mode") == "brownfield"
     if state.get("current_work_item") is None:
-        return "commit"
-    return "code_generator"
+        return "change_commit" if brownfield else "commit"
+    return "code_modifier" if brownfield else "code_generator"
 
 
 def route_after_codegen(state: WorkflowState) -> str:
@@ -130,3 +198,18 @@ def route_after_refactoring(state: WorkflowState) -> str:
     is written only once Security has actually run — its presence on state is exactly the signal
     that this call is a security-loop re-entry, not the original code-review-triggered one."""
     return "security" if "security_verdict" in state else "debug_check"
+
+
+def route_after_change_verify(state: WorkflowState) -> str:
+    """After re-running the repository's own tests: commit, or stop on a regression.
+
+    Only ``regressed`` blocks — the suite passed before this change and fails now. Everything else
+    proceeds to a DRAFT pull request a human must review:
+
+    * ``preexisting`` — it was already failing; blaming the change would make every repo with a red
+      suite un-changeable.
+    * ``unverified`` — the suite could not run (missing dev dependency, no tests). Nothing was
+      proven, which is not the same as something being wrong. The report and the PR both say so
+      plainly, so the reviewer knows what they are and are not being handed.
+    """
+    return "escalate" if state.get("verify_verdict") == "regressed" else "change_commit"

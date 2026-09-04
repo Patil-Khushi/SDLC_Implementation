@@ -28,7 +28,7 @@ from typing import Any
 from app.agents.base import BaseAgent
 from app.config.settings import get_settings
 from app.graph.state import WorkflowState
-from app.integrations.review_sandbox import ReviewSandbox, get_review_sandbox
+from app.integrations.review_sandbox import ReviewSandbox, get_review_sandbox, is_allowed_repo_url
 from app.integrations.sonarqube import SonarMeasures, SonarQubeClient, SonarResult, get_sonarqube_client
 from app.services import finding_aggregator as agg
 from app.services.llm_gateway import LLMGateway
@@ -42,11 +42,8 @@ _PY_EXTS = (".py",)
 _JS_EXTS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 _SOURCE_EXTS = _PY_EXTS + _JS_EXTS
 _VERDICT = ("approve", "changes_requested")
-# The sandbox has network egress (see review_sandbox.py), so repo_url reaching `git clone` with no
-# scheme/host check is a clone-anything primitive (internal hosts, cloud-metadata-adjacent
-# addresses, etc.) - SSRF-shaped, once repo_url is wired to any less-trusted source than today's
-# CLI. Restrict to public GitHub HTTPS URLs, the only source this pipeline actually expects.
-_ALLOWED_REPO_RE = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+(?:\.git)?/?$")
+# The clone allowlist (SSRF guard) lives in review_sandbox.is_allowed_repo_url and is SHARED by
+# every agent that clones - a private copy here would let the two drift apart silently.
 
 
 class CodeReviewAgent(BaseAgent):
@@ -88,7 +85,7 @@ class CodeReviewAgent(BaseAgent):
                              SonarMeasures(error="not run"))
             return self._finish(state, project_id, run_id, report, [])
 
-        if not _ALLOWED_REPO_RE.match(repo_url):
+        if not is_allowed_repo_url(repo_url):
             logger.warning("Refusing to clone disallowed repo_url: %s", repo_url)
             review = _empty_review(
                 f"Repository URL '{repo_url}' is not an allowed GitHub URL (expected "

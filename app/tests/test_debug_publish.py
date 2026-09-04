@@ -25,8 +25,8 @@ class _SweepExecutor(FakeExecutor):
         self._sweep_result = sweep_result or RunResult(stdout="pushed", stderr="", exit_code=0)
         self._sweep_raises: Exception | None = None
 
-    def publish_sweep(self, project_dir, *, token=None) -> RunResult:
-        self.sweep_calls.append((project_dir, token))
+    def publish_sweep(self, project_dir, *, feature_branch="dev", token=None) -> RunResult:
+        self.sweep_calls.append((project_dir, feature_branch, token))
         if self._sweep_raises:
             raise self._sweep_raises
         return self._sweep_result
@@ -48,7 +48,7 @@ def test_noop_when_loop_produced_nothing() -> None:
     ex = FakeExecutor()
     set_executor(ex)
     try:
-        out = debug_publish_node(_state(unit_tests=[], debug_attempt=0))  # type: ignore[arg-type]
+        out = debug_publish_node(_state(unit_tests=[], debug_rounds=0))  # type: ignore[arg-type]
         assert ex.commits == []                       # no commit at all
         assert "workflow_status" not in out           # never stamps a terminal status
         assert "[publish]" not in (out.get("generation_summary") or "")
@@ -57,11 +57,31 @@ def test_noop_when_loop_produced_nothing() -> None:
 
 
 def test_acts_when_only_debug_ran_even_without_tests() -> None:
-    # Debug agent ran (debug_attempt>0) but no unit tests on record -> still persist the fixes.
+    # Debug agent ran (debug_rounds>0) but no unit tests on record -> still persist the fixes.
     ex = FakeExecutor()
     set_executor(ex)
     try:
-        out = debug_publish_node(_state(unit_tests=[], debug_attempt=2))  # type: ignore[arg-type]
+        out = debug_publish_node(_state(unit_tests=[], debug_rounds=2))  # type: ignore[arg-type]
+        assert len(ex.commits) == 1
+        assert "[publish]" in out["generation_summary"]
+    finally:
+        set_executor(None)
+
+
+def test_acts_when_debug_made_progress_and_reset_its_attempt_counter() -> None:
+    """The guard must read ``debug_rounds``, not ``debug_attempt``.
+
+    ``debug_attempt`` is progress-SENSITIVE: debugging.py resets it to 0 on any round that reduced
+    the failure count. So the SUCCESS case — the loop ran, fixed the build, and reset the counter —
+    presents as ``debug_attempt == 0``. Keying the no-op guard off it silently skipped publishing
+    exactly the runs that worked; only a run that never made progress would have published.
+    """
+    ex = FakeExecutor()
+    set_executor(ex)
+    try:
+        out = debug_publish_node(
+            _state(unit_tests=[], debug_rounds=3, debug_attempt=0)  # type: ignore[arg-type]
+        )
         assert len(ex.commits) == 1
         assert "[publish]" in out["generation_summary"]
     finally:
@@ -86,7 +106,7 @@ def test_uses_publish_sweep_when_push_enabled_and_supported() -> None:
     set_executor(ex)
     try:
         out = debug_publish_node(_state(push_enabled=True, git_remote="owner/repo", git_token="tok"))  # type: ignore[arg-type]
-        assert ex.sweep_calls == [("p1", "tok")]
+        assert ex.sweep_calls == [("p1", "dev", "tok")]
         assert ex.commits == []                       # push path used publish_sweep, NOT git_commit
         assert "pushed to 'dev'" in out["generation_summary"]
         assert "workflow_status" not in out

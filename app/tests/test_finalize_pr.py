@@ -165,8 +165,10 @@ class _StubClient:
     def __init__(self, result: PRResult) -> None:
         self._result = result
         self.token_seen: str | None = "<not called>"
+        self.call_args: tuple[Any, ...] = ()
 
-    def create_or_update_pull_request(self, *_args: Any, **_kw: Any) -> PRResult:
+    def create_or_update_pull_request(self, *args: Any, **_kw: Any) -> PRResult:
+        self.call_args = args
         return self._result
 
 
@@ -179,11 +181,14 @@ def _finalize_with(monkeypatch: Any, result: PRResult, **state_kw: Any) -> dict[
         return stub
 
     monkeypatch.setattr(nodes_module, "get_github_client", fake_get_client)
+    base_branch = state_kw.pop("base_branch", None)
     state = new_state(run_id="r1", attempt=0, project_id="p1", **state_kw)
     state["repo_url"] = _REPO_URL
     state["branch"] = "dev"
+    if base_branch is not None:
+        state["base_branch"] = base_branch
     out = finalize_node(state)
-    return {"state": out, "token": captured.get("token")}
+    return {"state": out, "token": captured.get("token"), "call_args": stub.call_args}
 
 
 def test_finalize_passes_the_runs_own_push_credential(monkeypatch: Any) -> None:
@@ -224,3 +229,33 @@ def test_finalize_without_repo_url_says_why_it_skipped(monkeypatch: Any) -> None
     assert out["finalize_status"] == "skipped"
     assert "SKIPPED" in out["generation_summary"] and "no repo_url" in out["generation_summary"]
     assert "pr_url" not in out or not out.get("pr_url")
+
+
+# --- the PR base branch is a state field, not a literal ---------------------------------------
+# "main" is only correct for a repo this service scaffolded (publish_scaffold creates main itself).
+# A repo we did NOT create may use master/develop/trunk, and a PR opened against a branch that does
+# not exist fails at the very last step of a multi-hour run.
+
+
+def test_pr_base_defaults_to_main_when_unset(monkeypatch: Any) -> None:
+    # Back-compat: every existing caller sets no base_branch and must keep targeting main.
+    got = _finalize_with(monkeypatch, PRResult(ok=True, url=_PR_URL))
+    _owner, _repo, head, base, title, _body = got["call_args"]
+    assert (head, base) == ("dev", "main")
+    assert "into main" in title
+
+
+def test_pr_base_follows_state_base_branch(monkeypatch: Any) -> None:
+    got = _finalize_with(monkeypatch, PRResult(ok=True, url=_PR_URL), base_branch="master")
+    _owner, _repo, head, base, title, _body = got["call_args"]
+    assert (head, base) == ("dev", "master")
+    assert "into master" in title          # the title must not keep claiming "main"
+
+
+def test_failed_pr_summary_names_the_real_base(monkeypatch: Any) -> None:
+    # The summary line is the only durable trace of a PR failure — it has to name the branch that
+    # was actually attempted, or debugging a failed run points at the wrong target.
+    got = _finalize_with(
+        monkeypatch, PRResult(ok=False, error="boom"), base_branch="develop"
+    )
+    assert "dev -> develop" in got["state"]["generation_summary"]

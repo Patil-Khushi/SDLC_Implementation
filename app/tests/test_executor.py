@@ -147,3 +147,54 @@ def test_mcp_executor_constructs_and_excludes_git_commit() -> None:
     executor = MCPExecutor(client=None, tools=[])
     assert isinstance(executor, Executor)
     assert "git_commit" not in {getattr(t, "name", None) for t in executor.get_repair_tools()}
+
+
+# --- list_files: the one tree primitive on the interface ---------------------------------------
+# Before this, enumerating a tree meant an ad-hoc run_command(["git","ls-files"]) that every caller
+# re-rolled and that FakeExecutor could not answer (it returns one canned RunResult) — so anything
+# needing a file list was untestable through the normal fake.
+
+
+def test_list_files_enumerates_the_project_relative_tree() -> None:
+    ex = FakeExecutor(files={
+        "proj/src/a.py": "", "proj/src/nested/b.py": "", "proj/README.md": "",
+        "other/c.py": "",                      # a DIFFERENT project — must not leak in
+    })
+    assert ex.list_files("proj") == ["README.md", "src/a.py", "src/nested/b.py"]
+
+
+def test_list_files_filters_by_prefix() -> None:
+    ex = FakeExecutor(files={"proj/src/a.py": "", "proj/tests/t.py": "", "proj/README.md": ""})
+    assert ex.list_files("proj", prefix="src/") == ["src/a.py"]
+
+
+def test_list_files_skips_vcs_dependency_and_build_noise() -> None:
+    # node_modules alone would swamp a listing with tens of thousands of entries.
+    ex = FakeExecutor(files={
+        "proj/src/a.py": "",
+        "proj/node_modules/pkg/index.js": "",
+        "proj/.git/config": "",
+        "proj/dist/bundle.js": "",
+        "proj/src/__pycache__/a.pyc": "",
+    })
+    assert ex.list_files("proj") == ["src/a.py"]
+
+
+def test_list_files_is_empty_for_an_unknown_project() -> None:
+    # "Nothing to list" is a legitimate answer for a caller surveying a tree — never an exception.
+    assert FakeExecutor(files={"proj/a.py": ""}).list_files("does-not-exist") == []
+
+
+def test_clean_listing_normalizes_both_backends_identically() -> None:
+    # git ls-files emits bare paths; `find .` prefixes ./ — the two backends must agree on a tree.
+    from app.integrations.executor import clean_listing
+
+    git_out = "src/a.py\nREADME.md\nnode_modules/x/i.js\n"
+    find_out = "./src/a.py\n./README.md\n./node_modules/x/i.js\n"
+    assert clean_listing(git_out) == clean_listing(find_out) == ["README.md", "src/a.py"]
+
+
+def test_list_files_is_on_the_interface() -> None:
+    # It is abstract, so every executor must implement it — that is the point of putting it here
+    # rather than leaving each caller its own git ls-files.
+    assert "list_files" in Executor.__abstractmethods__
