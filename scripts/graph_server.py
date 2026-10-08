@@ -72,11 +72,16 @@ from app.agents.project_qa import ProjectQAAgent, build_facts_for  # noqa: E402
 from app.integrations.review_sandbox import is_allowed_repo_url  # noqa: E402
 from app.models import WorkItem  # noqa: E402
 from app.services import chat_inbox  # noqa: E402
+from app.services.pack_index import load_pack  # noqa: E402
 from app.services import design_pack  # noqa: E402
 from app.services import llm_gateway  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
 from scripts.feature_commit import _DEFAULT_OUT_DIR  # noqa: E402
 from scripts.local_executor import LocalDiskExecutor  # noqa: E402
+
+# Module logger. The brownfield run's error handler logs through it; without it a failing run
+# raised NameError inside its own `except`, so the client never received the error event.
+logger = logging.getLogger(__name__)
 
 
 def _find_repo_root(start: Path) -> Path:
