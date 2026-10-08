@@ -12,6 +12,11 @@ langgraph-checkpoint-sqlite>=2.0,<4.0
 pydantic>=2.9,<3.0
 pydantic-settings>=2.5,<3.0
 
+# Design-pack parsing: YAML OpenAPI specs and capabilities files (app/services/design_pack.py,
+# pack_index.py). Was only present transitively via langchain-core; without it a YAML spec is
+# silently unreadable and every endpoint falls back to the UI mapping CSV.
+PyYAML>=6.0,<7.0
+
 # Deterministic project-scaffold templating (app/services/boilerplate.py)
 jinja2>=3.1,<4.0
 

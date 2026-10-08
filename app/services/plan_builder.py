@@ -60,31 +60,17 @@ def default_fixtures_dir() -> Path:
 
 
 def _load_pack_artifacts(pack: Path) -> dict[str, Any]:
-    """Top-level pack files as a ``name -> content`` dict (.json parsed, else text) — the same
-    shape :func:`app.services.boilerplate.resolve_scaffold_config` expects. Mirrors
-    ``scripts/run_fixture.py``'s ``_load_pack`` (kept as its own small copy here, rather than
-    imported, since ``scripts/`` depends on ``app/``, never the reverse).
+    """Pack files as a ``name -> content`` dict (.json parsed, else text) — the same shape
+    :func:`app.services.boilerplate.resolve_scaffold_config` expects. Delegates to the ONE loader
+    every caller now shares (:func:`app.services.pack_index.load_pack`).
 
     Used ONLY by :func:`_harness_covered_sides` to answer "will the scaffold actually render a
     Jest harness for this side of the pack?" — never fatal on its own; a pack this can't read
     just means that question falls back to its conservative default (see there).
     """
-    package: dict[str, Any] = {}
-    for path in sorted(pack.iterdir()):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, ValueError):
-            continue
-        if path.suffix == ".json":
-            try:
-                package[path.name] = json.loads(text)
-                continue
-            except json.JSONDecodeError:
-                pass
-        package[path.name] = text
-    return package
+    from app.services.pack_index import load_pack  # local: pack_index imports design_pack, as we do
+
+    return load_pack(pack)
 
 
 def _harness_covered_sides(pack: Path) -> tuple[bool, bool]:

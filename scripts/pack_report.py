@@ -34,6 +34,7 @@ from app.agents.code_generator import CodeGeneratorAgent  # noqa: E402
 from app.services import design_pack  # noqa: E402
 from app.services.boilerplate import render_scaffold  # noqa: E402
 from app.services.naming_contract import build_naming_contract_from_package  # noqa: E402
+from app.services.pack_index import PackIndex  # noqa: E402
 from app.services.plan_builder import _load_pack_artifacts, build_plan  # noqa: E402
 
 #: Requirement-like ids anywhere in the requirements artifact (REQ-1, NFR-2, BR-1, CON-1 ...).
@@ -184,9 +185,31 @@ def report_pack(pack_dir: Path, dump_dir: Path | None = None) -> dict[str, Any]:
         if rid in text_in_prompt:
             bucket["text_in_prompt"] += 1
 
+    # --- what the shape-based index can SEE (independent of whether a prompt uses it yet)
+    index = PackIndex(package)
+    spec = index.openapi() or {}
+    operations = sum(
+        1 for item in (spec.get("paths") or {}).values() if isinstance(item, dict)
+        for method in item if method.lower() in {"get", "post", "put", "patch", "delete"}
+    )
+    tables = index.tables()
+    pack_index = {
+        "roles": index.roles(),
+        "openapi_operations": operations,
+        "openapi_component_schemas": len(((spec.get("components") or {}).get("schemas") or {})),
+        "tables": len(tables),
+        "tables_with_enums": sum(1 for t in tables if t["enums"]),
+        "conventions_chars": len(index.conventions_text()),
+        "validation_groups": len(index.validation_rules() or {}),
+        "sample_payloads": len(index.sample_payloads() or {}),
+        "env_vars": len(index.env_vars()),
+        "requirements_with_text": sum(len(v) for k, v in index.requirements().items() if k != "constraints"),
+    }
+
     result: dict[str, Any] = {
         "pack": str(pack_dir),
         "files_loaded": len(package),
+        "pack_index": pack_index,
         "roles": role_files,
         "unknown_files": len(role_files.get("unknown", [])),
         "work_items": [
@@ -227,6 +250,17 @@ def _print(result: dict[str, Any]) -> None:
     for role, files in sorted(result["roles"].items()):
         if role != "unknown":
             print(f"  role {role:20s} {', '.join(files)}")
+
+    pi = result["pack_index"]
+    print(
+        f"\npack index (what the pipeline can now FIND): {pi['openapi_operations']} API operations, "
+        f"{pi['openapi_component_schemas']} component schemas, {pi['tables']} tables "
+        f"({pi['tables_with_enums']} with enums), conventions {pi['conventions_chars']} chars, "
+        f"{pi['validation_groups']} validation groups, {pi['sample_payloads']} sample payloads, "
+        f"{pi['env_vars']} env vars, {pi['requirements_with_text']} requirements with text"
+    )
+    for role, names in pi["roles"].items():
+        print(f"  index role {role:18s} {', '.join(names)}")
 
     nc = result["naming_contract"]
     print(f"\nnaming contract: {nc['chars']} chars, {nc['entities']} entities, {nc['endpoints']} endpoints")

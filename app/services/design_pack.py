@@ -26,10 +26,11 @@ detector recognized.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import re
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,81 @@ except Exception:  # pragma: no cover - yaml is in requirements, this is just be
     yaml = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def _json_compatible_yaml_loader() -> Any:
+    """A safe YAML loader (libyaml-backed when available) that leaves dates/timestamps as strings.
+
+    Two reasons. Speed: a real 110 KB OpenAPI spec takes ~1-2 s with the pure-Python loader and a
+    fraction of that with ``CSafeLoader``. Shape: a design package must stay JSON-compatible (the
+    REST API takes it as JSON, and it rides in every checkpoint), but YAML's implicit timestamp
+    rule turns an unquoted ``2024-08-15`` example into a ``datetime.date`` that JSON cannot carry.
+    """
+    if yaml is None:
+        return None
+    base = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+    class _JsonCompatLoader(base):  # type: ignore[misc, valid-type]
+        pass
+
+    _JsonCompatLoader.yaml_implicit_resolvers = {
+        first: [r for r in resolvers if r[0] != "tag:yaml.org,2002:timestamp"]
+        for first, resolvers in base.yaml_implicit_resolvers.items()
+    }
+    return _JsonCompatLoader
+
+
+_YAML_LOADER = _json_compatible_yaml_loader()
+
+
+def load_yaml(text: str) -> Any:
+    """Parse YAML text with :data:`_YAML_LOADER`; raises on malformed input like ``yaml.load``."""
+    if yaml is None or _YAML_LOADER is None:
+        raise ValueError("PyYAML is not installed")
+    return yaml.load(text, Loader=_YAML_LOADER)  # noqa: S506 - a SafeLoader subclass
+
+
+#: Parsed JSON/YAML keyed by content hash. A design package is re-indexed for every work item, and
+#: parsing a large OpenAPI spec costs real time — once per process per distinct text is enough.
+_PARSE_CACHE: OrderedDict[str, Any] = OrderedDict()
+_PARSE_CACHE_MAX = 64
+
+
+def parse_structured_text(text: str, *, yaml_ok: bool = True) -> Any:
+    """JSON (when it looks like JSON) or YAML text -> object, cached; ``None`` when unparseable.
+
+    Callers must treat the returned object as read-only: it is shared through the cache.
+    """
+    digest = hashlib.sha1(f"{int(yaml_ok)}\0{text}".encode("utf-8", "replace")).hexdigest()
+    if digest in _PARSE_CACHE:
+        _PARSE_CACHE.move_to_end(digest)
+        return _PARSE_CACHE[digest]
+    try:
+        if text.lstrip()[:1] in ("{", "["):
+            obj = json.loads(text)
+        elif yaml_ok:
+            obj = load_yaml(text)
+        else:
+            obj = None
+    except Exception:  # noqa: BLE001 - malformed is just "not structured"
+        obj = None
+    _PARSE_CACHE[digest] = obj
+    if len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
+        _PARSE_CACHE.popitem(last=False)
+    return obj
+
+
+#: Files the Design phase's own tooling leaves next to the artifacts: its per-stage state dumps,
+#: run signature and orchestrator checkpoint. They are not design artifacts — a stale
+#: ``.backend_structure_state.json`` was picked as THE backend structure purely because it sorts
+#: before ``backend-structure.json`` — so they are never classified or loaded.
+_PIPELINE_STATE_RE = re.compile(r"^(?:\..*state\.json|.+\.state\.json|\.signature\.json)$", re.IGNORECASE)
+
+
+def is_pipeline_state_file(name: str) -> bool:
+    """True for a Design-pipeline bookkeeping file (``.api_contract_state.json``,
+    ``api_contract.state.json``, ``.signature.json`` ...) rather than a design artifact."""
+    return bool(_PIPELINE_STATE_RE.match(Path(str(name)).name))
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
 _STRUCTURE_INDEX_KEYS = ("tree", "structure", "files")
@@ -84,7 +160,7 @@ def _load_structured(path: Path) -> Any:
             return None
     if suffix in (".yaml", ".yml") and yaml is not None:
         try:
-            return yaml.safe_load(text)
+            return load_yaml(text)
         except Exception:  # noqa: BLE001 - malformed YAML is just "not structured"
             return None
     # Unknown extension: try JSON then YAML so a mislabeled file is still understood.
@@ -94,7 +170,7 @@ def _load_structured(path: Path) -> Any:
         pass
     if yaml is not None:
         try:
-            return yaml.safe_load(text)
+            return load_yaml(text)
         except Exception:  # noqa: BLE001
             return None
     return None
@@ -240,6 +316,164 @@ def _is_routes_map(obj: Any) -> bool:
     return len(vals) == len(obj) and sum(1 for v in vals if v.startswith("/")) >= max(3, len(vals) // 2)
 
 
+# --- roles for the artifacts that only ever shape the GENERATED CODE (conventions, tokens, rules,
+# mockup ...). Before these existed every such file was "unknown", so nothing downstream could
+# find it except by guessing its filename — and the guesses were the previous pack format's names
+# (SKILL.md, schema.sql), which is how a whole pack format's conventions and schema went missing.
+
+_RULE_KEYS = {"required", "message", "pattern", "minlength", "maxlength", "min", "max", "enum", "format"}
+_TOKEN_VALUE_RE = re.compile(
+    r"^\s*(?:#[0-9a-fA-F]{3,8}|rgba?\(.+\)|hsla?\(.+\)|-?\d+(?:\.\d+)?(?:px|rem|em|%|ms|s|vh|vw)?"
+    r"|\d+(?:\.\d+)?px\s*/\s*\d+(?:\.\d+)?px|0 \d.*|[\"']?[A-Z][\w -]+[\"']?\s*,.*)\s*$"
+)
+
+
+def _dict_children(obj: Any) -> list[dict[str, Any]]:
+    return [v for v in obj.values() if isinstance(v, dict)] if isinstance(obj, dict) else []
+
+
+def _is_rule_dict(obj: Any) -> bool:
+    return isinstance(obj, dict) and bool({str(k).lower() for k in obj} & _RULE_KEYS)
+
+
+def _is_validation_rules(obj: Any) -> bool:
+    """``{group: {field: {required, message, ...}}}`` (or the flat ``{field: {...}}``) — with at
+    least one human-facing ``message``, which is what the generated code must copy verbatim."""
+    if not isinstance(obj, dict) or _is_openapi(obj):
+        return False
+    for level in (_dict_children(obj), [f for g in _dict_children(obj) for f in _dict_children(g)]):
+        if len(level) >= 2:
+            rules = [d for d in level if _is_rule_dict(d)]
+            if len(rules) >= 2 and len(rules) >= 0.6 * len(level) and any("message" in d for d in rules):
+                return True
+    return False
+
+
+def _leaf_strings(obj: Any, limit: int = 2000) -> list[str]:
+    out: list[str] = []
+    stack = [obj]
+    while stack and len(out) < limit:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, str):
+            out.append(node)
+    return out
+
+
+def _is_design_tokens(obj: Any) -> bool:
+    """Nested name -> colour / size / font values (flat maps or ``{"value": ...}`` token objects)."""
+    if not isinstance(obj, dict):
+        return False
+    leaves = _leaf_strings(obj)
+    hits = sum(1 for leaf in leaves if _TOKEN_VALUE_RE.match(leaf))
+    return hits >= 8 and hits >= 0.4 * len(leaves)
+
+
+def _is_sample_payloads(obj: Any) -> bool:
+    """``{operation: {method, path, request?, responses?}}`` — example traffic per operation."""
+    kids = _dict_children(obj)
+    hits = [k for k in kids if "method" in k and "path" in k and ("responses" in k or "request" in k)]
+    return len(hits) >= 2 and len(hits) >= 0.6 * len(kids)
+
+
+def _is_env_vars(obj: Any) -> bool:
+    groups = obj.get("groups") if isinstance(obj, dict) else None
+    if isinstance(groups, list) and groups and isinstance(groups[0], dict):
+        return isinstance(groups[0].get("vars"), list)
+    items = obj.get("vars") if isinstance(obj, dict) else obj
+    return (
+        isinstance(items, list) and len(items) >= 3
+        and all(isinstance(i, dict) and ("key" in i or "name" in i) for i in items[:5])
+        and any(("example" in i or "default" in i or "value" in i) for i in items[:5])
+    )
+
+
+def _is_conventions_json(obj: Any) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    cats = obj.get("categories")
+    if isinstance(cats, list) and cats and isinstance(cats[0], dict) and "rules" in cats[0]:
+        return True
+    return isinstance(obj.get("headline_rules"), list) and bool(obj["headline_rules"])
+
+
+def _is_glossary(obj: Any) -> bool:
+    terms = obj.get("terms") if isinstance(obj, dict) else None
+    return isinstance(terms, list) and bool(terms) and isinstance(terms[0], dict) and "term" in terms[0]
+
+
+def _is_decisions_json(obj: Any) -> bool:
+    return isinstance(obj, dict) and any(k in obj for k in ("srs_concerns", "decisions", "open_questions"))
+
+
+def _structured_extra_role(obj: Any) -> str:
+    """Role for a parsed JSON/YAML artifact the planning detectors don't use, or ``""``."""
+    for role, test in (
+        ("validation_rules", _is_validation_rules),
+        ("sample_payloads", _is_sample_payloads),
+        ("env_vars", _is_env_vars),
+        ("conventions", _is_conventions_json),
+        ("glossary", _is_glossary),
+        ("decisions", _is_decisions_json),
+        ("design_tokens", _is_design_tokens),
+    ):
+        if test(obj):
+            return role
+    return ""
+
+
+#: Extensions read as documents (markdown, HTML, plain text, env files) — never YAML-parsed:
+#: YAML happily turns a markdown checklist into a list and a ``# heading`` into a comment, which
+#: made every such file "structured but unknown".
+_TEXT_DOC_SUFFIXES = {".md", ".markdown", ".html", ".htm", ".txt", ".mmd", ".mermaid", ".example", ".env"}
+_MERMAID_RE = re.compile(
+    r"^\s*(?:```\s*mermaid\s*\n\s*)?(?:erDiagram|flowchart\b|graph\s+(?:TD|TB|BT|RL|LR)\b|sequenceDiagram|"
+    r"classDiagram|stateDiagram(?:-v2)?|journey|gantt|mindmap)",
+)
+_STATE_LINE_RE = re.compile(r"^\s*[-*]\s*(?:Loading|Empty|Error|Success)\b\s*(?:→|->|:|—|–)", re.IGNORECASE | re.MULTILINE)
+_CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[[ xX]\]", re.MULTILINE)
+_ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?[A-Z][A-Z0-9_]*\s*=", re.MULTILINE)
+_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+)$", re.MULTILINE)
+_RULE_WORDS_RE = re.compile(r"\b(?:must|never|always|do not|don't|prefer|avoid|should|only)\b", re.IGNORECASE)
+_REQ_BULLET_RE = re.compile(r"^\**\[?[A-Z]{2,5}-\d+")
+_CONVENTIONS_NAME_RE = re.compile(r"skill|guideline|convention|style[-_ ]?guide|coding[-_ ]?standard", re.IGNORECASE)
+
+
+def _text_role(name: str, text: str) -> str:
+    """Role for a document-shaped artifact (markdown / HTML / env), or ``""``."""
+    head = text[:8000]
+    low_name = Path(name).name.lower()
+    if re.search(r"<(?:!doctype html|html|body)\b", head, re.IGNORECASE) or (
+        low_name.endswith((".html", ".htm")) and re.search(r"<(?:section|div|main)\b", head, re.IGNORECASE)
+    ):
+        return "mockup"
+    if _MERMAID_RE.match(text):
+        return "diagrams"
+    content_lines = [ln for ln in head.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    env_lines = _ENV_LINE_RE.findall(head)
+    if len(env_lines) >= 3 and len(env_lines) >= 0.6 * len(content_lines):
+        return "env_vars"   # mostly KEY=value lines: a .env.example, not a doc quoting a few
+    if len(_STATE_LINE_RE.findall(text)) >= 3:
+        return "state_transitions"
+    if re.search(r"^#{1,3}\s*(?:Chosen\b|.*Design Decision)", head, re.MULTILINE):
+        return "decisions"
+    if re.match(r"^\s*#\s*Glossary\b", head, re.IGNORECASE):
+        return "glossary"
+    bullets = _BULLET_RE.findall(text)
+    rule_bullets = [b for b in bullets if _RULE_WORDS_RE.search(b)]
+    req_bullets = [b for b in bullets if _REQ_BULLET_RE.match(b.strip())]
+    if _CONVENTIONS_NAME_RE.search(low_name) and (rule_bullets or bullets):
+        return "conventions"
+    if len(rule_bullets) >= 8 and len(req_bullets) < 3:
+        return "conventions"
+    if len(_CHECKBOX_RE.findall(text)) >= 5:
+        return "manifest_index"
+    return ""
+
+
 def _table_endpoint_columns(headers: list[str]) -> tuple[str | None, str | None]:
     """Locate the (screen, endpoint) columns in a UI↔API table by fuzzy header names."""
     low = {h.lower(): h for h in headers if h}
@@ -320,7 +554,7 @@ def detect_roles(pack_dir: str | Path) -> dict[str, list[DetectedFile]]:
         return True
 
     for path in sorted(pack.iterdir()):
-        if not path.is_file():
+        if not path.is_file() or is_pipeline_state_file(path.name):
             continue
         suffix = path.suffix.lower()
 
@@ -333,33 +567,126 @@ def detect_roles(pack_dir: str | Path) -> dict[str, list[DetectedFile]]:
             roles["db_schema"].append(DetectedFile(path, "db_schema", None))
             continue
 
-        # 3. Structured (JSON/YAML) files — parsed FIRST so JSON isn't mistaken for CSV.
-        obj = _load_structured(path)
-        if obj is not None:
-            if _is_openapi(obj):
-                roles["openapi"].append(DetectedFile(path, "openapi", obj))
-            elif _is_user_features(obj):
-                roles["user_features"].append(DetectedFile(path, "user_features", obj))
-            elif _is_requirements(obj):
-                roles["requirements"].append(DetectedFile(path, "requirements", obj))
-            elif _schema_entities(path, obj):
-                roles["db_schema"].append(DetectedFile(path, "db_schema", obj))
-            elif _is_routes_map(obj):
-                roles["routes"].append(DetectedFile(path, "routes", obj))
-            elif _looks_like_tree(obj):
-                side = _structure_side(path, path.read_text(encoding="utf-8-sig", errors="replace"))
-                roles[side].append(DetectedFile(path, side, obj))
-            else:
-                roles.setdefault("unknown", []).append(DetectedFile(path, "unknown", obj))
+        # 3. Documents (markdown / HTML / env files): classified as text, never YAML-parsed.
+        if suffix in _TEXT_DOC_SUFFIXES or path.name.lower().startswith(".env"):
+            try:
+                text = path.read_text(encoding="utf-8-sig", errors="replace")
+            except OSError:
+                text = ""
+            if suffix == ".txt" and "create table" in text.lower():
+                roles["db_schema"].append(DetectedFile(path, "db_schema", None))  # a SQL dump saved as .txt
+                continue
+            role = _text_role(path.name, text)
+            if role:
+                roles[role].append(DetectedFile(path, role, None))
+            elif not _record_table(path):
+                roles.setdefault("unknown", []).append(DetectedFile(path, "unknown", None))
             continue
 
-        # 4. Fallback: a table with a non-standard extension (e.g. .txt, no extension).
+        # 4. Structured (JSON/YAML) files — parsed FIRST so JSON isn't mistaken for CSV.
+        obj = _load_structured(path)
+        if obj is not None and not isinstance(obj, str):
+            role, obj = _structured_role(path, obj)
+            roles[role].append(DetectedFile(path, role, obj))
+            continue
+        if isinstance(obj, str) and "create table" in obj.lower():
+            roles["db_schema"].append(DetectedFile(path, "db_schema", None))  # SQL with an odd extension
+            continue
+
+        # 5. Fallback: a table with a non-standard extension (e.g. no extension).
         if _record_table(path):
             continue
 
         roles.setdefault("unknown", []).append(DetectedFile(path, "unknown", None))
 
     return roles
+
+
+def _structured_role(
+    path: Path, obj: Any, raw_text: str | None = None, *, from_disk: bool = True,
+) -> tuple[str, Any]:
+    """Role of a parsed JSON/YAML artifact — ONE ordered chain shared by :func:`detect_roles`
+    (files on disk) and :func:`classify_value` (an in-memory design package, ``from_disk=False``:
+    a relative artifact name must never be resolved against the process's working directory)."""
+    if _is_openapi(obj):
+        return "openapi", obj
+    if _is_user_features(obj):
+        return "user_features", obj
+    if _is_requirements(obj):
+        return "requirements", obj
+    if _schema_entities(path, obj):
+        return "db_schema", obj
+    if _is_routes_map(obj):
+        return "routes", obj
+    if _looks_like_tree(obj):
+        if raw_text is None and from_disk:
+            try:
+                raw_text = path.read_text(encoding="utf-8-sig", errors="replace")
+            except OSError:
+                raw_text = None
+        return _structure_side(path, raw_text if raw_text is not None else json.dumps(obj)), obj
+    return (_structured_extra_role(obj) or "unknown"), obj
+
+
+def classify_value(name: str, value: Any) -> tuple[str, Any]:
+    """Role of ONE artifact held in memory (``name -> parsed JSON or raw text``), with the object
+    the role's consumers expect: table rows for a mapping, the parsed object for JSON/YAML, the
+    text itself for documents and SQL.
+
+    The in-memory twin of :func:`detect_roles`, so a design package that arrived over the REST API
+    or sits in ``WorkflowState`` is classified by exactly the rules a pack directory is. Never
+    raises: anything unrecognisable is ``("unknown", value)``.
+    """
+    path = Path(str(name))
+    suffix = path.suffix.lower()
+    if is_pipeline_state_file(path.name):
+        return "pipeline_state", value
+    text = value if isinstance(value, str) else None
+
+    def _table() -> tuple[str, Any] | None:
+        rows = _rows_from_delimited_text(text) if text is not None else (
+            value if isinstance(value, list) and value and isinstance(value[0], dict) else []
+        )
+        if not rows:
+            return None
+        screen_col, endpoint_col = _table_endpoint_columns(list(rows[0].keys()))
+        if not (endpoint_col or screen_col):
+            return None
+        return ("rich_api_mapping" if _is_rich_api_mapping(list(rows[0].keys())) else "api_ui_mapping"), rows
+
+    if suffix in (".csv", ".tsv"):
+        table = _table()
+        if table:
+            return table
+    if suffix == ".sql":
+        return "db_schema", text
+    if text is not None and (suffix in _TEXT_DOC_SUFFIXES or path.name.lower().startswith(".env")):
+        if suffix == ".txt" and "create table" in text.lower():
+            return "db_schema", text            # a SQL dump saved as .txt (same rule as detect_roles)
+        role = _text_role(path.name, text)
+        if role:
+            return role, text
+        return _table() or ("unknown", text)
+
+    obj: Any = None if text is not None else value
+    if text is not None:
+        stripped = text.lstrip()
+        if suffix == ".json" or stripped[:1] in ("{", "["):
+            obj = parse_structured_text(text, yaml_ok=False)
+        elif suffix in (".yaml", ".yml") or re.match(r"(openapi|swagger)\s*:", stripped):
+            obj = parse_structured_text(text)
+    if obj is not None and not isinstance(obj, str):
+        return _structured_role(path, obj, raw_text=text, from_disk=False)
+    if text is not None:
+        if "create table" in text[:50_000].lower():
+            return "db_schema", text
+        table = _table()
+        if table:
+            return table
+        role = _text_role(path.name, text)
+        if role:
+            return role, text
+    return "unknown", value
 
 
 def _first(roles: dict[str, list[DetectedFile]], role: str) -> DetectedFile | None:

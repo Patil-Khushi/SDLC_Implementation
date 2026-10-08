@@ -70,6 +70,7 @@ sys.path.insert(0, str(_IMPL_DIR))
 from app.agents.code_generator import CodeGeneratorAgent, _extract_json  # noqa: E402
 from app.services.boilerplate import render_scaffold  # noqa: E402
 from app.services.llm_gateway import LLMGateway  # noqa: E402
+from app.services.pack_index import load_pack  # noqa: E402
 # The naming-contract machinery (B1) now lives in a shared service so BOTH this harness and the
 # LangGraph code_generator agent bind every generation call to the same authoritative identifiers.
 # Re-exported here under their original names so existing callers/tests (fc.build_naming_contract,
@@ -809,7 +810,7 @@ def main() -> None:
     try:
         # main: SCAFFOLD ONLY (deterministic Jinja2, no LLM, no features), committed + pushed to main.
         _checkout_branch(project_dir, args.base_branch)
-        design_package = {p.name: p.read_text(encoding="utf-8") for p in pack.iterdir() if p.is_file()}
+        design_package = load_pack(pack)  # the one shape-preserving loader (app.services.pack_index)
         for entry in render_scaffold(project, design_package):
             dest = project_dir / entry["path"].lstrip("/")
             dest.parent.mkdir(parents=True, exist_ok=True)

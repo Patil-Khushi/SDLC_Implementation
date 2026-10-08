@@ -44,6 +44,7 @@ from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_executor  # noqa: E402
 from app.services import chat_inbox  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
+from app.services.pack_index import load_pack  # noqa: E402
 from app.services.run_transcript import (  # noqa: E402
     DEFAULT_REPLAY_SECONDS,
     RunTranscript,
@@ -153,24 +154,11 @@ def _select_slice(work_items: list[Any], needle: str, *, exact: bool = False) ->
 
 
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
-    """Load a pack's top-level artifacts into a name -> content dict (.json parsed, else text)."""
-    package: dict[str, Any] = {}
-    for path in sorted(pack_dir.iterdir()):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, ValueError):
-            # Binary artifacts (e.g. .docx/.pdf) carry no text role the resolver uses — skip them.
-            continue
-        if path.suffix == ".json":
-            try:
-                package[path.name] = json.loads(text)
-                continue
-            except json.JSONDecodeError:
-                pass
-        package[path.name] = text
-    return package
+    """Load a pack into the name -> content dict the graph carries as ``design_package``.
+
+    One implementation for every caller (``app.services.pack_index.load_pack``): .json parsed,
+    everything else raw text, subfolders included, pipeline state files and binaries skipped."""
+    return load_pack(pack_dir)
 
 
 def _canned_llm_reply(prompt: str, **_kw: Any) -> str:

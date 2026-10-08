@@ -1691,23 +1691,11 @@ def _run_events(
 
 
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
-    """Load a pack's top-level artifacts into a name -> content dict (.json parsed, else text)."""
-    package: dict[str, Any] = {}
-    for path in sorted(pack_dir.iterdir()):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, ValueError):
-            continue
-        if path.suffix == ".json":
-            try:
-                package[path.name] = json.loads(text)
-                continue
-            except json.JSONDecodeError:
-                pass
-        package[path.name] = text
-    return package
+    """Load a pack into the name -> content dict the graph carries as ``design_package``.
+
+    One implementation for every caller (``app.services.pack_index.load_pack``): .json parsed,
+    everything else raw text, subfolders included, pipeline state files and binaries skipped."""
+    return load_pack(pack_dir)
 
 
 @app.get("/api/run/stream")

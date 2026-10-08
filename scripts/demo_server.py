@@ -52,6 +52,7 @@ from app.integrations.executor import Executor, FakeExecutor, set_executor  # no
 from app.services import design_pack  # noqa: E402
 from app.services import llm_gateway  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
+from app.services.pack_index import load_pack  # noqa: E402
 from scripts.local_executor import LocalDiskExecutor  # noqa: E402
 from app.services.boilerplate import render_scaffold  # noqa: E402
 from scripts import feature_commit as fc  # noqa: E402  (feature-wise generation helpers)
@@ -1329,19 +1330,11 @@ def file(run_id: str, path: str) -> str:
 
 
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
-    package: dict[str, Any] = {}
-    for path in sorted(pack_dir.iterdir()):
-        if not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8")
-        if path.suffix == ".json":
-            try:
-                package[path.name] = json.loads(text)
-                continue
-            except json.JSONDecodeError:
-                pass
-        package[path.name] = text
-    return package
+    """Load a pack into the name -> content dict the graph carries as ``design_package``.
+
+    One implementation for every caller (``app.services.pack_index.load_pack``): .json parsed,
+    everything else raw text, subfolders included, pipeline state files and binaries skipped."""
+    return load_pack(pack_dir)
 
 
 def main() -> None:
