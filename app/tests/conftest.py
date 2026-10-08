@@ -97,6 +97,9 @@ class ReplayGateway(FakeLLMGateway):
         return self._current_key or self._key_from_prompt(prompt)
 
     def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
+        from app.services.llm_gateway import full_prompt
+
+        prompt = full_prompt(prompt, kwargs.pop("cache_prefix", None))   # the whole message
         self.calls.append({"prompt": prompt, "system": system, "kwargs": kwargs})
         key = self._next_key(prompt)
         path = self._store / f"{key}.txt"

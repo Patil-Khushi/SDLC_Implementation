@@ -19,6 +19,39 @@ from app.config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
+#: Prompt-cache breakpoints a single call may set (the API allows 4; one is left for callers
+#: that also cache a system prompt or tools).
+_MAX_CACHE_BREAKPOINTS = 3
+
+
+def _prefix_segments(cache_prefix: str | list[str] | None) -> list[str]:
+	segments = [cache_prefix] if isinstance(cache_prefix, str) else list(cache_prefix or [])
+	return [s for s in segments if s]
+
+
+def full_prompt(prompt: str, cache_prefix: str | list[str] | None = None) -> str:
+	"""The whole user message as one string: the cacheable prefix segments, then ``prompt``.
+
+	What a model without prompt caching receives, and what test doubles record, so a caller that
+	moves its shared context into ``cache_prefix`` changes nothing about what the model reads."""
+	return "\n\n".join([*_prefix_segments(cache_prefix), prompt])
+
+
+def _cached_user_content(prompt: str, cache_prefix: str | list[str] | None) -> list[dict[str, Any]]:
+	"""The user message as text blocks, a cache breakpoint closing each prefix segment.
+
+	Segments run from most to least shared (the run's naming contract, then one work item's
+	slices), so a call reuses the longest prefix any earlier call wrote. A segment below the
+	model's minimum cacheable size is simply not cached; that is not an error."""
+	segments = _prefix_segments(cache_prefix)
+	cached, extra = segments[:_MAX_CACHE_BREAKPOINTS], segments[_MAX_CACHE_BREAKPOINTS:]
+	blocks: list[dict[str, Any]] = [
+		{"type": "text", "text": f"{s}\n\n", "cache_control": {"type": "ephemeral"}} for s in cached
+	]
+	blocks.append({"type": "text", "text": "\n\n".join([*extra, prompt])})
+	return blocks
+
+
 def _retry_after_seconds(exc: Exception, default: float) -> float:
 	"""How long to wait before retrying a 429, from the ``Retry-After`` header or the error body.
 
@@ -174,6 +207,7 @@ class LLMGateway:
 		self._resource = settings.anthropic_foundry_resource or None
 		self._timeout = settings.llm_timeout_seconds
 		self._use_thinking = settings.llm_thinking
+		self._prompt_cache = bool(getattr(settings, "llm_prompt_cache", True))
 		# Build the client lazily (see _get_client). The Anthropic SDK raises
 		# at construction if no credentials/endpoint are resolvable, so building
 		# it here would make merely importing this module require Foundry config —
@@ -198,13 +232,21 @@ class LLMGateway:
 		*,
 		system: str | None = None,
 		max_tokens: int | None = None,
+		cache_prefix: str | list[str] | None = None,
 	) -> str:
-		"""Run a single prompt and return the model's text response."""
+		"""Run a single prompt and return the model's text response.
+
+		``cache_prefix`` is context that comes BEFORE ``prompt`` and that other calls send
+		identically (one string, or segments from most to least shared). The model reads exactly
+		``full_prompt(prompt, cache_prefix)``; with caching on, the prefix is marked cacheable so
+		repeated calls pay for it once per few minutes rather than every time."""
+		use_cache = self._prompt_cache and bool(_prefix_segments(cache_prefix))
+		content: Any = _cached_user_content(prompt, cache_prefix) if use_cache else full_prompt(prompt, cache_prefix)
 		kwargs: dict = {
 			"model": self._model,
 			"max_tokens": max_tokens or self._max_tokens,
 			"system": system or anthropic.NOT_GIVEN,
-			"messages": [{"role": "user", "content": prompt}],
+			"messages": [{"role": "user", "content": content}],
 		}
 		# Adaptive thinking is only supported on Claude 4.6+ models. Disable it
 		# via LLM_THINKING=false if LLM_MODEL points at a model without it.
@@ -221,12 +263,24 @@ class LLMGateway:
 			with self._get_client().messages.stream(**kwargs) as stream:
 				return stream.get_final_message()
 
-		response = _with_rate_limit_retry(_stream_once)
+		try:
+			response = _with_rate_limit_retry(_stream_once)
+		except anthropic.BadRequestError as exc:
+			# A deployment without prompt caching rejects cache_control. Losing the cache costs
+			# money; losing the run costs hours — so drop it for this process and carry on.
+			if not (use_cache and "cache" in str(exc).lower()):
+				raise
+			logger.warning("prompt caching rejected by the deployment (%s); continuing without it", _truncate(str(exc)))
+			self._prompt_cache = False
+			kwargs["messages"] = [{"role": "user", "content": full_prompt(prompt, cache_prefix)}]
+			response = _with_rate_limit_retry(_stream_once)
 		self.last_stop_reason = getattr(response, "stop_reason", None)
 		logger.info(
-			"llm_call model=%s input_tokens=%s output_tokens=%s stop=%s",
+			"llm_call model=%s input_tokens=%s cache_read=%s cache_write=%s output_tokens=%s stop=%s",
 			self._model,
 			response.usage.input_tokens,
+			getattr(response.usage, "cache_read_input_tokens", None),
+			getattr(response.usage, "cache_creation_input_tokens", None),
 			response.usage.output_tokens,
 			response.stop_reason,  # 'max_tokens' here means the reply was truncated
 		)
@@ -378,6 +432,9 @@ class FakeLLMGateway(LLMGateway):
 		self.last_stop_reason: str | None = None
 
 	def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
+		# Record (and answer from) the WHOLE message the model would read — a cache_prefix is
+		# part of the prompt, not a side channel.
+		prompt = full_prompt(prompt, kwargs.get("cache_prefix"))
 		self.calls.append({"prompt": prompt, "system": system, "kwargs": kwargs})
 		if self._responder is not None:
 			return self._responder(prompt)

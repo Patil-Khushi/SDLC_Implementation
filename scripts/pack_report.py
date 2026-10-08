@@ -129,8 +129,12 @@ def report_pack(pack_dir: Path, dump_dir: Path | None = None) -> dict[str, Any]:
         produced = [f["path"] for f in render_scaffold(pack_dir.name, package)]
         contexts: dict[str, dict[str, Any]] = {}
         for item in items:
-            text, sections = agent._assemble_context(item, package, list(produced), work_items=items)
-            contexts[item.id] = {"chars": len(text), "sections": sections, "text": text}
+            ctx = agent._build_context(item, package, list(produced), work_items=items)
+            per_file = [len(ctx.file_text(p)) for p in item.target_files] or [0]
+            # chars = the shared + item context every call of this item sends (the cacheable
+            # prefix); max_call_chars adds the largest per-file slice on top.
+            contexts[item.id] = {"chars": len(ctx.text), "max_call_chars": len(ctx.text) + max(per_file),
+                                 "sections": ctx.sections, "text": ctx.full_text}
             produced.extend(p for p in item.target_files if p not in produced)
     finally:
         logging.getLogger("app").removeHandler(collector)
@@ -156,21 +160,28 @@ def report_pack(pack_dir: Path, dump_dir: Path | None = None) -> dict[str, Any]:
         for i in ids:
             for name in contexts[i]["sections"]:
                 section_counts[name] = section_counts.get(name, 0) + 1
+        # Parsed operations render as "### METHOD /path  (operationId: x)"; the old raw-YAML slice
+        # carried the OpenAPI keys themselves. (Not "the ## API section": a pack's conventions may
+        # have a heading of that name.)
         api_with_detail = sum(
             1 for i in ids
-            if any(m in _section(contexts[i]["text"], "API") for m in _API_DETAIL_MARKERS)
+            if "(operationId:" in contexts[i]["text"]
+            or any(m in _section(contexts[i]["text"], "API —") for m in _API_DETAIL_MARKERS)
         )
         side_stats[side] = {
             "items": len(ids),
             "context_chars": {"min": min(sizes), "median": int(statistics.median(sizes)), "max": max(sizes)},
+            "largest_call_chars": max(contexts[i]["max_call_chars"] for i in ids),
             "items_with_section": dict(sorted(section_counts.items())),
             "items_with_api_detail": api_with_detail,
         }
 
-    # --- validation rules: how many rule groups reach ANY prompt
-    rules = package.get("validation-rules.json")
+    # --- validation rules: how many rule groups reach ANY prompt (groups found by shape)
+    rules = PackIndex(package).validation_rules()
     rule_groups = sorted(rules) if isinstance(rules, dict) else []
-    validation_text = "\n".join(_section(c["text"], "Validation rules") for c in contexts.values())
+    validation_text = "\n".join(
+        body for c in contexts.values() for body in re.findall(r"## Validation rules.*?(?=\n## |\Z)", c["text"], re.S)
+    )
     matched_groups = [g for g in rule_groups if f'"{g}"' in validation_text]
 
     # --- requirement traceability: which ids land on a work item, and whose TEXT reaches a prompt

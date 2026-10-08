@@ -19,6 +19,7 @@ from app.agents.base import BaseAgent
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.services.llm_gateway import LLMGateway
+from app.services.pack_context import pack_conventions
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +45,11 @@ class DocumentationAgent(BaseAgent):
         paths = list(state.get("generated_code", []))
         logger.info("[documentation] run=%s | [1/2] reading %d source file(s)...", run_id, len(paths))
         code_context = self._read_sources(executor, paths)
-        style_guide = _artifact_text(state.get("design_package") or {}, "SKILL.md", "style-guide/SKILL.md")
+        style_guide = pack_conventions(state.get("design_package") or {})
 
         sections = []
         if style_guide.strip():
-            sections.append("## Style guide (SKILL.md)\n" + style_guide.strip())
+            sections.append("## Conventions (the project's style guide)\n" + style_guide.strip())
         sections.append("## Source\n" + code_context)
         sections.append(
             "Write a concise README.md for this project: what it does, how to set it up and run "
@@ -80,17 +81,6 @@ class DocumentationAgent(BaseAgent):
             return "(no source files available)"
         note = f"\n\n(+{len(seen) - len(blocks)} more)" if len(seen) > len(blocks) else ""
         return "\n\n".join(blocks) + note
-
-
-def _artifact_text(design_package: dict, *names: str) -> str:
-    lowered = {k.lower(): v for k, v in design_package.items()}
-    for name in names:
-        value = design_package.get(name)
-        if value is None:
-            value = lowered.get(name.lower())
-        if value is not None:
-            return value if isinstance(value, str) else str(value)
-    return ""
 
 
 # Instantiated once in app/graph/nodes.py (mirrors CodeReviewAgent/UnitTestAgent's convention);

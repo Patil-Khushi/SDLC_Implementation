@@ -22,6 +22,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.agents.base import BaseAgent
@@ -29,9 +30,12 @@ from app.agents.editing import editing_tools
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.models import GenerationSummary, WorkItem
+from app.services import pack_context as pc
 from app.services import requirement_ledger
-from app.services.llm_gateway import LLMGateway
+from app.services.llm_gateway import LLMGateway, full_prompt
 from app.services.naming_contract import build_module_map, build_naming_contract_from_package
+from app.services.pack_index import index_for
+from app.services.pack_preflight import preflight_for
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +96,8 @@ class CodeGeneratorAgent(BaseAgent):
 
         design_package = state.get("design_package") or {}
         produced = self._already_generated(state)
-        context, sections_used = self._assemble_context(
-            work_item, design_package, produced, work_items=state.get("work_items")
-        )
+        ctx = self._build_context(work_item, design_package, produced, work_items=state.get("work_items"))
+        sections_used = ctx.sections
         self._append_plan(state, work_item, sections_used)
 
         phase, subject = _phase_of(work_item)
@@ -114,7 +117,7 @@ class CodeGeneratorAgent(BaseAgent):
         if work_item.action in ("modify", "delete"):
             logger.info("[code_generator] run=%s | [EDITING %s] %s", run_id, phase, subject)
             started = time.perf_counter()
-            written, notes = self._apply_modifications(state, work_item, context)
+            written, notes = self._apply_modifications(state, work_item, ctx.full_text)
             elapsed = round(time.perf_counter() - started, 3)
             if notes is None:
                 self._record_failure(state, work_item, elapsed)
@@ -133,7 +136,7 @@ class CodeGeneratorAgent(BaseAgent):
         system = self._load_prompt("code_generation")
 
         started = time.perf_counter()
-        files = self._generate_files(work_item, context, system)
+        files = self._generate_files(work_item, ctx, system)
         elapsed = round(time.perf_counter() - started, 3)
 
         if files is None:
@@ -236,25 +239,44 @@ class CodeGeneratorAgent(BaseAgent):
 
     # -- generation -----------------------------------------------------------
 
-    def _generate_files(self, work_item: WorkItem, context: str, system: str) -> list[dict[str, str]] | None:
+    def _complete(self, prompt: str, system: str, prefix: list[str]) -> str:
+        """One generation call with the shared context as a cacheable prefix. A gateway stand-in
+        that predates ``cache_prefix`` (scripts and tests patch ``complete`` with plain functions)
+        gets the same text as one prompt instead — what the model reads is identical either way."""
+        try:
+            return self.llm.complete(prompt=prompt, system=system, cache_prefix=prefix)
+        except TypeError as exc:
+            if "cache_prefix" not in str(exc):
+                raise
+            return self.llm.complete(prompt=full_prompt(prompt, prefix), system=system)
+
+    def _generate_files(
+        self, work_item: WorkItem, context: "_Context | str", system: str
+    ) -> list[dict[str, str]] | None:
         """Produce the item's files. A multi-file item is generated ONE FILE PER CALL so its output
         can't grow with the file count and truncate at the max_tokens cap — the whole-item call's
         failure mode was ``stop=max_tokens`` → half a JSON object → "no JSON object found in reply".
         Items with a single known target — or none, where the model chooses the files — keep the
-        one-shot call, which for a single file already can't truncate on *combining* files."""
+        one-shot call, which for a single file already can't truncate on *combining* files.
+
+        Every call sends the item's shared + item context FIRST, as the gateway's cacheable prefix
+        (identical across the item's files, and its first segment across the side's items), then
+        the part that differs per file."""
+        ctx = context if isinstance(context, _Context) else _Context(item=[("Context", str(context))])
         targets = [p.strip() for p in work_item.target_files if p and p.strip()]
         if len(targets) >= 2:
-            return self._generate_per_file(work_item, context, system, targets)
-        return self._generate_whole_item(work_item, context, system)
+            return self._generate_per_file(work_item, ctx, system, targets)
+        return self._generate_whole_item(work_item, ctx, system)
 
-    def _generate_whole_item(self, work_item: WorkItem, context: str, system: str) -> list[dict[str, str]] | None:
+    def _generate_whole_item(self, work_item: WorkItem, ctx: "_Context", system: str) -> list[dict[str, str]] | None:
         """One call returning EVERY file for the item; re-ask once on parse failure. Used for the
         single/zero-target items that :meth:`_generate_files` keeps on the one-shot path."""
-        prompt = self._build_prompt(work_item, context)
-        raw = self.llm.complete(prompt=prompt, system=system)
+        per_file = "\n\n".join(t for t in (ctx.file_text(p) for p in work_item.target_files) if t)
+        prompt = self._build_prompt(work_item, per_file)
+        raw = self._complete(prompt, system, ctx.prefix)
         parsed, error = self._parse(raw)
         if parsed is None:
-            raw = self.llm.complete(prompt=self._retry_instruction(prompt, error), system=system)
+            raw = self._complete(self._retry_instruction(prompt, error), system, ctx.prefix)
             parsed, error = self._parse(raw)
         if parsed is None:
             # Don't discard the evidence: without this, a deterministic parse failure (same item,
@@ -266,7 +288,7 @@ class CodeGeneratorAgent(BaseAgent):
         return parsed
 
     def _generate_per_file(
-        self, work_item: WorkItem, context: str, system: str, targets: list[str]
+        self, work_item: WorkItem, context: "_Context", system: str, targets: list[str]
     ) -> list[dict[str, str]] | None:
         """Generate a multi-file item ONE FILE PER CALL. Each call emits a single file, so output
         stays well under the max_tokens cap that truncated the whole-item reply. Every file produced
@@ -301,17 +323,18 @@ class CodeGeneratorAgent(BaseAgent):
         return produced
 
     def _generate_one_file(
-        self, work_item: WorkItem, context: str, system: str, path: str, spec: str,
+        self, work_item: WorkItem, context: "_Context", system: str, path: str, spec: str,
         targets: list[str], siblings: dict[str, str],
     ) -> dict[str, str] | None:
         """Generate EXACTLY one file; re-ask once on parse failure. Returns ``{path, content}`` with
         the path pinned to the REQUESTED one (the model may re-case or rename it), or ``None`` if it
         still won't parse after the retry."""
-        prompt = self._build_file_prompt(work_item, context, path, spec, targets, siblings)
-        raw = self.llm.complete(prompt=prompt, system=system)
+        ctx = context if isinstance(context, _Context) else _Context(item=[("Context", str(context))])
+        prompt = self._build_file_prompt(work_item, ctx.file_text(path), path, spec, targets, siblings)
+        raw = self._complete(prompt, system, ctx.prefix)
         parsed, error = self._parse(raw)
         if parsed is None:
-            raw = self.llm.complete(prompt=self._retry_instruction(prompt, error), system=system)
+            raw = self._complete(self._retry_instruction(prompt, error), system, ctx.prefix)
             parsed, error = self._parse(raw)
         if parsed is None:
             logger.error(
@@ -378,6 +401,7 @@ class CodeGeneratorAgent(BaseAgent):
                 "when the target filename matches an icon shown there.\n\n"
             )
         return (
+            f"{_TASK_PREAMBLE}"
             f"Work item: {work_item.id}\n"
             f"Covers requirements: {', '.join(work_item.requirement_ids) or '-'}\n"
             f"Endpoints: {', '.join(work_item.endpoints) or '-'}\n"
@@ -386,7 +410,7 @@ class CodeGeneratorAgent(BaseAgent):
             f"Target files (produce ONLY these):\n{targets}\n\n"
             f"{specs_block}"
             f"{svg_hint}"
-            f"Context (only the cited slices):\n{context}\n\n"
+            f"{_file_context_block(context)}"
             'Respond with STRICT JSON only: {"files":[{"path":...,"content":...}],"notes":...}'
         )
 
@@ -412,6 +436,7 @@ class CodeGeneratorAgent(BaseAgent):
                 "when the target filename matches an icon shown there.\n\n"
             )
         return (
+            f"{_TASK_PREAMBLE}"
             f"Work item: {work_item.id}\n"
             f"Covers requirements: {', '.join(work_item.requirement_ids) or '-'}\n"
             f"Endpoints: {', '.join(work_item.endpoints) or '-'}\n"
@@ -420,8 +445,8 @@ class CodeGeneratorAgent(BaseAgent):
             f"All files planned for this work item (stay consistent with these siblings):\n{planned}\n\n"
             f"{spec_block}"
             f"{svg_hint}"
+            f"{_file_context_block(context)}"
             f"{_siblings_view(siblings)}"
-            f"Context (only the cited slices):\n{context}\n\n"
             f"Generate EXACTLY ONE file now: {path}\n"
             'Respond with STRICT JSON containing ONLY that one file: '
             '{"files":[{"path":...,"content":...}]}. No other files, no prose, no code fences.'
@@ -564,22 +589,51 @@ class CodeGeneratorAgent(BaseAgent):
         *,
         work_items: list[WorkItem] | None = None,
     ) -> tuple[str, list[str]]:
-        """Return (joined context text, names of the sections that were actually populated).
+        """Return (joined shared + item context, names of the sections that were populated).
 
         The names feed the ``[plan]`` summary line so a human can see which design-pack slices
-        this item's generation was grounded in, before the LLM is even called.
+        this item's generation was grounded in, before the LLM is even called. Per-file slices are
+        named with a ``(per file)`` suffix; their text is in :meth:`_build_context`'s result.
         """
-        sections: list[tuple[str, str]] = []
+        ctx = self._build_context(work_item, design_package, produced, work_items=work_items)
+        return ctx.text, ctx.sections
 
+    def _build_context(
+        self,
+        work_item: WorkItem,
+        design_package: dict[str, Any],
+        produced: list[str] | None = None,
+        *,
+        work_items: list[WorkItem] | None = None,
+    ) -> _Context:
+        """Everything this item's generation is grounded in, read from the pack BY SHAPE
+        (:mod:`app.services.pack_context`), in three tiers that double as prompt-cache segments:
+
+        * shared — identical for every item of the same side: the naming contract, the module map,
+          the conventions, the design tokens, the pack-wide rules;
+        * item — this item's requirements, API operations with their schemas, tables, validation
+          rules, sample payloads, routes;
+        * per file — what only one target needs: a page's own screen (mockup, states, the
+          endpoints it calls), a service's/type's resource endpoints, env vars for a config file.
+        """
+        design_package = design_package or {}
+        index = index_for(design_package)
+        facts = preflight_for(design_package).facts if design_package else {}
+        ctx = _Context()
+        side = _side_of(work_item)
+        targets = [p for p in work_item.target_files if p and p.strip()]
+        is_asset_item = any(p.lower().endswith(".svg") for p in targets)
+
+        # ---- shared ------------------------------------------------------------------------
         # Authoritative naming contract FIRST (see app/services/naming_contract.py). Each work item
         # is generated in its own isolated LLM call, so without a single must-match block every file
         # re-derives entity/field/endpoint identifiers independently and the pieces don't line up
         # (a router importing a symbol the schema never exported, a client calling an unmounted
         # path). Prepending it to every item's context binds them all to the same names. Empty when
-        # the pack has no parseable schema/API mapping — then behaviour is exactly as before.
+        # the pack has no parseable schema/API — then behaviour is exactly as before.
         contract = build_naming_contract_from_package(design_package)
         if contract:
-            sections.append(("Naming contract", contract))
+            ctx.shared.append(("Naming contract", contract))
 
         # The module map binds IMPORTS the way the contract binds names: every module the plan will
         # produce, by the exact name another file imports it as. Without it an entry point generated
@@ -587,8 +641,26 @@ class CodeGeneratorAgent(BaseAgent):
         # Built from the whole plan, so it covers files generated after this one too.
         module_map = build_module_map(work_items, for_item=work_item)
         if module_map:
-            sections.append(("Module map", module_map))
+            ctx.shared.append(("Module map", module_map))
 
+        conventions = pc.conventions_section(index)
+        if conventions:
+            ctx.shared.append(("Conventions", "## Conventions (the project's coding guidelines - follow them exactly)\n"
+                               + conventions))
+        if side == "frontend" or is_asset_item:
+            tokens = pc.tokens_section(index)
+            if tokens:
+                ctx.shared.append(("Design tokens", "## Design tokens (use these values; never hard-code others)\n" + tokens))
+        rules = pc.rules_section(index)
+        if rules:
+            ctx.shared.append(("Business rules", "## Business rules, non-functional requirements and constraints "
+                               "(they apply to every file they concern)\n" + rules))
+        shared_rules = pc.validation_shared(index)
+        if shared_rules:
+            ctx.shared.append(("Validation rules (shared)", "## Validation rules that apply everywhere - COPY "
+                               "MESSAGES VERBATIM\n" + shared_rules))
+
+        # ---- item --------------------------------------------------------------------------
         # Manifest of files ALREADY generated this run (scaffold + earlier items). Because items are
         # generated in isolation, an entry point / router / service otherwise can't know what its
         # siblings actually produced, so it invents module names/paths that don't resolve (the
@@ -598,72 +670,144 @@ class CodeGeneratorAgent(BaseAgent):
             listing = "\n".join(f"- {p}" for p in produced[:_MANIFEST_CAP])
             if len(produced) > _MANIFEST_CAP:
                 listing += f"\n- ... (+{len(produced) - _MANIFEST_CAP} more)"
-            sections.append((
+            ctx.item.append((
                 "Existing files",
                 "## Files already generated in this project — import from these EXACT paths; do NOT "
                 "invent new module names for something already produced here\n" + listing,
             ))
 
-        skill = _artifact_text(design_package, "SKILL.md", "style-guide/SKILL.md")
-        if skill:
-            sections.append(("Conventions", "## Conventions (style-guide)\n" + skill.strip()))
+        requirements = pc.requirements_section(index, work_item.requirement_ids)
+        if requirements:
+            ctx.item.append(("Requirements", "## Requirements this work item implements\n" + requirements))
 
-        if work_item.endpoints or work_item.tables:  # backend
+        ops = pc.operations_for(index, work_item.endpoints)
+        if ops:
+            ctx.item.append(("API", "## API — the operations this work item implements, with every schema "
+                             "they use\n" + pc.api_section(index, ops)))
+        elif work_item.endpoints:
+            # A spec the index could not parse: the old line filter is better than nothing.
             paths = _openapi_slice(_artifact(design_package, "openapi.yaml", "openapi.json"), work_item.endpoints)
             if paths:
-                sections.append(("API", "## API — cited OpenAPI paths\n" + paths))
-            tables = _schema_slice(_artifact_text(design_package, "schema.sql"), work_item.tables)
-            if tables:
-                sections.append(("DB", "## DB — cited tables\n" + tables))
+                ctx.item.append(("API", "## API — cited OpenAPI paths\n" + paths))
+        if side == "backend" and not ops:
+            basics = pc.api_basics(index, (facts.get("error_envelope") or {}).get("schema"))
+            if basics:
+                ctx.item.append(("API basics", "## API basics — server URL, security schemes and the error body\n"
+                                 + basics))
 
-        if work_item.screens:  # frontend
-            # Accept both the canonical names and the design-narrative variants some packs ship
-            # (e.g. tic-tac-toe's design-tokens.json / functional-html-mockup.html / route-list.md).
-            routes = _routes_slice(
-                _artifact(design_package, "routes.json", "route-list.md", "routes.md"),
-                work_item.screens,
-            )
+        tables = pc.db_section(index, work_item.tables)
+        if tables:
+            ctx.item.append(("DB", "## DB — the tables this work item reads or writes, as the pack defines them\n"
+                             + tables))
+
+        rules_for_item = pc.validation_section(index, ops, work_item.endpoints)
+        if rules_for_item:
+            ctx.item.append(("Validation rules", "## Validation rules — COPY MESSAGES VERBATIM\n" + rules_for_item))
+
+        if side == "backend":
+            payloads = pc.payloads_section(index, ops)
+            if payloads:
+                ctx.item.append(("Sample payloads", "## Sample requests/responses for these operations (shape "
+                                 "reference)\n" + payloads))
+
+        if side == "frontend":
+            wants_routes = bool(work_item.screens) or any(_frontend_layer(p, "") in ("router", "entry") for p in targets)
+            routes = pc.routes_section(index, None if not work_item.screens else work_item.screens) if wants_routes else ""
+            if wants_routes and work_item.screens and not routes:
+                routes = pc.routes_section(index)
             if routes:
-                sections.append(("Routes", "## Routes — cited\n" + routes))
-            tokens = _artifact(design_package, "tokens.json", "design-tokens.json")
-            if tokens is not None:
-                sections.append(("Design tokens", "## Design tokens\n" + _as_text(tokens)))
-            mockup = _mockup_slice(
-                _artifact_text(design_package, "mockup.html", "functional-html-mockup.html"),
-                work_item.screens,
-            )
-            if mockup:
-                sections.append(("Mockup", "## Mockup — cited components\n" + mockup))
+                ctx.item.append(("Routes", "## Routes\n" + routes))
+            if any(_is_component_file(p) for p in targets):
+                guide = pc.style_guide_section(index)
+                if guide:
+                    ctx.item.append(("Mockup style guide", "## Mockup style guide — the design system the "
+                                     "components reproduce\n" + guide))
 
-        is_asset_item = any(p.lower().endswith(".svg") for p in work_item.target_files)
-        if is_asset_item:  # asset items have no screens, so the screen-keyed frontend context above is skipped
-            tokens = _artifact(design_package, "tokens.json", "design-tokens.json")
-            if tokens is not None:
-                sections.append(("Design tokens", "## Design tokens\n" + _as_text(tokens)))
-            svgs = _all_svgs(_artifact_text(design_package, "mockup.html", "functional-html-mockup.html"))
+        if is_asset_item:
+            svgs = _all_svgs(index.mockup_html())
             if svgs:
-                sections.append((
+                ctx.item.append((
                     "Mockup SVGs",
                     "## SVG icons provided by the mockup (reuse verbatim where an icon matches the target filename)\n" + svgs,
                 ))
-
-        if work_item.id.startswith("frontend") and not is_asset_item:
+        elif side == "frontend":
             assets = _available_assets(design_package)
             if assets:
-                sections.append((
+                ctx.item.append((
                     "Assets",
                     "## Available asset files (import these EXACT paths; do NOT invent asset names)\n" + assets,
                 ))
 
-        rules = _validation_slice(
-            _artifact(design_package, "validation-rules.json", "validation-rules.md"),
-            [*work_item.endpoints, *work_item.screens],
-        )
-        if rules:
-            sections.append(("Validation rules", "## Validation rules — COPY MESSAGES VERBATIM\n" + rules))
+        # ---- per file ----------------------------------------------------------------------
+        html = index.mockup_html() if side == "frontend" else ""
+        page_mockups = 0
+        # An item for exactly one screen with exactly one page file (the per-screen items of the
+        # legacy planner): that page IS the screen, whatever it is called.
+        page_files = [p for p in targets if _is_page_file(p)]
+        only_page = page_files[0] if len(work_item.screens) == 1 and len(page_files) == 1 else None
+        # A page can render any screen of the pack: the planner's per-item screen list is a guide
+        # (preferred on a tie), not the whole candidate set — it routinely misses list/create pages.
+        candidates = list(dict.fromkeys([*work_item.screens, *pc.all_screens(index)])) if page_files else []
+        for path in targets:
+            parts: list[tuple[str, str]] = []
+            screen = None
+            if side == "frontend" and path in page_files:
+                named = pc.own_screen(index, path, html)
+                if named:   # spelled as the item (and so the UI <-> API mapping) spells it, if it does
+                    screen = next((s for s in candidates if s.lower() == named.lower()), named)
+                else:
+                    screen = pc.screen_for_file(path, candidates, preferred=work_item.screens)
+            elif side == "frontend" and work_item.screens:
+                screen = pc.screen_for_file(path, work_item.screens)
+            if screen is None and path == only_page:
+                screen = work_item.screens[0]
+            if side == "frontend" and screen:
+                mock = pc.mockup_for_screen(index, screen, html)
+                if mock:
+                    page_mockups += 1
+                    parts.append(("Mockup", f"## Mockup — the `{screen}` screen; build THIS page from it\n" + mock))
+                states = pc.states_for_screen(index, screen)
+                if states:
+                    parts.append(("Screen states", f"## Loading / empty / error / success states of `{screen}`\n" + states))
+                endpoints = pc.screen_endpoints(index, [screen])
+                screen_ops = pc.operations_for(index, endpoints)
+                if screen_ops:
+                    parts.append(("API", f"## API — the endpoints the `{screen}` screen calls\n"
+                                  + pc.api_section(index, screen_ops, budget=pc.BUDGET["file_api"])))
+                screen_rules = pc.validation_section(index, screen_ops, endpoints)
+                if screen_rules:
+                    parts.append(("Validation rules", "## Validation rules for this screen's forms — COPY MESSAGES "
+                                  "VERBATIM\n" + screen_rules))
+            elif side == "frontend" and not ops and not path.lower().endswith(_NON_CODE_SUFFIXES):
+                file_ops = pc.operations_for_file(index, path)
+                if file_ops:
+                    parts.append(("API", "## API — the endpoints this file is about, with their schemas\n"
+                                  + pc.api_section(index, file_ops, budget=pc.BUDGET["file_api"])))
+                    if "form" in path.rsplit("/", 1)[-1].lower():
+                        form_rules = pc.validation_section(index, file_ops)
+                        if form_rules:
+                            parts.append(("Validation rules", "## Validation rules — COPY MESSAGES VERBATIM\n" + form_rules))
+                if _is_component_file(path):
+                    fragment = pc.component_fragment(html, path)
+                    if fragment:
+                        parts.append(("Mockup", "## Mockup — the element this component renders\n" + fragment))
+            if pc.is_config_file(path):
+                env = pc.env_section(index)
+                if env:
+                    parts.append(("Environment variables", "## Environment variables the pack declares — read "
+                                  "exactly these names\n" + env))
+            if parts:
+                ctx.files[path] = parts
 
-        text = "\n\n".join(body for _, body in sections) if sections else "(no design-pack context found for this item)"
-        return text, [name for name, _ in sections]
+        if side == "frontend" and work_item.screens and not page_mockups:
+            # A mockup without per-screen sections (a small single-screen app): the old slice.
+            mockup = _mockup_slice(html, work_item.screens)
+            if mockup:
+                ctx.item.append(("Mockup", "## Mockup — cited components\n" + mockup))
+            legacy = _validation_slice(index.validation_rules(), work_item.screens)
+            if legacy and not rules_for_item:
+                ctx.item.append(("Validation rules", "## Validation rules — COPY MESSAGES VERBATIM\n" + legacy))
+        return ctx
 
     def _append_plan(self, state: WorkflowState, work_item: WorkItem, sections_used: list[str]) -> None:
         """Log what this item is about to produce and why, BEFORE calling the LLM."""
@@ -680,6 +824,102 @@ class CodeGeneratorAgent(BaseAgent):
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+@dataclass
+class _Context:
+    """One work item's generation context, in prompt-cache order (see ``_build_context``)."""
+
+    shared: list[tuple[str, str]] = field(default_factory=list)
+    item: list[tuple[str, str]] = field(default_factory=list)
+    files: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+
+    @staticmethod
+    def _join(sections: list[tuple[str, str]]) -> str:
+        return "\n\n".join(body for _, body in sections)
+
+    @property
+    def prefix(self) -> list[str]:
+        """The cacheable segments, most shared first: every item of a side, then this item."""
+        return [seg for seg in (self._join(self.shared), self._join(self.item)) if seg]
+
+    @property
+    def text(self) -> str:
+        return "\n\n".join(self.prefix) or "(no design-pack context found for this item)"
+
+    def file_text(self, path: str) -> str:
+        return self._join(self.files.get(path, []))
+
+    @property
+    def full_text(self) -> str:
+        """Everything, per-file slices included — for the edit-in-place path, which has one call."""
+        per_file = [f"### For {path}\n{self.file_text(path)}" for path in self.files]
+        return "\n\n".join([self.text, *per_file])
+
+    @property
+    def sections(self) -> list[str]:
+        names = [name for name, _ in self.shared + self.item]
+        for parts in self.files.values():
+            for name, _ in parts:
+                label = f"{name} (per file)"
+                if label not in names:
+                    names.append(label)
+        return names
+
+
+#: Opens the per-call part of every generation prompt, after the shared context.
+_TASK_PREAMBLE = (
+    "Everything above is this project's design context: the NAMING CONTRACT and MODULE MAP bind "
+    "every name and import; the sections after them are the slices of the design package this work "
+    "item is built from. Below is the task.\n\n"
+)
+
+
+def _file_context_block(context: str) -> str:
+    return f"Design context for THIS file only:\n{context}\n\n" if context and context.strip() else ""
+
+
+#: Targets that are data or markup, not code a resource's endpoints shape.
+_NON_CODE_SUFFIXES = (".svg", ".css", ".scss", ".html", ".json", ".md", ".png", ".ico")
+
+
+def _fe_layer(path: str) -> str:
+    from app.services.plan_builder import _frontend_layer
+
+    return _frontend_layer(path, "")
+
+
+def _side_of(work_item: WorkItem) -> str:
+    """``"backend"`` / ``"frontend"`` / ``""`` — from the item id the planner gave it, else its
+    paths, else what it carries (screens are frontend; endpoints and tables backend)."""
+    item_id = (work_item.id or "").lower()
+    for side in ("backend", "frontend"):
+        if item_id.startswith(side):
+            return side
+    paths = " ".join(work_item.target_files).lower()
+    if "frontend" in paths or "client/" in paths:
+        return "frontend"
+    if "backend" in paths or "server/" in paths:
+        return "backend"
+    if work_item.screens:
+        return "frontend"
+    if work_item.endpoints or work_item.tables:
+        return "backend"
+    if any(p.lower().endswith((".tsx", ".jsx", ".vue", ".css", ".svg")) for p in work_item.target_files):
+        return "frontend"
+    return ""
+
+
+def _is_page_file(path: str) -> bool:
+    return _fe_layer(path) == "pages" or bool(re.search(r"(?:Page|Screen|View)\.[jt]sx?$", path))
+
+
+def _is_component_file(path: str) -> bool:
+    return _fe_layer(path) in ("components", "components-ui")
+
+
+def _frontend_layer(path: str, desc: str) -> str:
+    return _fe_layer(path)
 
 
 def _strip_project(project_dir: str, path: str) -> str:
@@ -844,12 +1084,16 @@ def _available_assets(design_package: dict[str, Any]) -> str:
     Names come from the SAME helper the planner uses (single source of truth), derived from the
     frontend structure tree — whether it's wrapped in a ``tree`` key or is the tree directly.
     """
+    from app.services.design_pack import _tree_root
     from app.services.plan_builder import _asset_leaves
 
-    struct = _artifact(design_package, "frontend-structure.json", "frontend_structure.json", "frontend-structure")
+    hit = index_for(design_package).first("frontend_structure")
+    struct = hit[1] if hit else _artifact(
+        design_package, "frontend-structure.json", "frontend_structure.json", "frontend-structure"
+    )
     if not isinstance(struct, dict):
         return ""
-    tree = struct.get("tree", struct)
+    tree = _tree_root(struct)
     lines: list[str] = []
     for path, _ in _asset_leaves(tree):
         idx = path.find("src/")

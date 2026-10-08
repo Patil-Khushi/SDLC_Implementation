@@ -32,6 +32,7 @@ from app.integrations.review_sandbox import ReviewSandbox, get_review_sandbox, i
 from app.integrations.sonarqube import SonarMeasures, SonarQubeClient, SonarResult, get_sonarqube_client
 from app.services import finding_aggregator as agg
 from app.services.llm_gateway import LLMGateway
+from app.services.pack_context import pack_conventions
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class CodeReviewAgent(BaseAgent):
         run_id = state.get("run_id", "")
         repo_url = (state.get("repo_url") or "").strip()
         branch = (state.get("branch") or get_settings().working_branch or "").strip()
-        style_guide = _artifact_text(state.get("design_package") or {}, "SKILL.md", "style-guide/SKILL.md")
+        style_guide = pack_conventions(state.get("design_package") or {})
 
         meta = {"project": project_id, "run_id": run_id, "repo_url": repo_url or "(none)",
                 "branch": branch or "(default)", "commit": "-",
@@ -260,7 +261,7 @@ class CodeReviewAgent(BaseAgent):
         system = self._load_prompt("code_review")
         sections: list[str] = []
         if style_guide.strip():
-            sections.append("## Style guide (SKILL.md)\n" + style_guide.strip())
+            sections.append("## Conventions (the project's style guide)\n" + style_guide.strip())
         sections.append("## Project structure\n" + (structure or "(unavailable)"))
         if measures.ok and measures.values:
             sections.append("## Metrics (measured by SonarQube - reference only, NEVER recompute or estimate)\n"

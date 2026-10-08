@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # Adaptive thinking is supported on Claude 4.6+ deployments (beta on Foundry).
     # Set false if you point llm_model at a deployment that lacks extended thinking.
     llm_thinking: bool = True
+    # Prompt caching for the context every generation call shares (naming contract, module map,
+    # conventions, then the work item's own slices). Each file is generated in its own call, so
+    # the same prefix is sent hundreds of times a run; cached, it is read back at a fraction of
+    # the input price. The gateway turns it off by itself if a deployment rejects cache_control.
+    llm_prompt_cache: bool = True
 
     # GitHub publish (demo publish flow: create repo + push under this PAT's owner).
     # Lets the agent publish under an account the local `gh` CLI isn't logged into.

@@ -232,6 +232,27 @@ def _tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]+", spaced.lower()) if t not in {"page", "screen", "view"}}
 
 
+def _has_paths(value: Any) -> bool:
+    obj = parse_structured_text(value) if isinstance(value, str) else value
+    return isinstance(obj, dict) and isinstance(obj.get("paths"), dict)
+
+
+#: Fallbacks for a role NO artifact has by shape: an artifact the classifier could not place,
+#: whose NAME says what it is and whose content is at least the right kind of thing. Content
+#: decides first; this only keeps a sparse or hand-written pack (a one-line ``SKILL.md``, an
+#: OpenAPI dict without its ``openapi`` version key) from losing what its file names state.
+_NAME_HINTS: tuple[tuple[str, re.Pattern[str], Any], ...] = (
+    ("conventions", re.compile(r"skill|guideline|convention|style[-_ ]?guide|coding[-_ ]?standard", re.I),
+     lambda v: isinstance(v, str) and bool(v.strip())),
+    ("openapi", re.compile(r"openapi|swagger|api[-_ ]?spec", re.I), _has_paths),
+    ("validation_rules", re.compile(r"validation", re.I), lambda v: bool(v) and isinstance(v, (dict, str))),
+    ("design_tokens", re.compile(r"token", re.I), lambda v: isinstance(v, dict) and bool(v)),
+    ("routes", re.compile(r"route", re.I), lambda v: bool(v)),
+    ("mockup", re.compile(r"mockup|\.html?$", re.I), lambda v: isinstance(v, str) and "<" in v),
+    ("sample_payloads", re.compile(r"payload", re.I), lambda v: isinstance(v, dict) and bool(v)),
+)
+
+
 class PackIndex:
     """Shape-based view over one design package (``name -> parsed JSON or raw text``)."""
 
@@ -245,6 +266,16 @@ class PackIndex:
             if role == "pipeline_state":
                 continue
             self._roles.setdefault(role, []).append((name, obj))
+        unknown = self._roles.get("unknown", [])
+        for role, name_re, fits in _NAME_HINTS:
+            if role in self._roles:
+                continue
+            hit = next(((n, o) for n, o in unknown if name_re.search(Path(n).name) and fits(o)), None)
+            if hit:
+                self._roles[role] = [hit]
+                unknown.remove(hit)
+        if "unknown" in self._roles and not unknown:
+            del self._roles["unknown"]
 
     @classmethod
     def from_dir(cls, pack_dir: str | Path) -> PackIndex:
@@ -281,6 +312,23 @@ class PackIndex:
             return obj
         parsed = parse_structured_text(obj) if isinstance(obj, str) else None
         return parsed if isinstance(parsed, dict) else None
+
+    def operations(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """``(METHOD, path, operation)`` for every operation of the spec, in spec order."""
+        paths = (self.openapi() or {}).get("paths")
+        if not isinstance(paths, dict):
+            return []
+        return [
+            (method.upper(), str(path), op)
+            for path, item in paths.items() if isinstance(item, dict)
+            for method, op in item.items()
+            if method.lower() in ("get", "post", "put", "patch", "delete", "head", "options") and isinstance(op, dict)
+        ]
+
+    def routes(self) -> Any:
+        """The frontend route table as the pack ships it (list / dict / text), or ``None``."""
+        hit = self.first("routes")
+        return hit[1] if hit else None
 
     def api_ui_rows(self, screen: str | None = None) -> list[dict[str, str]]:
         """Rows of the UI <-> API mapping table, optionally only those for ``screen``."""
