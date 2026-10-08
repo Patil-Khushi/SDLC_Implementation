@@ -22,7 +22,7 @@ ALL_FIELDS = {
     "push_enabled", "git_remote", "git_token",
     "review_report", "review_report_path", "review_findings_path", "refactored_code",
     "refactored_files", "refactoring_report", "refactoring_report_path",
-    "unresolved_imports", "unit_tests",
+    "unresolved_imports", "integration_findings", "unit_tests",
     "unit_test_report", "unit_test_report_path",
     "debugging_report", "debugging_report_path",
     "documentation", "security_report", "security_report_path", "security_verdict",

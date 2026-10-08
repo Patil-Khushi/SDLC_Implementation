@@ -49,6 +49,7 @@ from app.services.repo_inventory import (
 from app.services.wiring import (
     build_import_graph,
     dependents_of,
+    find_integration_issues,
     find_unresolved_imports,
     reconcile_wiring,
 )
@@ -1495,6 +1496,28 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
         state["generation_summary"] = (state.get("generation_summary") or "") + (
             f"[reconcile] {len(unresolved)} unresolved import(s) (not auto-fixed):\n"
             + "".join(f"    - {item.as_note()}\n" for item in unresolved)
+        )
+
+    # Report-only: disagreements between files that no fixer can settle without choosing a side
+    # (base paths, define-once helpers defined twice, an async engine behind sync sessions). Judged
+    # against the pack's canonical facts, which preflight settled before generation began.
+    try:
+        facts = preflight_for(state.get("design_package") or {}).facts if state.get("design_package") else {}
+        issues = find_integration_issues(
+            {**files, **changed},
+            api_base_path=str(facts.get("api_base_path") or ""),
+            symbol_owners=facts.get("symbol_owners") or {},
+        )
+    except Exception:  # noqa: BLE001 - an analysis bug must never crash a finished plan
+        logger.exception("integration analysis failed for run %s", state.get("run_id"))
+        issues = []
+    state["integration_findings"] = issues
+    if issues:
+        logger.warning("[reconcile] run=%s | %d integration issue(s) - left for the debugging agent",
+                       state.get("run_id") or "-", len(issues))
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            f"[reconcile] {len(issues)} integration issue(s) (not auto-fixed):\n"
+            + "".join(f"    - [{i['kind']}] {i['detail']}\n" for i in issues)
         )
 
     if not changed:

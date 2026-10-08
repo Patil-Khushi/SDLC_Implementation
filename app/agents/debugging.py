@@ -56,6 +56,7 @@ from app.integrations.executor import Executor, cap_output, get_executor
 from app.services import check_digest
 from app.services.llm_gateway import LLMGateway
 from app.services.plan_builder import _is_test_path
+from app.services.python_wiring import defined_names
 from app.services.wiring import UnresolvedImport, target_resolves
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,7 @@ def _render_unresolved(item: dict[str, Any]) -> str:
         specifier=str(item.get("specifier", "")),
         target=str(item.get("target", "")),
         candidates=tuple(item.get("candidates") or ()),
+        name=str(item.get("name", "")),
     ).as_note()
 
 
@@ -149,19 +151,34 @@ def _prune_unresolved(
     existing = {p[len(prefix):] if p.startswith(prefix) else p for p in generated_code}
     rewritten = {entry["path"]: entry["content"] for entry in fixes}
 
-    kept: list[dict[str, Any]] = []
-    for item in unresolved:
-        target = str(item.get("target", ""))
-        if target_resolves(target, existing):
-            continue  # the missing module now exists
-        importer = str(item.get("importer", ""))
+    def _rewritten(path: str) -> str | None:
         # `rewritten` keys are exactly the paths the model returned, which may not share the
         # reconcile pass's project-relative prefix convention byte-for-byte — match by suffix so
         # a minor path-form difference doesn't defeat the check.
-        new_content = next(
-            (c for p, c in rewritten.items() if p == importer or importer.endswith(p) or p.endswith(importer)),
+        return next(
+            (c for p, c in rewritten.items() if p == path or path.endswith(p) or p.endswith(path)),
             None,
         )
+
+    kept: list[dict[str, Any]] = []
+    for item in unresolved:
+        target = str(item.get("target", ""))
+        importer = str(item.get("importer", ""))
+        name = str(item.get("name", ""))
+        if name:
+            # A missing NAME in a module that exists: the module existing proves nothing. Resolved
+            # when the module now defines it, or the importer no longer imports it.
+            target_content = _rewritten(target)
+            if target_content is not None and name in (defined_names(target_content) or {name}):
+                continue
+            importer_content = _rewritten(importer)
+            if importer_content is not None and not re.search(rf"\b{re.escape(name)}\b", importer_content):
+                continue
+            kept.append(item)
+            continue
+        if target_resolves(target, existing):
+            continue  # the missing module now exists
+        new_content = _rewritten(importer)
         if new_content is not None and str(item.get("specifier", "")) not in new_content:
             continue  # importer was rewritten and no longer imports the missing specifier
         kept.append(item)

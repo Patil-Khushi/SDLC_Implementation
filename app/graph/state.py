@@ -219,6 +219,12 @@ class WorkflowState(TypedDict, total=False):
     # the Debugging agent's prompt so it starts from the full list instead of rediscovering them one
     # build error at a time.
     unresolved_imports: list[dict[str, Any]]
+    # Cross-file disagreements the reconcile pass can report but not settle without picking a side
+    # (app/services/wiring.py::find_integration_issues): routes not under the pack's API base path,
+    # a frontend calling a base path the backend does not serve, a router nothing mounts, a
+    # define-once helper defined twice, an async engine behind sync sessions. ``{kind, detail,
+    # files}`` dicts, for the run summary and the Debugging agent.
+    integration_findings: list[dict[str, Any]]
     unit_tests: list[str]                  # workspace-relative paths of test files written
     unit_test_report: str        # Unit Test: the Markdown report content (per-work-item coverage)
     unit_test_report_path: str   # Unit Test: where the report .md was saved (reports/…)
