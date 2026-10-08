@@ -129,7 +129,7 @@ def report_pack(pack_dir: Path, dump_dir: Path | None = None) -> dict[str, Any]:
         produced = [f["path"] for f in render_scaffold(pack_dir.name, package)]
         contexts: dict[str, dict[str, Any]] = {}
         for item in items:
-            text, sections = agent._assemble_context(item, package, list(produced))
+            text, sections = agent._assemble_context(item, package, list(produced), work_items=items)
             contexts[item.id] = {"chars": len(text), "sections": sections, "text": text}
             produced.extend(p for p in item.target_files if p not in produced)
     finally:

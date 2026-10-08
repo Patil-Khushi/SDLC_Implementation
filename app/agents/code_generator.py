@@ -31,7 +31,7 @@ from app.integrations.executor import Executor, get_executor
 from app.models import GenerationSummary, WorkItem
 from app.services import requirement_ledger
 from app.services.llm_gateway import LLMGateway
-from app.services.naming_contract import build_naming_contract_from_package
+from app.services.naming_contract import build_module_map, build_naming_contract_from_package
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,9 @@ class CodeGeneratorAgent(BaseAgent):
 
         design_package = state.get("design_package") or {}
         produced = self._already_generated(state)
-        context, sections_used = self._assemble_context(work_item, design_package, produced)
+        context, sections_used = self._assemble_context(
+            work_item, design_package, produced, work_items=state.get("work_items")
+        )
         self._append_plan(state, work_item, sections_used)
 
         phase, subject = _phase_of(work_item)
@@ -559,6 +561,8 @@ class CodeGeneratorAgent(BaseAgent):
         work_item: WorkItem,
         design_package: dict[str, Any],
         produced: list[str] | None = None,
+        *,
+        work_items: list[WorkItem] | None = None,
     ) -> tuple[str, list[str]]:
         """Return (joined context text, names of the sections that were actually populated).
 
@@ -576,6 +580,14 @@ class CodeGeneratorAgent(BaseAgent):
         contract = build_naming_contract_from_package(design_package)
         if contract:
             sections.append(("Naming contract", contract))
+
+        # The module map binds IMPORTS the way the contract binds names: every module the plan will
+        # produce, by the exact name another file imports it as. Without it an entry point generated
+        # before its routers guesses a package (`from app.routers import ...`) that never exists.
+        # Built from the whole plan, so it covers files generated after this one too.
+        module_map = build_module_map(work_items, for_item=work_item)
+        if module_map:
+            sections.append(("Module map", module_map))
 
         # Manifest of files ALREADY generated this run (scaffold + earlier items). Because items are
         # generated in isolation, an entry point / router / service otherwise can't know what its
