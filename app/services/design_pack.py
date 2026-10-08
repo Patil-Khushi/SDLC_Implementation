@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ try:  # PyYAML is used for OpenAPI specs; degrade gracefully if unavailable.
     import yaml
 except Exception:  # pragma: no cover - yaml is in requirements, this is just belt-and-braces
     yaml = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
 _STRUCTURE_INDEX_KEYS = ("tree", "structure", "files")
@@ -472,36 +475,98 @@ def _screens_from_mapping(
 
 
 def _build_tag_reqs(roles: dict[str, list[DetectedFile]], tags: list[str]) -> dict[str, list[str]]:
-    """Map each OpenAPI tag to requirement ids via the feature whose name it matches."""
-    feature_reqs: dict[str, list[str]] = {}   # feature-name-norm → [REQ]
+    """Map each OpenAPI tag to requirement ids via the feature whose name it matches.
+
+    Matching is **token-first, substring-as-fallback**, and the order matters. The original
+    implementation only did ``stem in norm_feature_name`` against a name with every non-alphanumeric
+    stripped out ("Orders & Fulfilment" -> "ordersfulfilment"), which over-matches: any tag whose
+    singular stem happens to appear anywhere inside a glued feature name collects that feature's
+    ENTIRE requirement list, and a tag matching two feature names silently collects the union of
+    both. Tag ``order`` would take the requirements of a "Reorder" feature; tag ``cat`` would take
+    "Catalogue & Browsing".
+
+    So: first try an exact match against the feature name's individual words (both sides
+    singularised), which is what actually expresses "this tag is that feature". Only if no feature
+    matches that way does the old substring test run, so a pack that resolves correctly today
+    resolves identically — this is a precision fix, not a behaviour change for the working case.
+
+    Tags that resolve to nothing are logged. They are not an error (a tag may genuinely have no
+    requirements behind it), but silence is how the resulting empty ``requirement_ids`` on a work
+    item goes unnoticed, and traceability is the thing this function exists to provide.
+
+    Granularity is a known limit either way: a tag inherits its whole feature's requirements, so
+    ``cart`` and ``checkout`` both map to all of "Cart & Checkout". Splitting a feature's
+    requirements across its tags needs per-requirement tagging that the design pack does not carry.
+    """
+    # (glued name, singularised word tokens, reqs) — the tokens are what makes a precise match
+    # possible, and they are lost by _norm, so both forms are kept.
+    features: list[tuple[str, set[str], list[str]]] = []
+
+    def _add(name: str, reqs: list[str]) -> None:
+        if name and reqs:
+            features.append((_norm(name), {_singular(t) for t in _tokens(name)}, reqs))
+
     uf = _first(roles, "user_features")
     if uf and isinstance(uf.obj, dict):
         for feat in uf.obj.get("features", []):
             if isinstance(feat, dict) and feat.get("name"):
-                reqs = [str(r) for r in feat.get("requirements", []) if r]
-                if reqs:
-                    feature_reqs[_norm(feat["name"])] = reqs
-    if not feature_reqs:  # fall back to requirements grouped by their 'feature' field
+                _add(str(feat["name"]), [str(r) for r in feat.get("requirements", []) if r])
+    if not features:  # fall back to requirements grouped by their 'feature' field
         req = _first(roles, "requirements")
         block = (req.obj.get("functional") if req and isinstance(req.obj, dict) else req.obj) if req else None
         if isinstance(block, list):
             grouped: dict[str, list[str]] = defaultdict(list)
             for item in block:
                 if isinstance(item, dict) and item.get("feature") and item.get("id"):
-                    grouped[_norm(item["feature"])].append(str(item["id"]))
-            feature_reqs = dict(grouped)
+                    grouped[str(item["feature"])].append(str(item["id"]))
+            for name, reqs in grouped.items():
+                _add(name, reqs)
 
     tag_reqs: dict[str, list[str]] = {}
+    unmapped: list[str] = []
+    ambiguous: list[str] = []
     for tag in tags:
         if not tag:
             continue
         stem = _singular(_norm(tag))
-        matched: list[str] = []
-        for fname, reqs in feature_reqs.items():
-            if stem and stem in fname:
-                matched.extend(reqs)
+        if not stem:
+            continue
+
+        matched = [reqs for _, toks, reqs in features if stem in toks]
+        if not matched:
+            # No feature names this tag as one of its words. Fall back to the looser test, because
+            # abbreviated tags are normal and real: "auth" is not a word of "Account &
+            # Authentication", but it plainly means it, and the live pack depends on that mapping.
+            #
+            # The fallback accepts a match only when it is UNAMBIGUOUS. Taking the union of several
+            # loose matches is the actual damage the old substring test did: a tag would silently
+            # inherit two unrelated features' requirements, and nothing downstream could tell. An
+            # ambiguous tag is reported instead, because a wrong mapping is worse than a missing one.
+            loose = [(gname, reqs) for gname, _, reqs in features if stem in gname]
+            if len(loose) == 1:
+                matched = [loose[0][1]]
+            elif len(loose) > 1:
+                ambiguous.append(f"{tag} (matches {', '.join(sorted(g for g, _ in loose))})")
+
         if matched:
-            tag_reqs[tag] = sorted(dict.fromkeys(matched))
+            tag_reqs[tag] = sorted(dict.fromkeys(r for reqs in matched for r in reqs))
+        else:
+            unmapped.append(tag)
+
+    if ambiguous:
+        logger.warning(
+            "design pack: %d OpenAPI tag(s) match more than one feature by name and were left "
+            "unmapped rather than given the union of both: %s. Rename the tag to one of the "
+            "feature's own words, or add the tag to that feature, to resolve it.",
+            len(ambiguous), "; ".join(sorted(ambiguous)),
+        )
+    if unmapped:
+        logger.warning(
+            "design pack: %d OpenAPI tag(s) map to no requirement ids: %s. Work items for those "
+            "endpoints will carry requirement_ids=[] - traceability for them is unavailable, not "
+            "empty by design.",
+            len(unmapped), ", ".join(sorted(unmapped)),
+        )
     return tag_reqs
 
 

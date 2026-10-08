@@ -25,6 +25,9 @@ ALL_FIELDS = {
     "debugging_report", "debugging_report_path",
     "documentation", "security_report", "security_report_path", "security_verdict",
     "security_findings_path", "security_loop_attempt", "pr_url", "finalize_status", "package_path",
+    # conversational code generation: a chat-driven patch to the plan, applied between work items
+    "chat_enabled", "chat_seq", "chat_pending", "chat_patch", "chat_planner_notes", "chat_log",
+    "chat_turns", "requirement_ledger", "pre_item_digests", "orphan_files",
     "workflow_status",
 }
 
@@ -39,6 +42,10 @@ INITIALIZED_FIELDS = {
     # brownfield INPUTS are always seeded (defaulting to greenfield) so route_entry reads a real
     # value rather than an absent key — the mode decision is never left implicit.
     "source_mode", "source_repo_url", "change_request", "base_ref",
+    # conversational code generation is seeded the same way, and for the same reason: chat_intake
+    # reads a real chat_enabled (False) rather than an absent key, so the pass-through is explicit.
+    "chat_enabled", "chat_seq", "chat_pending", "chat_patch", "chat_planner_notes", "chat_log",
+    "chat_turns", "requirement_ledger", "pre_item_digests", "orphan_files",
 }
 
 
@@ -64,6 +71,18 @@ def test_new_state_defaults() -> None:
     assert state["workflow_status"] == "pending"
     assert state["push_enabled"] is False        # push OFF by default (opt-in)
     assert state["git_remote"] == "" and state["git_token"] == ""
+    # Chat OFF by default: this is what keeps a run byte-identical to before the feature existed.
+    assert state["chat_enabled"] is False
+    assert state["chat_seq"] == 0 and state["chat_turns"] == 0
+    assert state["chat_pending"] == [] and state["chat_log"] == []
+    assert state["chat_patch"] == {} and state["chat_planner_notes"] == ""
+    assert state["requirement_ledger"] == []
+    assert state["pre_item_digests"] == {} and state["orphan_files"] == []
+
+
+def test_new_state_can_opt_into_chat() -> None:
+    state = new_state(run_id="r", attempt=0, chat_enabled=True)
+    assert state["chat_enabled"] is True
 
 
 def test_new_state_accepts_push_config() -> None:

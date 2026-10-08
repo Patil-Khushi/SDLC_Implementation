@@ -130,6 +130,40 @@ class WorkflowState(TypedDict, total=False):
     generation_summary: str               # human-readable free-text summary of the run
     generation_metrics: dict[str, Any]    # run-level metrics (generation-metrics.json shape)
 
+    # --- Conversational code generation (chat-driven plan patching) ---
+    # Master switch, copied from settings at run start. Falsy (the default, and what an absent value
+    # means) makes chat_intake_node a pure pass-through, so a run is byte-identical to one from
+    # before this feature existed.
+    chat_enabled: bool
+    # Consumed high-water mark: the highest chat_inbox seq this run has drained. MUST advance even
+    # when a turn is refused or errors, or a message nobody can act on would be re-proposed by every
+    # later turn and every later run.
+    chat_seq: int
+    # Messages drained this turn — the input to ChatPlannerAgent, written by chat_intake_node
+    # immediately before it and cleared after. Plain dicts (see chat_log below).
+    chat_pending: list[dict[str, Any]]
+    # The planner's proposed PlanPatch, model_dump()'d. A dict rather than the pydantic model
+    # because _build_checkpointer allow-lists WorkItem alone for msgpack — any other pydantic type
+    # silently deserialises to a bare dict after a checkpoint round-trip, so it is stored as one.
+    chat_patch: dict[str, Any]
+    chat_planner_notes: str          # the planner's rationale, or its refusal reason, for the report
+    chat_log: list[dict[str, Any]]   # one row per applied turn: {seq, text, report}
+    # Applied turns this run, capped by router.CHAT_TURN_CAP. A LOCAL counter in the same family as
+    # repair_attempt/debug_attempt — it is NOT the orchestrator's `attempt` and never touches it.
+    chat_turns: int
+    # What each work item ACTUALLY wrote: [{work_item_id, feature_id, requirement_ids, files,
+    # action}]. Written by code_generator on success; read by plan_patch to decide whether a
+    # "modify" request can retarget a pending item or needs a new item over real files. Observed
+    # files, deliberately not the pack's predicted target_files — see requirement_ledger's docstring.
+    requirement_ledger: list[dict[str, Any]]
+    # Digests of the current item's target_files, taken by select_work_item_node when it selects an
+    # action="modify" item and read by gate_node to prove the targets actually moved. files_complete
+    # cannot answer that: the files already exist, so it passes on a no-op edit.
+    pre_item_digests: dict[str, str]
+    # Files left behind by a conversational "remove". Reported, never deleted — there is no
+    # Executor.delete_file, and per-feature commits may already be pushed.
+    orphan_files: list[str]
+
     # --- Git push (opt-in; mandatory workflow rules 4 & 8) ---
     # When push_enabled AND git_remote are set, the commit step pushes 'main' after the scaffold
     # commit and 'dev' immediately after EACH feature commit, stopping the run if a push fails
@@ -215,6 +249,7 @@ def new_state(
     source_repo_url: str = "",
     change_request: dict[str, Any] | None = None,
     base_ref: str = "",
+    chat_enabled: bool = False,
 ) -> WorkflowState:
     """Build the initial state for a run.
 
@@ -225,6 +260,10 @@ def new_state(
     locally but pushes nothing. Set ``push_enabled=True`` + ``git_remote`` (and optionally
     ``git_token``) to push ``main`` after the scaffold, ``dev`` after each feature, and ``dev``
     once more after Refactoring when it edited files (that last push is non-fatal on failure).
+
+    Chat is OFF by default (``chat_enabled=False``): every conversational node is a pass-through, so
+    every existing caller is byte-identical to before the feature existed. Set it to ``True`` (the
+    scripts read ``settings.chat_enabled``) to let ``chat_intake`` drain the inbox between work items.
 
     Fails fast on a malformed ``work_items`` (must be a list) rather than crashing deep in the
     graph loop.
@@ -260,5 +299,17 @@ def new_state(
         "git_remote": git_remote,
         "git_token": git_token,
         "security_loop_attempt": 0,
+        # Conversational code generation. Defaulted so a caller that knows nothing about chat gets
+        # exactly today's behaviour: chat_intake sees chat_enabled False and passes straight through.
+        "chat_enabled": chat_enabled,
+        "chat_seq": 0,
+        "chat_pending": [],
+        "chat_patch": {},
+        "chat_planner_notes": "",
+        "chat_log": [],
+        "chat_turns": 0,
+        "requirement_ledger": [],
+        "pre_item_digests": {},
+        "orphan_files": [],
         "workflow_status": "pending",
     }

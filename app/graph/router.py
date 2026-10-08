@@ -33,6 +33,14 @@ DEBUG_CAP = 10
 #: Refactoring agent/node Code Review's one-shot call uses (see ``route_after_refactoring``).
 SECURITY_LOOP_CAP = 3
 
+#: Local cap on conversational turns absorbed by ONE run (``chat_turns``, advanced by
+#: ``chat_intake_node``). Same family as the counters above — local, never the orchestrator's
+#: ``attempt`` — but note it caps a count of *user requests*, not retries of a failing step, so
+#: hitting it is not an error and does not escalate: intake simply stops draining the inbox and the
+#: build finishes the plan it has. Crude on purpose: each turn costs one planner call plus whatever
+#: it regenerates, so this is a stop against an unbounded conversation, not a token budget.
+CHAT_TURN_CAP = 20
+
 
 def route_entry(state: WorkflowState) -> str:
     """Which lane a run enters: build a new app, or change an existing one.

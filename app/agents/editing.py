@@ -148,3 +148,72 @@ def editing_tools(
             },
         ),
     ]
+
+
+#: Cap on a single file read served to a question-answering agent. Generous enough for any real
+#: source file, small enough that one curious question cannot blow the context window.
+MAX_READABLE_FILE_CHARS = 40_000
+
+#: Cap on how many paths `list_files` reports in one call. A generated project runs to hundreds of
+#: files; the point of the listing is orientation, not a manifest.
+MAX_LISTED_FILES = 400
+
+
+def reading_tools(executor: Executor, project_dir: str, *, label: str = "reading") -> list[Any]:
+    """A READ-ONLY ``read_file`` / ``list_files`` pair scoped to ``project_dir``.
+
+    The sibling of :func:`editing_tools`, for agents that must understand a project without being
+    able to touch it — answering a question about generated code, for instance. There is no write
+    tool here at all, which is the safety property: an agent given these cannot modify the project
+    even if its prompt is talked into trying, because the capability is absent rather than guarded.
+
+    Reads are truncated rather than refused (``MAX_READABLE_FILE_CHARS``): a partial read still
+    answers most questions, whereas a refusal answers none. The truncation is announced in the
+    returned text so the model does not treat a cut-off file as the whole thing.
+    """
+    def _read(path: str) -> str:
+        try:
+            text = executor.read_file(project_path(project_dir, path))
+        except Exception as exc:  # noqa: BLE001 - report to the model, don't crash the loop
+            return f"ERROR: could not read {path}: {type(exc).__name__}: {exc}"
+        if len(text) > MAX_READABLE_FILE_CHARS:
+            return (
+                text[:MAX_READABLE_FILE_CHARS]
+                + f"\n\n... [truncated: {path} is {len(text)} chars, showing the first "
+                  f"{MAX_READABLE_FILE_CHARS}]"
+            )
+        return text
+
+    def _list(prefix: str = "") -> str:
+        try:
+            paths = executor.list_files(project_dir, prefix)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR: could not list {prefix or '/'}: {type(exc).__name__}: {exc}"
+        if not paths:
+            return f"(no files under {prefix or 'the project root'})"
+        shown = sorted(paths)[:MAX_LISTED_FILES]
+        out = "\n".join(shown)
+        if len(paths) > len(shown):
+            out += f"\n... and {len(paths) - len(shown)} more (narrow the prefix to see them)"
+        logger.debug("[%s] listed %d file(s) under %r", label, len(shown), prefix)
+        return out
+
+    return [
+        RepairTool(
+            name="read_file",
+            description="Read a file's text content. Path is repo-relative. Read-only.",
+            handler=_read,
+            input_schema={"type": "object", "properties": {"path": {"type": "string"}},
+                          "required": ["path"]},
+        ),
+        RepairTool(
+            name="list_files",
+            description=(
+                "List the project's files, optionally under a repo-relative directory prefix. "
+                "Use this to orient yourself before reading."
+            ),
+            handler=_list,
+            input_schema={"type": "object", "properties": {"prefix": {"type": "string"}},
+                          "required": []},
+        ),
+    ]

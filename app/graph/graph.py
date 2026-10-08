@@ -183,6 +183,7 @@ def build_graph():
     graph.add_node("code_generator", nodes.code_generator_node)
     graph.add_node("gate", nodes.gate_node)
     graph.add_node("feature_publish", nodes.feature_publish_node)
+    graph.add_node("chat_intake", nodes.chat_intake_node)
     graph.add_node("reconcile", nodes.reconcile_node)
     graph.add_node("commit", nodes.commit_node)
     graph.add_node("repair", repair_node)
@@ -255,7 +256,12 @@ def build_graph():
         "gate", route_after_gate,
         {"select": "feature_publish", "repair": "repair", "escalate": "escalate"},
     )
-    graph.add_edge("feature_publish", "select")  # per-feature live push done → select next item
+    # Per-feature live push done → absorb any queued chat → select the next item. chat_intake sits
+    # HERE, on the loop's own edge, because select re-reads work_items and work_item_index on every
+    # pass: a plan patched between items is simply picked up, with no interrupt() and no
+    # update_state(). With chat disabled (the default) the node returns state untouched.
+    graph.add_edge("feature_publish", "chat_intake")
+    graph.add_edge("chat_intake", "select")
     graph.add_edge("commit", "code_review")  # run-level commit/finalize → Code Review runs first
     graph.add_edge("repair", "gate")          # repair → back to the fixed gate
     graph.add_edge("escalate", END)           # failure flagged (needs_human_review) → done, no pause

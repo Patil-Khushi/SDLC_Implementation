@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     # Security scan passes (final step).
     working_branch: str = "dev"
 
+    # Conversational code generation (app/services/chat_inbox.py + the chat_intake node).
+    # OFF by default, and that default is load-bearing: with it off every chat node is a no-op and a
+    # run is byte-identical to one from before the feature existed, so enabling the conversation is
+    # an explicit choice rather than something a caller inherits.
+    chat_enabled: bool = False
+    # Crude backstop on how many conversational turns one run will absorb. Not a budget — each turn
+    # costs a planner call plus whatever it regenerates — just a stop against an unbounded loop.
+    chat_turn_cap: int = 20
+
     # SonarQube static analysis (integrations/sonarqube.py). OFF by default; when disabled the
     # review runs on ruff/eslint + the LLM alone. NOTE two URLs for the same server:
     #   * sonarqube_scanner_url — used by sonar-scanner INSIDE the sandbox container (upload)

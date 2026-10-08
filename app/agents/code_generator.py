@@ -25,13 +25,24 @@ import time
 from typing import Any
 
 from app.agents.base import BaseAgent
+from app.agents.editing import editing_tools
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.models import GenerationSummary, WorkItem
+from app.services import requirement_ledger
 from app.services.llm_gateway import LLMGateway
 from app.services.naming_contract import build_naming_contract_from_package
 
 logger = logging.getLogger(__name__)
+
+#: Tool-loop budget for an ``action="modify"`` item, in turns of reasoning (the gateway executes
+#: every tool call in a turn, so one turn can touch several files). Scaled with the target count on
+#: the same reasoning as ``refactoring._max_iters_for``: a fixed budget starves a large item and
+#: silently leaves targets unedited, which the digest gate would then report as a failure the model
+#: never had the turns to avoid.
+MODIFY_MAX_ITERS = 12
+MODIFY_ITERS_PER_FILE = 3
+MODIFY_MAX_ITERS_CEILING = 60
 
 #: Cap on how many already-generated paths are listed in a single item's context (keeps the prompt
 #: bounded on large plans; the list is a discovery aid, not an exhaustive manifest).
@@ -93,6 +104,28 @@ class CodeGeneratorAgent(BaseAgent):
             run_id,
             ", ".join(sections_used) or "(none)",
         )
+
+        # Two generation modes, one agent. An item that CREATES files takes the original
+        # strict-JSON path unchanged; an item that MODIFIES files it generated earlier in this run
+        # needs to READ them first, which the strict-JSON path cannot do at all — it never reads.
+        # A conversational request lands here as a modify item (see app/services/plan_patch.py).
+        if work_item.action in ("modify", "delete"):
+            logger.info("[code_generator] run=%s | [EDITING %s] %s", run_id, phase, subject)
+            started = time.perf_counter()
+            written, notes = self._apply_modifications(state, work_item, context)
+            elapsed = round(time.perf_counter() - started, 3)
+            if notes is None:
+                self._record_failure(state, work_item, elapsed)
+                state["codegen_ok"] = False  # router -> escalate (the model call itself failed)
+                return state
+            # Deliberately codegen_ok=True even when nothing was touched: the gate's digest check
+            # is what proves a modify item actually moved its targets, and routing a no-op through
+            # the gate gives it the repair loop. Escalating here would skip that.
+            self._record_success(state, work_item, written, elapsed, notes=notes)
+            state["codegen_ok"] = True
+            state["workflow_status"] = "code_generated"
+            return state
+
         logger.info("[code_generator] run=%s | [GENERATING %s] %s", run_id, phase, subject)
 
         system = self._load_prompt("code_generation")
@@ -111,6 +144,93 @@ class CodeGeneratorAgent(BaseAgent):
         state["codegen_ok"] = True
         state["workflow_status"] = "code_generated"
         return state
+
+    # -- modification (conversational / incremental) ---------------------------
+
+    @staticmethod
+    def _max_modify_iters(file_count: int) -> int:
+        """Scale the tool-loop budget with the number of targets, floored and ceilinged."""
+        scaled = file_count * MODIFY_ITERS_PER_FILE
+        return max(MODIFY_MAX_ITERS, min(scaled, MODIFY_MAX_ITERS_CEILING))
+
+    def _apply_modifications(
+        self, state: WorkflowState, work_item: WorkItem, context: str
+    ) -> tuple[list[str], str | None]:
+        """Edit an item's existing target files in place. Returns ``(written, notes)``.
+
+        ``notes`` is the model's own account of what it changed, or ``None`` when the model call
+        itself failed — the one case that is a generation failure rather than a gate failure.
+
+        Writes are fenced to ``work_item.target_files`` via ``editing_tools(allowed_paths=...)``.
+        That fence is the only thing standing between a conversational request and an edit to a file
+        nobody planned or reviewed, so it is passed for every modify item and never widened. Reads
+        stay unrestricted: understanding a change means reading its callers.
+        """
+        executor = self._resolve_executor()
+        project_dir = _project_dir(state)
+        targets = [_normalize_path(p) for p in work_item.target_files if p and p.strip()]
+
+        touched: list[str] = []
+        tools = editing_tools(
+            executor, project_dir, touched, allowed_paths=set(targets), label=self.name
+        )
+        prompt = self._build_modify_prompt(work_item, context, targets)
+        system = self._load_prompt("code_generation_modify")
+
+        try:
+            notes = self.llm.complete_with_tools(
+                prompt=prompt,
+                system=system,
+                tools=tools,
+                max_iters=self._max_modify_iters(len(targets) or 1),
+            )
+        except Exception as exc:  # noqa: BLE001 - a gateway failure is a generation failure
+            logger.warning(
+                "[code_generator] run=%s | modify %s: model call failed: %s: %s",
+                state.get("run_id") or "-", work_item.id, type(exc).__name__, exc,
+            )
+            return [], None
+
+        # Editing tools record full workspace paths; keep generated_code consistent with the
+        # create path, which also stores workspace paths.
+        generated = list(state.get("generated_code", []))
+        for out_path in touched:
+            if out_path not in generated:
+                generated.append(out_path)
+        state["generated_code"] = generated
+
+        unreached = [t for t in targets if _project_path(project_dir, t) not in set(touched)]
+        if unreached:
+            # Not necessarily wrong — the model may have judged one target needed no change — but
+            # worth surfacing, because the alternative explanation is a starved tool loop.
+            logger.info(
+                "[code_generator] run=%s | modify %s: %d target(s) not written: %s",
+                state.get("run_id") or "-", work_item.id, len(unreached), ", ".join(unreached),
+            )
+        return touched, notes or ""
+
+    def _build_modify_prompt(self, work_item: WorkItem, context: str, targets: list[str]) -> str:
+        """Prompt for an edit-in-place item: the request, the definition of done, the targets."""
+        parts = [
+            f"WORK ITEM: {work_item.id}",
+            f"FEATURE: {work_item.feature_title or work_item.feature_id or '(ungrouped)'}",
+            "",
+            "CHANGE REQUESTED",
+            work_item.change_intent or "(no intent recorded — make no change and say so)",
+        ]
+        if work_item.acceptance_criteria:
+            parts += ["", "ACCEPTANCE CRITERIA (the definition of done)"]
+            parts += [f"- {c}" for c in work_item.acceptance_criteria]
+        target_lines = [f"- {t}" for t in targets] or ["- (none declared)"]
+        parts += [
+            "",
+            "FILES YOU MAY EDIT (writes outside this list are refused)",
+            *target_lines,
+            "",
+            "PROJECT CONTEXT",
+            context,
+        ]
+        return "\n".join(parts)
 
     # -- generation -----------------------------------------------------------
 
@@ -342,8 +462,30 @@ class CodeGeneratorAgent(BaseAgent):
         return written
 
     def _record_success(
-        self, state: WorkflowState, work_item: WorkItem, written: list[str], seconds: float
+        self,
+        state: WorkflowState,
+        work_item: WorkItem,
+        written: list[str],
+        seconds: float,
+        *,
+        notes: str | None = None,
     ) -> None:
+        # Record what was ACTUALLY written, per work item. This is the ledger a later conversational
+        # turn resolves "change the login flow" against — without it, an incremental change has no
+        # answer better than regenerating the project. Observed paths, deliberately not the pack's
+        # predicted target_files: the two routinely differ (see requirement_ledger's docstring).
+        # Only when something was actually written. A no-op modify (the model touched nothing) must
+        # NOT leave a row: `is_generated` would then be True for an item that produced nothing, and
+        # a later conversational "modify" of it would resolve to zero files and be skipped with
+        # "the ledger records no files for it" — silently unfixable. No row keeps it honest.
+        project_dir = _project_dir(state)
+        if written:
+            state["requirement_ledger"] = requirement_ledger.record(
+                state.get("requirement_ledger"),
+                work_item,
+                [_strip_project(project_dir, p) for p in written],
+            )
+
         # Build the per-item summary (compile_passed stays None — the gate fills it later).
         summary = GenerationSummary(work_item_id=work_item.id, files_produced=written)
         line = (
@@ -355,6 +497,8 @@ class CodeGeneratorAgent(BaseAgent):
             f"screens={','.join(work_item.screens) or '-'}"
         )
         self._append_summary(state, line)
+        if notes:
+            self._append_summary(state, f"[code_generator] {work_item.id} edit notes: {notes.strip()}")
         self._bump_metrics(state, work_item.id, files=len(written), seconds=seconds)
         logger.info(
             "[code_generator] run=%s | [DONE] %s - %d file(s) in %.3fs: %s",
@@ -524,6 +668,18 @@ class CodeGeneratorAgent(BaseAgent):
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _strip_project(project_dir: str, path: str) -> str:
+    """Inverse of ``_project_path``: a workspace path back to project-relative.
+
+    The ledger stores project-relative paths so they drop straight into a follow-up work item's
+    ``target_files`` and compare cleanly against ``codegen_digest`` snapshots, which are keyed the
+    same way.
+    """
+    rel = (path or "").lstrip("/")
+    prefix = f"{project_dir}/"
+    return rel[len(prefix):] if rel.startswith(prefix) else rel
 
 
 def _normalize_path(path: str) -> str:

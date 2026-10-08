@@ -38,9 +38,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # so `app.*` imports work
 
+from app.config.settings import get_settings  # noqa: E402
 from app.graph.graph import resolve_checkpoint_db_path, workflow  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_executor  # noqa: E402
+from app.services import chat_inbox  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
 from app.services.run_transcript import (  # noqa: E402
     DEFAULT_REPLAY_SECONDS,
@@ -132,7 +134,22 @@ def _load_pack(pack_dir: Path) -> dict[str, Any]:
 
 
 def _canned_llm_reply(prompt: str, **_kw: Any) -> str:
-    """Dry-run stand-in: return placeholder content for every file the prompt actually asks for."""
+    """Dry-run stand-in: return placeholder content for every file the prompt actually asks for.
+
+    The PER-FILE branch comes first because ``code_generator._generate_files`` routes any work item
+    with two or more targets there, and that prompt asks for one named file without printing the
+    "Target files" block. Matching only the block meant every such call answered with
+    ``placeholder.py``, no reply matched its requested path, and the item failed the gate with
+    "0 of N planned files" — so a dry-run of any realistic pack escalated at the first work item.
+    """
+    one = re.search(r"Generate EXACTLY ONE file now: (.+)", prompt)
+    if one:
+        path = one.group(1).strip()
+        return json.dumps({
+            "files": [{"path": path, "content": f"# placeholder for {path}\n"}],
+            "notes": "dry-run canned content",
+        })
+
     match = re.search(r"Target files \(produce ONLY these\):\n((?:- .+\n?)*)", prompt)
     lines = match.group(1).splitlines() if match else []
     paths = [ln[2:].strip() for ln in lines if ln.startswith("- ")]
@@ -430,7 +447,12 @@ def _run(args: argparse.Namespace, *, mode: str, do_publish: bool,
         run_id=run_id, attempt=0, project_id=args.project,
         design_package=design_package, work_items=work_items,
         push_enabled=push_enabled, git_remote=git_remote, git_token=git_token,
+        # Opt-in (CHAT_ENABLED). Off => chat_intake passes through and this run is unchanged.
+        chat_enabled=bool(get_settings().chat_enabled),
     )
+    # This run owns only messages sent WHILE it runs. Seeding the mark past whatever the inbox
+    # already holds stops a project's conversational history being re-applied to a fresh build.
+    initial["chat_seq"] = chat_inbox.high_water(args.project)
     config = {"configurable": {"thread_id": run_id}, "recursion_limit": 1000}
     workflow.invoke(initial, config)
     state = workflow.get_state(config).values  # runs to completion (auto-commit, no HITL)
