@@ -93,15 +93,26 @@ def _side(item_id: str) -> str:
     return "backend" if item_id.startswith("backend") else "frontend" if item_id.startswith("frontend") else "other"
 
 
+def _is_manifest_item(item: Any, side: str) -> bool:
+    """Every target is a manifest (package.json, requirements.txt, Dockerfile, ...) — these come
+    after the entry point on purpose: they list what the code ended up importing."""
+    from app.services.plan_builder import _backend_layer, _frontend_layer
+
+    layer_of = _backend_layer if side == "backend" else _frontend_layer
+    return bool(item.target_files) and all(layer_of(f, "") == "manifest" for f in item.target_files)
+
+
 def _entry_positions(items: list[Any], side: str, names: set[str]) -> dict[str, Any]:
-    """Where entry-point files sit in the generation order of their side."""
+    """Where entry-point files sit in the generation order of their side. "Last" means no SOURCE
+    item follows them (trailing manifest-only items do not count)."""
     side_items = [w for w in items if _side(w.id) == side]
     hits = []
     for pos, item in enumerate(side_items):
         for path in item.target_files:
             if Path(path).name.lower() in names:
                 hits.append({"file": path, "item": item.id, "position": pos, "of": len(side_items)})
-    return {"entries": hits, "all_last": bool(hits) and all(h["position"] == len(side_items) - 1 for h in hits)}
+    last_source = max((pos for pos, w in enumerate(side_items) if not _is_manifest_item(w, side)), default=-1)
+    return {"entries": hits, "all_last": bool(hits) and all(h["position"] == last_source for h in hits)}
 
 
 def report_pack(pack_dir: Path, dump_dir: Path | None = None) -> dict[str, Any]:

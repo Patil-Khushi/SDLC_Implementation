@@ -741,7 +741,81 @@ def _endpoints_from_openapi(spec: dict[str, Any]) -> list[dict[str, Any]]:
                 "path": path,
                 "operation_id": op.get("operationId") or "",
                 "tag": (tags[0] if tags else "") or "",
+                "summary": str(op.get("summary") or ""),
             })
+    return out
+
+
+# --------------------------------------------------------------------------- text matching
+#
+# Requirement traceability by WORDS, for the tags no feature name covers. A pack's feature names
+# ("Service Scheduling") rarely spell the OpenAPI tags ("schedules", "depots", "readings"), so a
+# tag-to-feature match alone left those endpoints with requirement_ids=[] — and requirement TEXT is
+# what later stages put in the generation prompt, so the module implementing "a depot dashboard of
+# vehicles due for service" was generated without ever being told that.
+
+#: Words that say nothing about WHICH requirement an operation serves.
+_TEXT_STOPWORDS = frozenset(
+    "a an the and or of to for in on at by with from into via as is are be shall should must will can "
+    "may this that these those it its all any each every new one get list create update delete remove "
+    "add set return returns submit fetch retrieve obtain current id ids by single detail details "
+    "allow allows allowed system user users data record records item items".split()
+)
+
+
+def _stem(token: str) -> str:
+    """Tiny suffix stripper so word forms meet: schedules/scheduling -> schedul,
+    readings/reading -> read, services/service -> servic, manually -> manual. Deliberately crude:
+    it only needs to make the SAME word's forms equal, not produce linguistic roots."""
+    t = token.lower()
+    for suffix in ("ings", "ing", "ly", "ed", "es", "s"):
+        if t.endswith(suffix) and len(t) - len(suffix) >= 3 and not (suffix == "s" and t.endswith("ss")):
+            t = t[: -len(suffix)]
+            break
+    if t.endswith("e") and len(t) >= 4:
+        t = t[:-1]
+    return t
+
+
+def _text_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(text)).lower())
+    return {_stem(w) for w in words if len(w) > 2 and w not in _TEXT_STOPWORDS}
+
+
+def _endpoint_tokens(endpoint: dict[str, Any]) -> set[str]:
+    """An operation's words: its summary, operationId and literal path segments (NOT its prose
+    description, whose "Allowed roles: Manager" would match every requirement naming a role)."""
+    literal = " ".join(s for s in str(endpoint.get("path", "")).split("/") if s and not s.startswith("{"))
+    return _text_tokens(f"{endpoint.get('summary', '')} {endpoint.get('operation_id', '')} {literal.replace('-', ' ')}")
+
+
+def match_requirements_to_endpoints(
+    requirements: list[dict[str, Any]], endpoints: list[dict[str, Any]], *, min_shared: int = 2,
+) -> dict[str, list[str]]:
+    """``requirement id -> [endpoint keys]`` of the operation(s) whose words best match its text.
+
+    A requirement goes to its BEST-scoring operations only (ties kept), and only when they share at
+    least ``min_shared`` distinctive words — words appearing in more than half of all requirements
+    ("vehicle" in a fleet system) are not distinctive and do not count. Unmatched requirements are
+    simply absent: a missing link is reported downstream, a wrong one would be invisible.
+    """
+    reqs = [(str(r.get("id")), _text_tokens(str(r.get("text") or r.get("description") or "")))
+            for r in requirements if isinstance(r, dict) and r.get("id")]
+    if not reqs or not endpoints:
+        return {}
+    doc_freq: dict[str, int] = defaultdict(int)
+    for _rid, toks in reqs:
+        for tok in toks:
+            doc_freq[tok] += 1
+    common = {tok for tok, n in doc_freq.items() if n > max(1, len(reqs) // 2)}
+    ep_tokens = [(endpoint_key(e["method"], e["path"]), _endpoint_tokens(e) - common) for e in endpoints]
+    out: dict[str, list[str]] = {}
+    for rid, toks in reqs:
+        distinctive = toks - common
+        scored = [(len(distinctive & etoks), key) for key, etoks in ep_tokens]
+        best = max((s for s, _ in scored), default=0)
+        if best >= min_shared:
+            out[rid] = sorted({key for s, key in scored if s == best})
     return out
 
 
@@ -801,7 +875,9 @@ def _screens_from_mapping(
     return screens
 
 
-def _build_tag_reqs(roles: dict[str, list[DetectedFile]], tags: list[str]) -> dict[str, list[str]]:
+def _build_tag_reqs(
+    roles: dict[str, list[DetectedFile]], tags: list[str], endpoints: list[dict[str, Any]] | None = None,
+) -> dict[str, list[str]]:
     """Map each OpenAPI tag to requirement ids via the feature whose name it matches.
 
     Matching is **token-first, substring-as-fallback**, and the order matters. The original
@@ -824,14 +900,24 @@ def _build_tag_reqs(roles: dict[str, list[DetectedFile]], tags: list[str]) -> di
     Granularity is a known limit either way: a tag inherits its whole feature's requirements, so
     ``cart`` and ``checkout`` both map to all of "Cart & Checkout". Splitting a feature's
     requirements across its tags needs per-requirement tagging that the design pack does not carry.
+
+    Two later steps catch tags the names alone miss, each still refusing ambiguity:
+
+    * a STEMMED word match (``schedules`` meets "Service Scheduling") — accepted only when exactly
+      one feature has the word;
+    * when ``endpoints`` are given, a TEXT match: a tag no feature names takes the requirements
+      whose text best matches its operations' summaries
+      (:func:`match_requirements_to_endpoints`) — "Get depot service dashboard" serves "a depot
+      dashboard listing the vehicles due for service".
     """
-    # (glued name, singularised word tokens, reqs) — the tokens are what makes a precise match
-    # possible, and they are lost by _norm, so both forms are kept.
-    features: list[tuple[str, set[str], list[str]]] = []
+    # (glued name, singularised word tokens, stemmed word tokens, reqs) — the tokens are what makes
+    # a precise match possible, and they are lost by _norm, so all forms are kept.
+    features: list[tuple[str, set[str], set[str], list[str]]] = []
 
     def _add(name: str, reqs: list[str]) -> None:
         if name and reqs:
-            features.append((_norm(name), {_singular(t) for t in _tokens(name)}, reqs))
+            words = _tokens(name)
+            features.append((_norm(name), {_singular(t) for t in words}, {_stem(t) for t in words}, reqs))
 
     uf = _first(roles, "user_features")
     if uf and isinstance(uf.obj, dict):
@@ -849,9 +935,23 @@ def _build_tag_reqs(roles: dict[str, list[DetectedFile]], tags: list[str]) -> di
             for name, reqs in grouped.items():
                 _add(name, reqs)
 
+    # Requirement text matched to operation words, aggregated per tag — consulted only for tags the
+    # feature names leave unmapped.
+    text_by_tag: dict[str, set[str]] = defaultdict(set)
+    if endpoints:
+        req = _first(roles, "requirements")
+        block = (req.obj.get("functional") if req and isinstance(req.obj, dict) else req.obj) if req else None
+        if isinstance(block, list):
+            tag_of = {endpoint_key(e["method"], e["path"]): e.get("tag", "") for e in endpoints}
+            for rid, keys in match_requirements_to_endpoints(block, endpoints).items():
+                for key in keys:
+                    if tag_of.get(key):
+                        text_by_tag[tag_of[key]].add(rid)
+
     tag_reqs: dict[str, list[str]] = {}
     unmapped: list[str] = []
     ambiguous: list[str] = []
+    by_text: list[str] = []
     for tag in tags:
         if not tag:
             continue
@@ -859,8 +959,19 @@ def _build_tag_reqs(roles: dict[str, list[DetectedFile]], tags: list[str]) -> di
         if not stem:
             continue
 
-        matched = [reqs for _, toks, reqs in features if stem in toks]
+        matched = [reqs for _, toks, _stems, reqs in features if stem in toks]
+        stem_ambiguous = False
         if not matched:
+            # Word FORMS: "schedules" is not a word of "Service Scheduling", but the same word. A
+            # stemmed match is as precise as the exact one, so it is accepted on the same terms —
+            # exactly one feature — and an ambiguous one is refused like the loose test below.
+            stemmed = [(gname, reqs) for gname, _, stems, reqs in features if _stem(_norm(tag)) in stems]
+            if len(stemmed) == 1:
+                matched = [stemmed[0][1]]
+            elif len(stemmed) > 1:
+                stem_ambiguous = True
+                ambiguous.append(f"{tag} (matches {', '.join(sorted(g for g, _ in stemmed))})")
+        if not matched and not stem_ambiguous:
             # No feature names this tag as one of its words. Fall back to the looser test, because
             # abbreviated tags are normal and real: "auth" is not a word of "Account &
             # Authentication", but it plainly means it, and the live pack depends on that mapping.
@@ -869,7 +980,7 @@ def _build_tag_reqs(roles: dict[str, list[DetectedFile]], tags: list[str]) -> di
             # loose matches is the actual damage the old substring test did: a tag would silently
             # inherit two unrelated features' requirements, and nothing downstream could tell. An
             # ambiguous tag is reported instead, because a wrong mapping is worse than a missing one.
-            loose = [(gname, reqs) for gname, _, reqs in features if stem in gname]
+            loose = [(gname, reqs) for gname, _, _stems, reqs in features if stem in gname]
             if len(loose) == 1:
                 matched = [loose[0][1]]
             elif len(loose) > 1:
@@ -877,8 +988,17 @@ def _build_tag_reqs(roles: dict[str, list[DetectedFile]], tags: list[str]) -> di
 
         if matched:
             tag_reqs[tag] = sorted(dict.fromkeys(r for reqs in matched for r in reqs))
+        elif text_by_tag.get(tag):
+            tag_reqs[tag] = sorted(text_by_tag[tag])
+            by_text.append(f"{tag} -> {', '.join(tag_reqs[tag])}")
         else:
             unmapped.append(tag)
+
+    if by_text:
+        logger.info(
+            "design pack: %d OpenAPI tag(s) named by no feature were mapped by matching requirement "
+            "text to their operations: %s", len(by_text), "; ".join(by_text),
+        )
 
     if ambiguous:
         logger.warning(
@@ -940,7 +1060,7 @@ def resolve(pack_dir: str | Path, roles: dict[str, list[DetectedFile]] | None = 
         screens=screens,
         backend_tree=_tree_root(backend.obj) if backend else {},
         frontend_tree=_tree_root(frontend.obj) if frontend else {},
-        tag_reqs=_build_tag_reqs(roles, tags),
+        tag_reqs=_build_tag_reqs(roles, tags, endpoints),
         roles={role: [df.path.name for df in items] for role, items in roles.items()},
     )
 

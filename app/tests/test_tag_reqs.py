@@ -60,12 +60,44 @@ def test_an_AMBIGUOUS_loose_match_is_refused_rather_than_unioned(caplog):
     with caplog.at_level(logging.WARNING):
         out = _build_tag_reqs(roles, ["orderz"])   # stem "orderz" is in neither token set
     assert "orderz" not in out
-    # and when it IS ambiguous by substring, it is named in the warning
+    # and when it IS ambiguous, it is named in the warning. (This used to be "Ordering" vs
+    # "Reordering"; since stemming, "order" is precisely a word form of "Ordering" and NOT of
+    # "Reordering", so that pair now resolves — see test_word_forms_match_by_stem. Here BOTH
+    # feature names carry a form of "order", which stays refused.)
     with caplog.at_level(logging.WARNING):
-        out2 = _build_tag_reqs(_roles(_features(("Ordering", ["REQ-1"]),
-                                                ("Reordering", ["REQ-80"]))), ["order"])
+        out2 = _build_tag_reqs(_roles(_features(("Ordering Flow", ["REQ-1"]),
+                                                ("Ordered Items", ["REQ-80"]))), ["order"])
     assert "order" not in out2
     assert "matches" in caplog.text
+
+
+def test_word_forms_match_by_stem():
+    # The Fleet pack's tag "schedules" vs its feature "Service Scheduling": the same word, a
+    # different form. Before stemming the tag mapped to nothing and its module was generated
+    # without the scheduling requirements.
+    roles = _roles(_features(("Service Scheduling", ["REQ-1", "REQ-2"]), ("Work Orders", ["REQ-4"])))
+    assert _build_tag_reqs(roles, ["schedules"]) == {"schedules": ["REQ-1", "REQ-2"]}
+    assert _build_tag_reqs(_roles(_features(("Ordering", ["REQ-1"]), ("Reordering", ["REQ-80"]))),
+                           ["order"]) == {"order": ["REQ-1"]}
+
+
+def test_a_tag_no_feature_names_takes_requirements_matching_its_operations():
+    roles = _roles(_features(("Service Scheduling", ["REQ-1"])))
+    roles["requirements"] = [DetectedFile(path=None, role="requirements", obj={"functional": [  # type: ignore[arg-type]
+        {"id": "REQ-1", "text": "The system shall provide a depot dashboard listing vehicles due for service."},
+        {"id": "REQ-2", "text": "The system shall let a manager enter an odometer reading manually."},
+        {"id": "REQ-3", "text": "The system shall store vehicles."},
+    ]})]
+    endpoints = [
+        {"method": "GET", "path": "/depots/{id}/dashboard", "tag": "depots", "operation_id": "getDepotDashboard",
+         "summary": "Get depot service dashboard"},
+        {"method": "POST", "path": "/readings", "tag": "readings", "operation_id": "createReading",
+         "summary": "Submit an odometer reading (manual or telematics)"},
+        {"method": "GET", "path": "/auth/me", "tag": "auth", "operation_id": "getCurrentUser",
+         "summary": "Return authenticated user profile"},
+    ]
+    out = _build_tag_reqs(roles, ["depots", "readings", "auth"], endpoints)
+    assert out == {"depots": ["REQ-1"], "readings": ["REQ-2"]}       # auth matches nothing: stays unmapped
 
 
 def test_a_tag_does_not_collect_the_union_of_two_incidental_matches():
