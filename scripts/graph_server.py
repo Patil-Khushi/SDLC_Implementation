@@ -828,6 +828,12 @@ class _SSELogCapture(logging.Handler):
 
         label = self._current_label[0]
         count = self._current_label[1]
+        if getattr(record, "ui_always", False):
+            # A record an agent marked as its stage's outcome (e.g. a debugging round's closing
+            # summary) is forwarded even past the cap: a long tool loop alone exceeds it, and the
+            # cap used to drop exactly the line saying what the stage achieved.
+            self._sink.put(_sse({"type": "log", "agent": label, "level": level, "text": text}))
+            return
         if count > _MAX_LOG_LINES_PER_NODE:
             return  # already told the frontend lines are being omitted for this node
         if count == _MAX_LOG_LINES_PER_NODE:
@@ -1470,7 +1476,15 @@ def _run_events(
             # inbox already holds stops a project's conversational history being re-applied to a
             # fresh build (the inbox outlives the run - it lives outside the project dir).
             initial["chat_seq"] = chat_inbox.high_water(project)
-            config = {"configurable": {"thread_id": project}, "recursion_limit": 1000}
+            # A per-run thread_id, never just the project name (same reason as the brownfield path
+            # above): LangGraph MERGES an invoke input onto whatever checkpoint already exists for
+            # the id, so a second build of the same project silently inherited the previous run's
+            # debugging_report, unit_tests, test_result and security_verdict — a stale
+            # security_verdict alone reroutes route_after_refactoring past the debug/test loop.
+            config = {
+                "configurable": {"thread_id": f"{project}-{uuid.uuid4().hex[:8]}"},
+                "recursion_limit": 1000,
+            }
 
             seen_files: set[str] = set()
             seen_reports: set[str] = set()
@@ -1527,7 +1541,7 @@ def _run_events(
                         ("review_report_path", "code-review"),
                         ("refactoring_report_path", "refactoring"),
                         ("security_report_path", "security"),
-                        ("debug_report_path", "debugging"),
+                        ("debugging_report_path", "debugging"),
                         ("unit_test_report_path", "unit-test"),
                     ):
                         rp = delta.get(key)
@@ -2032,7 +2046,7 @@ _REPORT_DEFS: tuple[tuple[str, str, str, str, str], ...] = (
     ("code-review", "Code Review Report", "review_report_path", "review_report", "report.md"),
     ("refactoring", "Refactoring Report", "refactoring_report_path", "refactoring_report", "refactoring-report.md"),
     ("security", "Security Review Report", "security_report_path", "security_report", "security-report.md"),
-    ("debugging", "Debugging Report", "debug_report_path", "debug_report", "debug-report.md"),
+    ("debugging", "Debugging Report", "debugging_report_path", "debugging_report", "debugging-report.md"),
     ("unit-test", "Unit Test Generation Report", "unit_test_report_path", "unit_test_report", "unit-test-report.md"),
 )
 

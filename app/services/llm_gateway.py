@@ -165,6 +165,10 @@ class LLMGateway:
 		settings = get_settings()
 		self._model = settings.llm_model
 		self._max_tokens = settings.llm_max_tokens
+		# stop_reason of the most recent model response ('end_turn', 'tool_use', 'max_tokens' ...).
+		# Read by agents that report on a call after the fact (the Debugging report records it):
+		# 'max_tokens' is the only direct evidence that a reply was cut off rather than wrong.
+		self.last_stop_reason: str | None = None
 		self._api_key = settings.anthropic_foundry_api_key or None
 		self._base_url = settings.anthropic_foundry_base_url or None
 		self._resource = settings.anthropic_foundry_resource or None
@@ -218,6 +222,7 @@ class LLMGateway:
 				return stream.get_final_message()
 
 		response = _with_rate_limit_retry(_stream_once)
+		self.last_stop_reason = getattr(response, "stop_reason", None)
 		logger.info(
 			"llm_call model=%s input_tokens=%s output_tokens=%s stop=%s",
 			self._model,
@@ -265,6 +270,7 @@ class LLMGateway:
 			# fixes are small compared to a full-module generation, so the blocking HTTP timeout
 			# is not the risk here; the rate limit from repeated repair/tool-loop calls is.
 			response = _with_rate_limit_retry(lambda: client.messages.create(**kwargs))
+			self.last_stop_reason = getattr(response, "stop_reason", None)
 			final_text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 			tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
 			logger.info(
@@ -303,6 +309,7 @@ class LLMGateway:
 		if system:
 			final_kwargs["system"] = system
 		response = _with_rate_limit_retry(lambda: client.messages.create(**final_kwargs))
+		self.last_stop_reason = getattr(response, "stop_reason", None)
 		return "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 
 	@staticmethod
@@ -368,6 +375,7 @@ class FakeLLMGateway(LLMGateway):
 		self._queue: deque[str] = deque([] if callable(responses) else (responses or []))
 		self._default = default
 		self.calls: list[dict[str, Any]] = []
+		self.last_stop_reason: str | None = None
 
 	def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
 		self.calls.append({"prompt": prompt, "system": system, "kwargs": kwargs})

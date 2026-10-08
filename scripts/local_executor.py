@@ -47,6 +47,7 @@ from app.integrations.executor import (
     Executor,
     RunResult,
     StrPath,
+    aggregate_check_results,
     clean_listing,
     cap_output,
 )
@@ -263,27 +264,9 @@ class LocalDiskExecutor(Executor):
 
     @staticmethod
     def _aggregate(name: str, results: list[tuple[str, RunResult, str]]) -> CheckResult:
-        """Combine per-tool ``(label, run, scope)`` results into one CheckResult.
-
-        ``scope`` is the project-relative directory that specific tool ran in (``""`` for a
-        root-level tool like the "py" compileall pass) — carried onto the failing CheckResult so
-        a consumer (the Debugging agent) can narrow which generated files a fix prompt needs,
-        instead of every file in the whole run regardless of which side actually failed.
-        """
-        for label, run, scope in results:
-            if not run.ok:
-                # pytest (and several other tools) write their real diagnostic — the collection
-                # traceback, the assertion report — to STDOUT, not stderr; a stderr-only report
-                # can be empty even on a genuine failure. Combine both streams so the field every
-                # downstream consumer treats as "the diagnostic" (the Debugging agent's repair
-                # prompt, the SSE log) actually carries the text that explains what broke.
-                combined = "\n".join(s for s in (run.stdout, run.stderr) if s.strip())
-                return CheckResult(
-                    name=name, passed=False, stderr=f"[{label}] {combined}".strip(),
-                    stdout=run.stdout, exit_code=run.exit_code, timed_out=run.timed_out,
-                    scope=scope,
-                )
-        return CheckResult(name=name, passed=True)
+        """Combine per-tool results into one CheckResult — every failing tool is reported.
+        Single implementation shared by both executors: see ``app.integrations.executor.aggregate_check_results``."""
+        return aggregate_check_results(name, results)
 
     def compile(self, project_dir: StrPath) -> CheckResult:
         # compileall recurses from project_dir root, so it already reaches Python files under a

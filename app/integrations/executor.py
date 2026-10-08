@@ -149,6 +149,42 @@ class CheckResult:
         )
 
 
+def aggregate_check_results(name: str, results: list[tuple[str, RunResult, str]]) -> CheckResult:
+    """Combine per-tool ``(label, run, scope)`` results into one CheckResult — reporting EVERY
+    failing tool, not just the first.
+
+    A check runs several tools (compile = compileall + npm install + tsc per frontend; build = pip
+    per backend + npm build per frontend) and they all run regardless; reporting only the first
+    failure hid the rest from every consumer. In a real run the TypeScript errors were reported
+    while ``pip`` failing to build ``asyncpg`` (no wheel, no C compiler) was never shown to the
+    Debugging agent at all — so it kept editing TypeScript while the real blocker sat unseen.
+
+    Each failing tool's output becomes one ``[label] ...`` block in ``stderr`` (the label already
+    names the directory, e.g. ``tsc[proj/frontend]``; ``app.services.check_digest`` splits them
+    back apart). pytest/tsc print their diagnostics to STDOUT, so each block carries both streams;
+    ``stdout`` additionally keeps the failing tools' raw stdout for consumers that read it alone.
+    ``scope`` / ``exit_code`` describe the FIRST failing tool (a single string can only name one
+    directory); ``timed_out`` is true if ANY failing tool timed out.
+    """
+    failing = [(label, run, scope) for label, run, scope in results if not run.ok]
+    if not failing:
+        return CheckResult(name=name, passed=True)
+    blocks = []
+    for label, run, _scope in failing:
+        combined = "\n".join(s for s in (run.stdout, run.stderr) if s.strip())
+        blocks.append(f"[{label}] {combined}".strip())
+    _label, first, first_scope = failing[0]
+    return CheckResult(
+        name=name,
+        passed=False,
+        stderr="\n\n".join(blocks),
+        stdout="\n".join(run.stdout for _l, run, _s in failing if run.stdout.strip()),
+        exit_code=first.exit_code,
+        timed_out=any(run.timed_out for _l, run, _s in failing),
+        scope=first_scope,
+    )
+
+
 @dataclass(frozen=True)
 class CommitResult:
     """Outcome of a fixed-path git commit."""
@@ -683,27 +719,9 @@ class MCPExecutor(Executor):
 
     @staticmethod
     def _aggregate(name: str, results: list[tuple[str, RunResult, str]]) -> CheckResult:
-        """Combine per-tool ``(label, run, scope)`` results into one CheckResult.
-
-        ``scope`` is the project-relative directory that specific tool ran in (``""`` for a
-        root-level tool like the "py" compileall pass) — carried onto the failing CheckResult so
-        a consumer (the Debugging agent) can narrow which generated files a fix prompt needs,
-        instead of every file in the whole run regardless of which side actually failed.
-        """
-        for label, run, scope in results:
-            if not run.ok:
-                # pytest (and several other tools) write their real diagnostic — the collection
-                # traceback, the assertion report — to STDOUT, not stderr; a stderr-only report
-                # can be empty even on a genuine failure. Combine both streams so the field every
-                # downstream consumer treats as "the diagnostic" (the Debugging agent's repair
-                # prompt, the SSE log) actually carries the text that explains what broke.
-                combined = "\n".join(s for s in (run.stdout, run.stderr) if s.strip())
-                return CheckResult(
-                    name=name, passed=False, stderr=f"[{label}] {combined}".strip(),
-                    stdout=run.stdout, exit_code=run.exit_code, timed_out=run.timed_out,
-                    scope=scope,
-                )
-        return CheckResult(name=name, passed=True)
+        """Combine per-tool results into one CheckResult — every failing tool is reported.
+        Single implementation shared by both executors: see ``aggregate_check_results``."""
+        return aggregate_check_results(name, results)
 
     def files_complete(self, project_dir: StrPath, target_files: Sequence[str]) -> CheckResult:
         missing = [p for p in target_files if not self._exists(project_dir, p)]

@@ -39,7 +39,7 @@ GitHub. `package` then zips the project + reports as the run's downloadable outp
 | 2 | **Code Reviewer** | clones the pushed repo in a Docker sandbox, runs ruff + eslint + sonar-scanner, LLM writes the report | `review_report_path`, `review_findings_path` |
 | 3 | **Refactoring** | agentic edit loop — reads/edits the flagged files directly to apply the review's findings; writes a report | `refactored_code`, `refactored_files`, `refactoring_report(_path)` |
 | — | **Refactoring Publish** (no LLM) | FIXED: commits the edited files and pushes `dev` (no-op if nothing was edited) | `generation_summary` |
-| 4 | **Debugging** | compile/build check; LLM fixes failures and re-checks (≤3) | `debug_result`, `debug_attempt` |
+| 4 | **Debugging** | compile/build check; LLM fixes failures through `edit_file`/`write_file` tools and re-checks. Stops after 10 consecutive rounds that don't reduce the error count (`DEBUG_CAP`), or 40 rounds in total (`DEBUG_ROUNDS_CEILING`). Writes `reports/<project>/debugging-report.md` | `debug_result`, `debug_attempt`, `debugging_report(_path)` |
 | 5 | **Unit Testing** | generates + runs unit tests | `unit_tests`, `test_result` |
 | — | **Debug Publish** (no LLM) | FIXED: on a passing test run, commits the debug fixes + generated tests and pushes `dev` (no-op if the loop produced nothing), so Security's re-scan + the PR carry the tests | `generation_summary` |
 | 6 | **Documentation** | writes a README from the final generated source | `documentation` |

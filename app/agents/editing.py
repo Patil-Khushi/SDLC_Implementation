@@ -77,8 +77,15 @@ def editing_tools(
     *,
     allowed_paths: set[str] | None = None,
     label: str = "editing",
+    edit: bool = False,
 ) -> list[Any]:
-    """The ``read_file`` / ``write_file`` pair, scoped to ``project_dir``.
+    """The ``read_file`` / ``write_file`` pair, scoped to ``project_dir`` — plus ``edit_file`` when
+    ``edit=True``.
+
+    ``edit_file`` replaces ONE exact snippet instead of re-sending the whole file. A fix that
+    touches three lines of a 400-line page no longer has to carry the other 397 back through the
+    model's output budget, which is what made large debugging rounds come back cut off. It is
+    opt-in because the brownfield Change Modifier's tool list is part of its reviewed contract.
 
     ``touched`` accumulates every workspace path actually written, so the caller knows what changed
     without asking the model to report it.
@@ -126,7 +133,41 @@ def editing_tools(
             touched.append(out_path)
         return f"wrote {path} ({len(content)} chars)"
 
-    return [
+    def _edit(path: str, old: str, new: str) -> str:
+        rel = path.lstrip("/")
+        if rel.startswith(f"{project_dir}/"):
+            rel = rel[len(project_dir) + 1:]
+        if allowed_paths is not None and rel not in allowed_paths:
+            logger.warning("[%s] refused out-of-plan edit to %s", label, rel)
+            return (
+                f"REFUSED: {rel} is not one of this work item's target files "
+                f"({', '.join(sorted(allowed_paths)) or 'none'})."
+            )
+        out_path = project_path(project_dir, path)
+        try:
+            before = executor.read_file(out_path)
+        except Exception as exc:  # noqa: BLE001 - report to the model, don't crash the loop
+            return f"ERROR: could not read {path}: {type(exc).__name__}: {exc}. Use write_file to create a new file."
+        if not old:
+            return "ERROR: `old` is empty. Pass the exact text to replace (copy it from read_file)."
+        hits = before.count(old)
+        if hits == 0:
+            return (
+                f"ERROR: the `old` text was not found in {path}. It must match the file EXACTLY, "
+                "including whitespace and indentation — re-read the file and copy the snippet."
+            )
+        if hits > 1:
+            return (
+                f"ERROR: the `old` text occurs {hits} times in {path}. Include more surrounding "
+                "lines so it matches exactly one place."
+            )
+        after = before.replace(old, new, 1)
+        executor.write_file(out_path, after)
+        if out_path not in touched:
+            touched.append(out_path)
+        return f"edited {path} ({len(before)} -> {len(after)} chars)"
+
+    tools = [
         RepairTool(
             name="read_file",
             description="Read a file's current text content. Path is repo-relative.",
@@ -148,6 +189,27 @@ def editing_tools(
             },
         ),
     ]
+    if edit:
+        tools.append(RepairTool(
+            name="edit_file",
+            description=(
+                "Replace ONE exact snippet of an existing file. `old` must appear exactly once in "
+                "the file (copy it verbatim from read_file, with enough context to be unique); it "
+                "is replaced by `new`. Prefer this over write_file for small fixes. Path is "
+                "repo-relative."
+            ),
+            handler=_edit,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old": {"type": "string"},
+                    "new": {"type": "string"},
+                },
+                "required": ["path", "old", "new"],
+            },
+        ))
+    return tools
 
 
 #: Cap on a single file read served to a question-answering agent. Generous enough for any real
