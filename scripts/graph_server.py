@@ -1547,6 +1547,7 @@ def _run_events(
                         ("refactoring_report_path", "refactoring"),
                         ("security_report_path", "security"),
                         ("debugging_report_path", "debugging"),
+                        ("pack_preflight_report_path", "pack-preflight"),
                         ("unit_test_report_path", "unit-test"),
                     ):
                         rp = delta.get(key)
@@ -2040,6 +2041,7 @@ _REPORT_DEFS: tuple[tuple[str, str, str, str, str], ...] = (
     ("refactoring", "Refactoring Report", "refactoring_report_path", "refactoring_report", "refactoring-report.md"),
     ("security", "Security Review Report", "security_report_path", "security_report", "security-report.md"),
     ("debugging", "Debugging Report", "debugging_report_path", "debugging_report", "debugging-report.md"),
+    ("pack-preflight", "Pack Preflight Report", "pack_preflight_report_path", "pack_preflight_report", "pack-preflight.md"),
     ("unit-test", "Unit Test Generation Report", "unit_test_report_path", "unit_test_report", "unit-test-report.md"),
 )
 

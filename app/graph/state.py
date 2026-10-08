@@ -50,6 +50,14 @@ class WorkflowState(TypedDict, total=False):
     # validation-rules.json, routes.json, tokens.json, mockup.html, SKILL.md, ...) keyed by
     # name. Values are the artifact content (str) or parsed structures. Schema = 27 inputs, TBD.
     design_package: dict[str, Any]
+    # Pack preflight (app/services/pack_preflight.py), computed by scaffold_node: the pack's
+    # contradictions and gaps (findings) and the canonical values chosen for them (facts — roles,
+    # enums, env names, error envelope, symbol owners ...), plus the Markdown report. Never set by
+    # new_state: an absent value means "no preflight ran" (brownfield never runs it).
+    pack_findings: list[dict[str, Any]]
+    pack_facts: dict[str, Any]
+    pack_preflight_report: str
+    pack_preflight_report_path: str
 
     # --- Brownfield input (an EXISTING codebase + a change request, instead of a design pack) ---
     # "greenfield" (default, and what an absent value means) builds a new app from design_package.

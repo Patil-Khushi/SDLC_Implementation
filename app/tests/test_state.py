@@ -5,6 +5,8 @@ from app.models import WorkItem
 
 ALL_FIELDS = {
     "project_id", "run_id", "attempt", "design_package", "repo_url", "branch", "commit_sha",
+    # pack preflight: findings + canonical facts computed by scaffold_node (never seeded)
+    "pack_findings", "pack_facts", "pack_preflight_report", "pack_preflight_report_path",
     "base_branch",
     # brownfield: an existing codebase + a change request, instead of a design pack
     "source_mode", "source_repo_url", "change_request", "base_ref",

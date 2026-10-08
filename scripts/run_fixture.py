@@ -45,6 +45,7 @@ from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_e
 from app.services import chat_inbox  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
 from app.services.pack_index import load_pack  # noqa: E402
+from app.services.pack_preflight import preflight_for  # noqa: E402
 from app.services.run_transcript import (  # noqa: E402
     DEFAULT_REPLAY_SECONDS,
     RunTranscript,
@@ -187,6 +188,26 @@ def _canned_llm_reply(prompt: str, **_kw: Any) -> str:
     ]
     return json.dumps({"files": files, "notes": "dry-run canned content"})
 
+
+
+def _print_preflight(design_package: dict[str, Any]) -> None:
+    """Show the pack's contradictions and gaps at the approval gate, so a human sees them BEFORE
+    hours of generation — not only in a report afterwards."""
+    try:
+        result = preflight_for(design_package)
+    except Exception as exc:  # noqa: BLE001 - informational only; never blocks the run
+        print(f"\nPack preflight could not run ({type(exc).__name__}: {exc}) — continuing without it.")
+        return
+    print("\n" + "=" * 70)
+    print(f"PACK PREFLIGHT - {result.summary_line()}")
+    print("=" * 70)
+    for finding in result.findings:
+        if finding.severity in ("gap", "normalized"):
+            print(f"  [{finding.severity}] {finding.title}")
+    if result.findings:
+        print("  Policy: normalize + warn. Contradictions use the canonical value (DB schema for stored "
+              "values,\n  OpenAPI for the wire format, the pack's env files for names). Full report: "
+              "reports/<project>/pack-preflight.md")
 
 
 def _confirm_plan(work_items: list, *, auto_yes: bool) -> bool:
@@ -443,6 +464,7 @@ def _run(args: argparse.Namespace, *, mode: str, do_publish: bool,
         + ", ".join(w.id for w in work_items)
     )
 
+    _print_preflight(design_package)
     # Terminal plan-approval gate (CLI-only — the automated service / HTTP API still has no HITL).
     if not _confirm_plan(work_items, auto_yes=args.yes):
         print("\nAborted - no code generated (plan not approved).")

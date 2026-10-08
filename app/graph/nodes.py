@@ -33,6 +33,7 @@ from app.integrations.review_sandbox import is_allowed_repo_url
 from app.graph import router
 from app.services import chat_inbox, codegen_digest, plan_patch
 from app.services.boilerplate import render_scaffold
+from app.services.pack_preflight import preflight_for
 from app.services.change_gate import classify_regressions, evaluate
 from app.services.change_plan import normalize_target, render_plan, validate_plan
 from app.services.plan_patch import PlanPatch
@@ -86,6 +87,41 @@ def _note(state: WorkflowState, line: str) -> WorkflowState:
     return state
 
 
+def _run_pack_preflight(state: WorkflowState) -> None:
+    """Find the design pack's contradictions and gaps and record the canonical values chosen for
+    them (``app/services/pack_preflight.py``) — before anything is generated, so every later stage
+    can read ``pack_facts``. Deterministic and best-effort: a preflight failure is logged and the
+    run continues exactly as it did before preflight existed.
+    """
+    package = state.get("design_package") or {}
+    if not package:
+        return
+    try:
+        result = preflight_for(package)
+    except Exception:  # noqa: BLE001 - an analysis bug must never stop a build
+        logger.exception("pack preflight failed for run %s — continuing without it", state.get("run_id"))
+        return
+    payload = result.to_dict()
+    state["pack_findings"] = payload["findings"]
+    state["pack_facts"] = payload["facts"]
+    project = state.get("project_id") or state.get("run_id") or "project"
+    report = result.to_markdown(project)
+    state["pack_preflight_report"] = report
+    try:
+        run_dir = Path(get_settings().reports_dir) / _slug(project)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / "pack-preflight.md"
+        path.write_text(report, encoding="utf-8")
+        state["pack_preflight_report_path"] = str(path)
+    except Exception:  # noqa: BLE001 - a reporting failure must never break the run
+        logger.exception("pack preflight: could not write the report for run %s", state.get("run_id"))
+    state["generation_summary"] = (state.get("generation_summary") or "") + f"[preflight] {result.summary_line()}\n"
+    logger.info("[preflight] %s", result.summary_line())
+    for finding in result.findings:
+        if finding.severity == "gap":
+            logger.warning("[preflight] gap: %s", finding.title)
+
+
 def scaffold_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic: render the repo-root boilerplate once, before any work item.
 
@@ -96,6 +132,7 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
     """
     _stage("Scaffold (boilerplate)", "rendering project boilerplate (Dockerfile, requirements, "
            "package.json, ...) and, if publishing, creating the repo + pushing 'main'")
+    _run_pack_preflight(state)
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     files = render_scaffold(project_dir, state.get("design_package"))

@@ -155,6 +155,7 @@ def build_facts(state: dict[str, Any] | None, *, meta: dict[str, Any] | None = N
         ("refactoring_report_path", "refactoring"),
         ("security_report_path", "security"),
         ("debugging_report_path", "debugging"),
+        ("pack_preflight_report_path", "pack preflight"),
         ("unit_test_report_path", "unit tests"),
         ("change_report_path", "change request"),
     ):
