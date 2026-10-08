@@ -112,6 +112,46 @@ def _fresh_project_name(project: str, *, out_base: Path, owner: str, check_githu
     return candidate
 
 
+def _item_side(item_id: str) -> str:
+    """``backend`` / ``frontend`` (the plan builder's id prefix), else the whole id."""
+    return item_id.split("-", 1)[0]
+
+
+def _select_slice(work_items: list[Any], needle: str, *, exact: bool = False) -> tuple[list[Any], list[str]]:
+    """Pick the ``--only`` slice: the items that match ``needle``, plus the shared infrastructure
+    needed to boot them.
+
+    An item matches when the needle is in its id, one of its endpoints, or one of its screen names
+    (case-insensitive). Ids alone are not enough: a tree-structured pack names items after
+    directories (``backend-modules-auth``, ``frontend-pages``), so ``--only login`` would select
+    nothing even though ``POST /auth/login`` and the Login screen are right there.
+
+    Infrastructure = items on the SAME side(s) as a match that carry no endpoints and no screens:
+    the entry point, config, db, models, middleware, shared components. Without them a slice is a
+    router with no app to mount it in — it can be generated but never booted, so nothing
+    downstream (debug_check, unit tests) could say whether the feature actually works.
+
+    Returns ``(selected items in plan order, ids added as infrastructure)``. ``exact=True`` keeps
+    the old behaviour: matches only, no closure.
+    """
+    low = needle.lower()
+
+    def _matches(item: Any) -> bool:
+        haystack = [item.id, *item.endpoints, *item.screens]
+        return any(low in str(h).lower() for h in haystack)
+
+    matched = {w.id for w in work_items if _matches(w)}
+    if exact or not matched:
+        return [w for w in work_items if w.id in matched], []
+    sides = {_item_side(i) for i in matched}
+    infra = [
+        w.id for w in work_items
+        if w.id not in matched and _item_side(w.id) in sides and not w.endpoints and not w.screens
+    ]
+    keep = matched | set(infra)
+    return [w for w in work_items if w.id in keep], infra
+
+
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
     """Load a pack's top-level artifacts into a name -> content dict (.json parsed, else text)."""
     package: dict[str, Any] = {}
@@ -267,8 +307,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--only", default=None,
-        help="only generate work items whose id contains this substring, e.g. --only login "
-             "(matches backend-loginUser + frontend-login). Cheap way to test one feature.",
+        help="only generate the work items matching this substring (in the item id, an endpoint, "
+             "or a screen name), e.g. --only login, PLUS the shared infrastructure items of the "
+             "same side(s) (entry point, config, db, models, middleware ...) so the slice can "
+             "actually boot. Cheap way to test one feature end to end.",
+    )
+    parser.add_argument(
+        "--only-exact", action="store_true",
+        help="with --only: select just the matching items, without the infrastructure closure "
+             "(the pre-2026-10 behaviour; the slice will usually not boot)",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -390,12 +437,17 @@ def _run(args: argparse.Namespace, *, mode: str, do_publish: bool,
     design_package = _load_pack(pack_dir)
     work_items = build_plan(pack_dir)
     if args.only:
-        needle = args.only.lower()
-        work_items = [w for w in work_items if needle in w.id.lower()]
+        all_items = work_items
+        work_items, infra = _select_slice(all_items, args.only, exact=args.only_exact)
         if not work_items:
-            all_ids = ", ".join(w.id for w in build_plan(pack_dir))
+            all_ids = ", ".join(w.id for w in all_items)
             print(f"No work items match --only {args.only!r}.\nAvailable ids: {all_ids}")
             return
+        if infra:
+            print(
+                f"--only {args.only!r}: added {len(infra)} shared infrastructure item(s) so the "
+                f"slice can boot: {', '.join(infra)} (pass --only-exact to skip them)"
+            )
     print(
         f"Built {len(work_items)} work item(s)"
         + (f" matching --only '{args.only}'" if args.only else "")
