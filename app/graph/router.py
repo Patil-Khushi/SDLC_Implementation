@@ -162,7 +162,11 @@ def route_after_debug_check(state: WorkflowState) -> str:
     prior pass, else generate them for the first time; fail with budget left → debugging; fail with
     the budget spent → escalate (needs_human_review)."""
     debug_result = state.get("debug_result")
-    if debug_result and debug_result.get("passed"):
+    # An INCONCLUSIVE result (every failure was the environment's: a wheel needing a missing
+    # compiler, no network, no database) proves nothing either way. The Debugging agent cannot fix
+    # the environment, and escalating would skip docs, security, the PR and the zip — so the run
+    # carries on, recorded in ``unverified_checks``.
+    if debug_result and (debug_result.get("passed") or debug_result.get("inconclusive")):
         return "unit_test_run" if state.get("unit_tests") else "unit_test_generate"
     if _debug_budget_left(state):
         return "debugging"
@@ -181,8 +185,8 @@ def route_after_test_run(state: WorkflowState) -> str:
     run; NOT the real END sentinel); fail under cap → debugging; fail at cap → escalate
     (needs_human_review)."""
     test_result = state.get("test_result")
-    if test_result and test_result.get("passed"):
-        return "done"
+    if test_result and (test_result.get("passed") or test_result.get("inconclusive")):
+        return "done"     # inconclusive: the suite could not run here (see route_after_debug_check)
     if _debug_budget_left(state):
         return "debugging"
     return "escalate"

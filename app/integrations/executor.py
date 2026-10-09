@@ -135,6 +135,13 @@ class CheckResult:
     # like the Debugging agent narrow which generated files it needs to see for a fix, instead of
     # every file in the whole run regardless of which side actually failed.
     scope: str = ""
+    # True when EVERY failing tool failed for an environment reason the code cannot cause (a wheel
+    # needing a missing compiler, an unreachable registry, a missing toolchain — see
+    # app.services.env_failures). The check proved nothing either way: the run continues and is
+    # reported "unverified" instead of sending the Debugging agent after a problem it cannot fix.
+    inconclusive: bool = False
+    #: The environment problems found ("pip[backend]: a package needs a C/C++ build toolchain ...").
+    environment: str = ""
 
     @classmethod
     def from_run(cls, name: str, run: RunResult) -> CheckResult:
@@ -165,15 +172,35 @@ def aggregate_check_results(name: str, results: list[tuple[str, RunResult, str]]
     ``stdout`` additionally keeps the failing tools' raw stdout for consumers that read it alone.
     ``scope`` / ``exit_code`` describe the FIRST failing tool (a single string can only name one
     directory); ``timed_out`` is true if ANY failing tool timed out.
+
+    Each failing tool is also classified (``app.services.env_failures``). When EVERY failing tool
+    failed for an environment reason, the result is ``inconclusive``. When only some did, their
+    blocks stay (a pin in ``requirements.txt`` that has no wheel for this Python IS fixable from
+    the code side) but each is annotated, and a closing note says that errors following from them
+    — an import of a package that failed to install — are not code bugs either.
     """
+    from app.services.env_failures import environment_reason  # local: services import this module
+
     failing = [(label, run, scope) for label, run, scope in results if not run.ok]
     if not failing:
         return CheckResult(name=name, passed=True)
+    env = {}
+    for label, run, _scope in failing:
+        reason = environment_reason(label, f"{run.stdout}\n{run.stderr}", timed_out=run.timed_out, exit_code=run.exit_code)
+        if reason:
+            env[label] = reason
+    code = [(label, run, scope) for label, run, scope in failing if label not in env]
     blocks = []
     for label, run, _scope in failing:
         combined = "\n".join(s for s in (run.stdout, run.stderr) if s.strip())
-        blocks.append(f"[{label}] {combined}".strip())
-    _label, first, first_scope = failing[0]
+        note = f"\n(environment: {env[label]} - not caused by the code)" if label in env else ""
+        blocks.append(f"[{label}] {combined}".strip() + note)
+    environment = "; ".join(f"{label}: {reason}" for label, reason in env.items())
+    if code and env:
+        blocks.append("Environment problems (NOT caused by the code; errors that follow from them, like an "
+                      "import of a package that failed to install, are not code bugs either):\n"
+                      + "\n".join(f"- {label}: {reason}" for label, reason in env.items()))
+    _label, first, first_scope = (code or failing)[0]
     return CheckResult(
         name=name,
         passed=False,
@@ -182,6 +209,8 @@ def aggregate_check_results(name: str, results: list[tuple[str, RunResult, str]]
         exit_code=first.exit_code,
         timed_out=any(run.timed_out for _l, run, _s in failing),
         scope=first_scope,
+        inconclusive=not code,
+        environment=environment,
     )
 
 
@@ -250,6 +279,10 @@ def clean_listing(stdout: str, prefix: str = "") -> list[str]:
 
 class Executor(ABC):
     """The one interface both hybrid paths use."""
+
+    #: The design pack's SQL DDL, for an executor that provisions a database for ``boot`` and the
+    #: project brought no migrations of its own (set by ``debug_check_node``; ignored otherwise).
+    schema_sql: str = ""
 
     # -- shared primitives ---------------------------------------------------
 
@@ -335,6 +368,25 @@ class Executor(ABC):
     @abstractmethod
     def lint(self, project_dir: StrPath) -> CheckResult:
         """Lint the project. Fixed path only."""
+
+    def boot(self, project_dir: StrPath) -> CheckResult:
+        """Start the generated application and check that it answers HTTP. Fixed path only.
+
+        compile and build prove the files are well-formed and the dependencies install; neither
+        proves the app STARTS — an import of a module nobody generated, a settings class demanding
+        an env var, a router mounted twice all pass both and fail at the first ``uvicorn`` run.
+
+        Not abstract: an executor that cannot run a server (the exec-sandbox has no listener and no
+        database) answers ``inconclusive`` — "not checked", never a fake pass.
+        """
+        return CheckResult(
+            name="boot", passed=False, inconclusive=True,
+            stderr="[boot] this executor cannot start the application, so whether it boots is unverified",
+            environment="boot: this executor cannot start the application",
+        )
+
+    def close(self) -> None:
+        """Release anything held for the run (a throwaway database). Idempotent; default no-op."""
 
     # -- fixed-path ONLY: never exposed to the LLM ---------------------------
 
@@ -443,6 +495,7 @@ class FakeExecutor(Executor):
         build_results: Sequence[bool | CheckResult] | None = None,
         test_results: Sequence[bool | CheckResult] | None = None,
         lint_results: Sequence[bool | CheckResult] | None = None,
+        boot_results: Sequence[bool | CheckResult] | None = None,
         default_pass: bool = True,
         files: dict[str, str] | None = None,
         status_text: str = "",
@@ -456,6 +509,7 @@ class FakeExecutor(Executor):
             "build": deque(build_results or []),
             "test": deque(test_results or []),
             "lint": deque(lint_results or []),
+            "boot": deque(boot_results or []),
         }
         self._default_pass = default_pass
         self.files: dict[str, str] = {str(k): v for k, v in (files or {}).items()}
@@ -547,6 +601,9 @@ class FakeExecutor(Executor):
 
     def lint(self, project_dir: StrPath) -> CheckResult:
         return self._next_check("lint")
+
+    def boot(self, project_dir: StrPath) -> CheckResult:
+        return self._next_check("boot")
 
     def git_commit(self, project_dir: StrPath, message: str) -> CommitResult:
         self._commit_seq += 1

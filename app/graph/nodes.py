@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from app.agents.change_planner import ChangePlannerAgent
 from app.agents.chat_planner import ChatPlannerAgent
@@ -51,6 +52,7 @@ from app.services.wiring import (
     dependents_of,
     find_integration_issues,
     find_unresolved_imports,
+    reconcile_scaffold_manifests,
     reconcile_wiring,
 )
 
@@ -1033,21 +1035,79 @@ def debug_check_node(state: WorkflowState) -> WorkflowState:
     as a failing check — recorded, not raised — rather than crashing the graph (mirrors
     ``gate_node``'s defensive style exactly).
     """
-    _stage("Debugging", "compile + build check on the generated code")
+    _stage("Debugging", "compile + build + boot check on the generated code")
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     checks: list[GateCheck] = []
 
     for name, check in (("compile", executor.compile), ("build", executor.build)):
-        try:
-            result = check(project_dir)
-            checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code, "scope": result.scope})
-        except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
-            logger.exception("debug_check: %s raised for run %s", name, state.get("run_id"))
-            checks.append({"name": name, "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1, "scope": ""})
+        checks.append(_run_check(name, check, project_dir, state))
 
-    state["debug_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
+    # Boot unless a backend's dependencies failed to install — then every boot failure would be a
+    # "No module named ..." echo of that. A frontend type error does NOT hold the backend's boot
+    # back: the two are independent, and one round can fix both. When the only failures are the
+    # environment's, the app was never startable here — say so, don't guess.
+    install_failed = any(
+        re.search(r"^\[(?:pip|venv-[\d.]+|install)\[", c.get("stderr", ""), re.MULTILINE)
+        for c in checks if not c["passed"]
+    )
+    if not install_failed:
+        try:
+            from app.services.pack_context import _sql_texts
+            from app.services.pack_index import index_for
+
+            executor.schema_sql = "\n\n".join(_sql_texts(index_for(state.get("design_package") or {})))
+        except Exception:  # noqa: BLE001 - no DDL just means "migrations only"
+            pass
+        checks.append(_run_check("boot", executor.boot, project_dir, state))
+    elif all(c["passed"] or c.get("inconclusive") for c in checks):
+        checks.append({
+            "name": "boot", "passed": False, "inconclusive": True, "stdout": "", "exit_code": -1, "scope": "",
+            "stderr": "[boot] not attempted: the dependencies could not be installed in this environment",
+            "environment": "boot: not attempted - the dependencies could not be installed",
+        })
+
+    passed = bool(checks) and all(c["passed"] for c in checks)
+    state["debug_result"] = {
+        "passed": passed,
+        "inconclusive": not passed and all(c["passed"] or c.get("inconclusive") for c in checks),
+        "checks": checks,
+    }
+    _record_unverified(state, checks)
     return state
+
+
+def _run_check(name: str, check: Any, project_dir: str, state: WorkflowState) -> GateCheck:
+    """One fixed-path check as a ``GateCheck``. An executor error (timeout, sandbox/disk failure)
+    becomes a failing check — recorded, not raised — rather than crashing the graph."""
+    try:
+        result = check(project_dir)
+    except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
+        logger.exception("%s check raised for run %s", name, state.get("run_id"))
+        return {"name": name, "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1, "scope": ""}
+    out: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout,
+                      "exit_code": result.exit_code, "scope": result.scope}
+    if getattr(result, "inconclusive", False):
+        out["inconclusive"] = True
+        out["environment"] = getattr(result, "environment", "") or "environment"
+    return out
+
+
+def _record_unverified(state: WorkflowState, checks: list[GateCheck]) -> None:
+    """Keep ``unverified_checks`` current: an inconclusive check is (re)recorded with its reason, a
+    check that has since PASSED is removed — it is verified now."""
+    current = {u["check"]: u for u in state.get("unverified_checks") or []}
+    for check in checks:
+        if check.get("inconclusive"):
+            reason = check.get("environment") or "environment"
+            if current.get(check["name"], {}).get("reason") != reason:
+                state["generation_summary"] = (state.get("generation_summary") or "") + (
+                    f"[unverified] {check['name']}: {reason} (an environment problem, not a code failure)\n")
+            current[check["name"]] = {"check": check["name"], "reason": reason}
+            logger.warning("[%s] unverified - %s", check["name"], reason)
+        elif check["passed"]:
+            current.pop(check["name"], None)
+    state["unverified_checks"] = list(current.values())
 
 
 def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
@@ -1071,14 +1131,9 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
 
-    try:
-        result = executor.test(project_dir)
-        check: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code, "scope": result.scope}
-    except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
-        logger.exception("unit_test_run: test raised for run %s", state.get("run_id"))
-        check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1, "scope": ""}
-
-    state["test_result"] = {"passed": check["passed"], "checks": [check]}
+    check = _run_check("test", executor.test, project_dir, state)
+    state["test_result"] = {"passed": check["passed"], "inconclusive": bool(check.get("inconclusive")), "checks": [check]}
+    _record_unverified(state, [check])
     return state
 
 
@@ -1461,6 +1516,11 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
 
     try:
         changed = reconcile_wiring(files)
+        # The scaffold's test harness (a `test` script and its jest/babel devDependencies) put back
+        # where a generated package.json replaced the scaffold's. Re-rendered, not stored: the
+        # scaffold is deterministic in (project, pack), exactly as scaffold_node rendered it.
+        scaffold = {e["path"]: e["content"] for e in render_scaffold(project_dir, state.get("design_package"))}
+        changed.update(reconcile_scaffold_manifests({**files, **changed}, scaffold))
     except Exception as exc:  # noqa: BLE001 - a reconciler bug must never crash a finished plan
         logger.exception("wiring reconciliation failed for run %s", state.get("run_id"))
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[reconcile] FAILED: {exc}\n"

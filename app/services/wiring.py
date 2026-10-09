@@ -761,6 +761,42 @@ def reconcile_wiring(files: dict[str, str]) -> dict[str, str]:
     return changed
 
 
+def reconcile_scaffold_manifests(files: dict[str, str], scaffold: dict[str, str]) -> dict[str, str]:
+    """Put back what the scaffold's ``package.json`` had and the generated one dropped.
+
+    The scaffold renders a working test harness (a ``test`` script, jest/babel devDependencies
+    matching the ``jest.config.cjs`` it also renders). A work item that writes ``package.json``
+    replaces the whole file from its own narrow view, and the harness silently stops running —
+    the unit-test stage then fails on "jest: not found" or runs nothing. Only MISSING entries are
+    added: anything the generated manifest states itself wins. Idempotent.
+    """
+    changed: dict[str, str] = {}
+    for path, scaffold_text in scaffold.items():
+        if _basename(path).lower() != "package.json" or path not in files or files[path] == scaffold_text:
+            continue
+        try:
+            generated, original = json.loads(files[path]), json.loads(scaffold_text)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(generated, dict) or not isinstance(original, dict):
+            continue
+        edited = False
+        scripts = generated.get("scripts") if isinstance(generated.get("scripts"), dict) else {}
+        test = (original.get("scripts") or {}).get("test")
+        if test and "test" not in scripts:
+            generated["scripts"] = {**scripts, "test": test}
+            edited = True
+        declared = _declared(generated)
+        missing = {n: v for n, v in (original.get("devDependencies") or {}).items() if n not in declared}
+        if missing:
+            _merge_dep_section(generated, "devDependencies", missing)
+            edited = True
+        if edited:
+            indent, trailing_nl = _json_style(files[path])
+            changed[path] = json.dumps(generated, indent=indent, ensure_ascii=False) + ("\n" if trailing_nl else "")
+    return changed
+
+
 # --- cross-file integration report (report-only) ------------------------------------------------
 #
 # Mismatches between files no single generation call could see — the backend mounted at one path,

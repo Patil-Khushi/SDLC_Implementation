@@ -29,6 +29,7 @@ Python files, which would otherwise mark a pure-JS project's test check as faile
 
 from __future__ import annotations
 
+import atexit
 import os
 import re
 import shutil
@@ -41,7 +42,7 @@ _IMPL_DIR = Path(__file__).resolve().parent.parent
 if str(_IMPL_DIR) not in sys.path:
     sys.path.insert(0, str(_IMPL_DIR))
 
-from app.integrations.executor import (
+from app.integrations.executor import (  # noqa: E402
     CheckResult,
     CommitResult,
     Executor,
@@ -49,7 +50,20 @@ from app.integrations.executor import (
     StrPath,
     aggregate_check_results,
     clean_listing,
-    cap_output,
+)
+from scripts.runtime_env import (  # noqa: E402
+    PythonEnvs,
+    ThrowawayPostgres,
+    database_env,
+    dev_values,
+    file_hash,
+    free_port,
+    kill_tree,
+    probe,
+    read_env_file,
+    read_log,
+    run_process,
+    start_server,
 )
 
 # On Windows, npm/npx ship as `.cmd` shims; `subprocess.run(["npm", ...])` without `shell=True`
@@ -89,6 +103,18 @@ class LocalDiskExecutor(Executor):
         name = self._dev_name or "imp-001-demo"
         email = self._dev_email or "demo@local"
         self._identity = ["-c", f"user.email={email}", "-c", f"user.name={name}"]
+        # The runtime the generated project is CHECKED in (scripts/runtime_env.py): its own Python
+        # per backend, and a throwaway Postgres started on the first boot check.
+        self._envs = PythonEnvs(self._root)
+        self._db: ThrowawayPostgres | None = None
+        self._db_tried = False
+        self._db_error = ""
+        #: The pack's own SQL DDL — applied to the throwaway database when the generated project has
+        #: no migrations of its own to apply (debug_check_node sets it from the design package).
+        self.schema_sql = ""
+        # Every script that builds this executor gets the database removed at exit, crashed run
+        # or not; a hard kill is covered by the label sweep the next run starts with.
+        atexit.register(self.close)
 
     @property
     def root(self) -> Path:
@@ -111,24 +137,10 @@ class LocalDiskExecutor(Executor):
     ) -> RunResult:
         workdir = self._resolve(cwd)
         workdir.mkdir(parents=True, exist_ok=True)
-        try:
-            # Explicit utf-8/replace, NOT bare text=True: on Windows, text=True decodes with the
-            # locale's ANSI codepage (cp1252 here), which raises UnicodeDecodeError inside a
-            # background reader thread the moment npm/pytest/git emits a UTF-8 byte outside that
-            # codepage (e.g. an em dash in a generated file) — silently losing the captured
-            # stdout/stderr instead of raising where this call could see it. A check whose real
-            # failure output vanishes this way is worse than one that fails outright: the
-            # Debugging agent's repair prompt is built from `stderr`, so a swallowed error message
-            # means it has nothing to fix.
-            proc = subprocess.run(
-                list(cmd), cwd=str(workdir), capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=timeout or 120, env=env,
-            )
-            return RunResult(stdout=cap_output(proc.stdout), stderr=cap_output(proc.stderr), exit_code=proc.returncode)
-        except subprocess.TimeoutExpired:
-            return RunResult(stdout="", stderr="[timed out]", exit_code=124, timed_out=True)
-        except FileNotFoundError as exc:
-            return RunResult(stdout="", stderr=f"command not found: {cmd[0]!r} ({exc})", exit_code=127)
+        # Explicit utf-8/replace decoding (the Windows locale codepage loses any byte outside it,
+        # silently emptying the captured output the Debugging agent's prompt is built from), and a
+        # timeout that kills the whole process TREE — see runtime_env.run_process.
+        return run_process(list(cmd), workdir, timeout=timeout or 120, env=env)
 
     def write_file(self, path: StrPath, content: str) -> None:
         target = self._resolve(path)
@@ -215,7 +227,25 @@ class LocalDiskExecutor(Executor):
         return found
 
     def _npm_install(self, project_dir: StrPath) -> RunResult:
-        return self.run_command([_NPM, "install", "--no-audit", "--no-fund"], cwd=project_dir, timeout=600)
+        """``npm install``, skipped when ``package.json`` / the lockfile are unchanged since the last
+        successful install. compile() and build() both need node_modules and both ran a full
+        install in every debugging round."""
+        base = self._resolve(project_dir)
+        marker = base / "node_modules" / ".sdlc-install-hash"
+        digest = file_hash(base / "package.json", base / "package-lock.json")
+        if marker.is_file() and marker.read_text(encoding="utf-8").strip() == digest:
+            return RunResult(stdout="(dependencies unchanged since the last install)", stderr="", exit_code=0)
+        res = self.run_command([_NPM, "install", "--no-audit", "--no-fund"], cwd=project_dir, timeout=600)
+        if res.ok and (base / "node_modules").is_dir():
+            # Hash AFTER the install: npm may have written the lockfile it just resolved.
+            marker.write_text(file_hash(base / "package.json", base / "package-lock.json"), encoding="utf-8")
+        return res
+
+    def _backend_python(self, be_dir: StrPath) -> tuple[str | None, list[tuple[str, RunResult, str]]]:
+        """The backend's own interpreter (its target Python, in a uv env outside the project), or
+        ``None`` when uv is unavailable — then the tool's interpreter is used, as before."""
+        python, setup = self._envs.python(self._resolve(be_dir))
+        return python, [(f"{label}[{be_dir}]", res, str(be_dir)) for label, res in setup]
 
     def _py_packages_env(self, be_dir: StrPath) -> dict[str, str]:
         """Env with ``be_dir``'s ``.py_packages`` (where ``build()``'s ``pip install --target``
@@ -269,11 +299,20 @@ class LocalDiskExecutor(Executor):
         return aggregate_check_results(name, results)
 
     def compile(self, project_dir: StrPath) -> CheckResult:
-        # compileall recurses from project_dir root, so it already reaches Python files under a
-        # per-side wrapper dir (e.g. auth-backend/) with no discovery needed — hence scope "".
-        results: list[tuple[str, RunResult, str]] = [
-            ("py", self.run_command([sys.executable, "-m", "compileall", "-q", "."], cwd=project_dir), "")
-        ]
+        results: list[tuple[str, RunResult, str]] = []
+        backends = self._manifest_dirs(project_dir, "requirements.txt")
+        for be_dir in backends:
+            # Compiled by the backend's OWN Python: syntax valid on the tool's 3.14 can be invalid
+            # on the 3.11 the project ships with, and the other way round.
+            python, setup = self._backend_python(be_dir)
+            results += setup
+            results.append((f"py[{be_dir}]", self.run_command(
+                [python or sys.executable, "-m", "compileall", "-q", "-x", r"[\\/](?:\.venv|\.py_packages|node_modules)[\\/]", "."],
+                cwd=be_dir), str(be_dir)))
+        if not backends:
+            # compileall recurses from project_dir root, so it reaches Python files under a per-side
+            # wrapper dir (e.g. auth-backend/) with no discovery needed — hence scope "".
+            results.append(("py", self.run_command([sys.executable, "-m", "compileall", "-q", "."], cwd=project_dir), ""))
         for fe_dir in self._manifest_dirs(project_dir, "tsconfig.json"):  # frontend(s)
             # `tsc --noEmit` needs @types/* resolved to type-check JSX/imports at all — unlike
             # compileall (syntax-only, no import resolution), so node_modules must exist first.
@@ -284,6 +323,13 @@ class LocalDiskExecutor(Executor):
     def build(self, project_dir: StrPath) -> CheckResult:
         results: list[tuple[str, RunResult, str]] = []
         for be_dir in self._manifest_dirs(project_dir, "requirements.txt"):
+            python, setup = self._backend_python(be_dir)
+            results += setup
+            if python:
+                installed = self._envs.install(python, self._resolve(be_dir))
+                if installed:
+                    results.append((f"{installed[0]}[{be_dir}]", installed[1], be_dir))
+                continue
             results.append((f"pip[{be_dir}]", self.run_command(
                 [sys.executable, "-m", "pip", "install", "--no-input", "--target", ".py_packages", "-r", "requirements.txt"],
                 cwd=be_dir, timeout=300,
@@ -302,11 +348,22 @@ class LocalDiskExecutor(Executor):
             # Gated (unlike the sandbox executor's unconditional pytest) — pytest exits 5 ("no
             # tests collected") on a project with zero Python files, which would otherwise mark a
             # pure-JS project's test check as failed.
+            python, setup = self._backend_python(be_dir)
+            results += setup
+            if python:
+                tools = self._envs.ensure_test_tools(python)
+                if tools is not None and not tools.ok:
+                    results.append((f"install[{be_dir}]", tools, be_dir))
+                results.append((f"pytest[{be_dir}]", self.run_command(
+                    [python, "-m", "pytest", "-q"], cwd=be_dir, timeout=300, env=self._runtime_env(be_dir),
+                ), be_dir))
+                continue
             results.append((f"pytest[{be_dir}]", self.run_command(
                 [sys.executable, "-m", "pytest", "-q"], cwd=be_dir, timeout=180, env=self._py_packages_env(be_dir),
             ), be_dir))
         for node_dir in self._manifest_dirs(project_dir, "package.json"):
-            results.append((f"npm-test[{node_dir}]", self.run_command([_NPM, "test", "--if-present"], cwd=node_dir, timeout=300), node_dir))
+            results.append((f"npm-test[{node_dir}]", self.run_command(
+                [_NPM, "test", "--if-present"], cwd=node_dir, timeout=300, env=self._runtime_env(node_dir)), node_dir))
         return self._aggregate("test", results) if results else CheckResult(name="test", passed=True)
 
     def lint(self, project_dir: StrPath) -> CheckResult:
@@ -316,6 +373,167 @@ class LocalDiskExecutor(Executor):
         for node_dir in self._manifest_dirs(project_dir, "package.json"):
             results.append((f"eslint[{node_dir}]", self.run_command([_NPX, "eslint", "."], cwd=node_dir, timeout=180), node_dir))
         return self._aggregate("lint", results) if results else CheckResult(name="lint", passed=True)
+
+    # -- boot: does the app actually START? -----------------------------------
+
+    _SERVER_PACKAGES = ("express", "fastify", "koa", "@hapi/hapi", "@nestjs/core", "restify")
+    _DB_HINT_RE = re.compile(r"sqlalchemy|asyncpg|psycopg|databases|tortoise|\bpg\b|knex|sequelize|typeorm|prisma|"
+                             r"postgres", re.IGNORECASE)
+
+    def _declared_env(self, side_dir: StrPath) -> dict[str, str]:
+        """What a developer's ``cp .env.example .env`` would give this side: the repo-root example,
+        overridden by the side's own (``backend/.env.example``)."""
+        side = self._resolve(side_dir)
+        merged: dict[str, str] = {}
+        for candidate in (side.parent / ".env.example", side / ".env.example"):
+            merged.update(read_env_file(candidate))
+        return merged
+
+    def _needs_database(self, side_dir: StrPath, declared: dict[str, str]) -> bool:
+        side = self._resolve(side_dir)
+        manifests = " ".join(p.read_text(encoding="utf-8", errors="replace")
+                             for p in (side / "requirements.txt", side / "package.json") if p.is_file())
+        return any("postgres" in str(v).lower() for v in declared.values()) or bool(self._DB_HINT_RE.search(manifests))
+
+    def _database(self) -> ThrowawayPostgres | None:
+        """The run's throwaway Postgres, started on first use (None if Docker can't provide one)."""
+        if self._db is None and not self._db_tried:
+            self._db_tried = True
+            db = ThrowawayPostgres(str(self._root))
+            if db.start():
+                self._db = db
+            else:
+                self._db_error = db.error
+        return self._db
+
+    def _runtime_env(self, side_dir: StrPath, **extra: str) -> dict[str, str]:
+        """The environment a side's tests and boot run with: the declared variables (blank secrets
+        given throwaway values), pointed at the throwaway database when the project uses one."""
+        declared = self._declared_env(side_dir)
+        env = {**os.environ, **dev_values(declared), "PYTHONUNBUFFERED": "1", **extra}
+        if self._needs_database(side_dir, declared):
+            db = self._database()
+            if db is not None:
+                env.update(database_env(db, declared))
+        return env
+
+    def _asgi_app(self, be_dir: StrPath) -> str | None:
+        """``module:variable`` of the backend's ``FastAPI()`` (``app.main:app``), found the same way
+        the reconcile pass resolves imports — from the real import roots."""
+        from app.services.python_wiring import PyProject, _code
+
+        base = self._resolve(be_dir)
+        files = {}
+        for path in base.rglob("*.py"):
+            rel = path.relative_to(base).as_posix()
+            if any(seg in self._MANIFEST_SKIP_DIRS or seg in ("tests", "migrations", "alembic") for seg in rel.split("/")[:-1]):
+                continue
+            files["be/" + rel] = path.read_text(encoding="utf-8", errors="replace")
+        project = PyProject(files)
+        found = []
+        for path, text in files.items():
+            m = re.search(r"^(\w+)[ \t]*(?::[ \t]*FastAPI[ \t]*)?=[ \t]*(?:FastAPI\(|create_app\(|create_application\()",
+                          _code(text), re.MULTILINE)
+            dotted = project.dotted_of(path) if m else None
+            if m and dotted:
+                found.append((not path.endswith(("/main.py", "/app.py")), path.count("/"), f"{dotted}:{m.group(1)}"))
+        return sorted(found)[0][2] if found else None
+
+    def _node_entry(self, node_dir: StrPath) -> list[str] | None:
+        """``node <entry>`` for a Node SERVER (a package.json depending on a server framework)."""
+        import json as _json
+
+        base = self._resolve(node_dir)
+        try:
+            pkg = _json.loads((base / "package.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        if not any(name in deps for name in self._SERVER_PACKAGES):
+            return None
+        start = str((pkg.get("scripts") or {}).get("start") or "")
+        m = re.match(r"^\s*node\s+([^\s&|;]+)", start)
+        candidates = [m.group(1)] if m else []
+        candidates += [str(pkg["main"])] if pkg.get("main") else []
+        candidates += ["src/server.js", "server.js", "src/index.js", "index.js", "src/app.js", "app.js"]
+        for rel in candidates:
+            if (base / rel).is_file():
+                return ["node", rel]
+        return None
+
+    def _migrate(self, side_dir: StrPath, python: str | None, env: dict[str, str]) -> tuple[str, RunResult] | None:
+        """Bring the throwaway database to the schema THIS code expects: the project's own
+        migrations when it has them (a broken migration is a code failure), else the pack's DDL."""
+        db = self._db
+        if db is None:
+            return None
+        side = self._resolve(side_dir)
+        db.reset()
+        if python and (side / "alembic.ini").is_file():
+            return ("migrate", self.run_command([python, "-m", "alembic", "upgrade", "head"], cwd=side_dir, timeout=180, env=env))
+        if (side / "knexfile.js").is_file():
+            return ("migrate", self.run_command([_NPX, "knex", "migrate:latest"], cwd=side_dir, timeout=180, env=env))
+        if self.schema_sql:
+            db.psql(self.schema_sql)       # the pack's DDL: its errors are the pack's, not the code's
+        return None
+
+    def boot(self, project_dir: StrPath) -> CheckResult:
+        """Start each generated backend and wait for it to answer HTTP (any status below 500)."""
+        results: list[tuple[str, RunResult, str]] = []
+        targets: list[tuple[str, list[str] | None, str | None]] = []   # (dir, node argv, asgi app)
+        for be_dir in self._manifest_dirs(project_dir, "requirements.txt"):
+            app = self._asgi_app(be_dir)
+            if app:
+                targets.append((be_dir, None, app))
+        for node_dir in self._manifest_dirs(project_dir, "package.json"):
+            argv = self._node_entry(node_dir)
+            if argv:
+                targets.append((node_dir, argv, None))
+        if not targets:
+            return CheckResult(name="boot", passed=True, stdout="no server to boot (no FastAPI app or Node server found)")
+        for side_dir, node_argv, app in targets:
+            port = free_port()
+            env = self._runtime_env(side_dir, PORT=str(port), HOST="127.0.0.1")
+            needs_db = self._needs_database(side_dir, self._declared_env(side_dir))
+            python = None
+            if app:
+                python, setup = self._backend_python(side_dir)
+                results += setup
+                argv = [python or sys.executable, "-m", "uvicorn", app, "--host", "127.0.0.1", "--port", str(port)]
+            else:
+                argv = node_argv or []
+            migrated = self._migrate(side_dir, python, env)
+            if migrated and not migrated[1].ok:
+                results.append((f"{migrated[0]}[{side_dir}]", migrated[1], side_dir))
+                continue
+            proc, log, error = start_server(argv, self._resolve(side_dir), env)
+            if proc is None:
+                results.append((f"boot[{side_dir}]", RunResult(stdout="", stderr=error, exit_code=127), side_dir))
+                continue
+            try:
+                booted, detail = probe(port, proc, paths=("/health", "/openapi.json", "/") if app else ("/health", "/"))
+            finally:
+                kill_tree(proc)
+                try:
+                    proc.wait(timeout=15)
+                except Exception:  # noqa: BLE001
+                    pass
+            output = read_log(log)
+            if booted:
+                results.append((f"boot[{side_dir}]", RunResult(stdout=f"booted: {detail}", stderr="", exit_code=0), side_dir))
+                continue
+            if needs_db and self._db is None:
+                # No database could be provided here; a boot that needs one proves nothing.
+                detail = f"[database unavailable] {getattr(self, '_db_error', '') or 'no database'}; {detail}"
+            results.append((f"boot[{side_dir}]", RunResult(stdout=output, stderr=f"{' '.join(argv)}\n{detail}",
+                                                         exit_code=1), side_dir))
+        return self._aggregate("boot", results)
+
+    def close(self) -> None:
+        """Remove the run's throwaway database (scripts call this in their ``finally``)."""
+        if self._db is not None:
+            self._db.stop()
+            self._db = None
 
     # -- commit (real git) + optional publish to GitHub (real push) ----------
 

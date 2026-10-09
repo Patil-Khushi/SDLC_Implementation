@@ -243,6 +243,22 @@ class PyProject:
     def is_local(self, module: str, importer: str) -> bool:
         return module.startswith(".") or module.split(".")[0] in self.top_levels(importer)
 
+    def strip_root_prefix(self, module: str, importer: str) -> str | None:
+        """``backend.app.x`` -> ``app.x``: a module written by PATH from a folder above the import
+        root, when what follows the prefix starts with one of the project's own packages. ``None``
+        when the module has no such prefix."""
+        if module.startswith(".") or self.is_local(module, importer):
+            return None
+        tops = self.top_levels(importer)
+        for root in self.roots_for(importer):
+            segs = [s for s in root.strip("/").split("/") if s]
+            for k in range(len(segs)):
+                prefix = ".".join(segs[k:]) + "."
+                rest = module[len(prefix):] if module.startswith(prefix) else ""
+                if rest and rest.split(".")[0] in tops:
+                    return rest
+        return None
+
     def submodule(self, resolved: tuple[str, str], module: str, name: str, importer: str) -> bool:
         """Is ``name`` a submodule of the (package) ``module``?"""
         kind, path = resolved
@@ -286,6 +302,18 @@ def find_unresolved_python_imports(files: dict[str, str]) -> list:
         for stmt in import_statements(project.files[importer]):
             specs = [(stmt.module, stmt.names)] if stmt.module else [(mod, []) for mod, _alias in stmt.plain]
             for module, names in specs:
+                # `from backend.app.x import y`: judged as `app.x` — the reconcile pass already
+                # rewrote every such import whose module exists, so what is left here names a
+                # module nobody generated, and saying only "backend is not a package" would hide it.
+                stripped = project.strip_root_prefix(module, importer) if module else None
+                if stripped and project.resolve(stripped, importer) is None:
+                    roots = project.roots_for(importer)
+                    found[(importer, module, "")] = UnresolvedImport(
+                        importer=importer, specifier=module,
+                        target=_norm(posixpath.join(roots[0] if roots else "", stripped.replace(".", "/"))),
+                        candidates=tuple(sorted(p for p in project.files
+                                                if p.rsplit("/", 1)[-1] == stripped.rsplit(".", 1)[-1] + ".py")[:5]))
+                    continue
                 if not module or not project.is_local(module, importer):
                     continue
                 resolved = project.resolve(module, importer)

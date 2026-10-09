@@ -194,11 +194,17 @@ def _failing_checks(state: WorkflowState) -> tuple[str, list[dict[str, Any]]]:
     """
     debug_result = state.get("debug_result")
     if debug_result and not debug_result.get("passed", True):
-        return "compile/build", [c for c in debug_result.get("checks", []) if not c.get("passed", True)]
+        return "compile/build", [c for c in debug_result.get("checks", []) if _code_failure(c)]
     test_result = state.get("test_result")
     if test_result and not test_result.get("passed", True):
-        return "test", [c for c in test_result.get("checks", []) if not c.get("passed", True)]
+        return "test", [c for c in test_result.get("checks", []) if _code_failure(c)]
     return "unknown", []
+
+
+def _code_failure(check: dict[str, Any]) -> bool:
+    """A failing check the CODE may have caused. An inconclusive one (every tool failed for an
+    environment reason) is left out: no edit can fix a missing compiler or an unreachable registry."""
+    return not check.get("passed", True) and not check.get("inconclusive")
 
 
 def _failure_count(state: WorkflowState) -> int:
@@ -627,7 +633,7 @@ def _current_failure(state: WorkflowState) -> tuple[str, str, str]:
 def _first_failure_output(gate_result: Any) -> tuple[str, str]:
     """(stderr, stdout) of the first failing check."""
     for check in gate_result.get("checks", []):
-        if not check.get("passed", True):
+        if _code_failure(check):
             return str(check.get("stderr", "")), str(check.get("stdout", ""))
     return "", ""
 

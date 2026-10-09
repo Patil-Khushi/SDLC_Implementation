@@ -11,7 +11,7 @@ Refactoring loop, capped by ``router.SECURITY_LOOP_CAP``). ``attempt`` is the OR
 number, echoed back unchanged (this service never increments it).
 """
 
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from app.models import WorkItem
 
@@ -30,6 +30,11 @@ class GateCheck(TypedDict):
     # "" when the check isn't directory-scoped. Lets the Debugging agent narrow which generated
     # files a fix prompt needs instead of every file in the whole run.
     scope: str
+    # The check failed for an environment reason the code cannot cause (Executor.CheckResult):
+    # it proved nothing, so routing treats it as "not verified", never as work for the Debugging
+    # agent. Absent on checks recorded before this existed — read with .get().
+    inconclusive: NotRequired[bool]
+    environment: NotRequired[str]
 
 
 class GateResult(TypedDict):
@@ -37,6 +42,9 @@ class GateResult(TypedDict):
 
     passed: bool                # overall: every check in `checks` passed
     checks: list[GateCheck]     # per-check breakdown
+    # Not passed, but every failing check was inconclusive (environment) — the run continues,
+    # marked unverified. Absent on results recorded before this existed.
+    inconclusive: NotRequired[bool]
 
 
 class WorkflowState(TypedDict, total=False):
@@ -225,6 +233,11 @@ class WorkflowState(TypedDict, total=False):
     # define-once helper defined twice, an async engine behind sync sessions. ``{kind, detail,
     # files}`` dicts, for the run summary and the Debugging agent.
     integration_findings: list[dict[str, Any]]
+    # Checks that could not run to a verdict because of the ENVIRONMENT (a wheel needing a missing
+    # compiler, an unreachable registry, no database, an executor that cannot start a server):
+    # ``{check, reason}``, latest per check. The run carried on; this is what its report, README
+    # and pull request must say was NOT verified.
+    unverified_checks: list[dict[str, Any]]
     unit_tests: list[str]                  # workspace-relative paths of test files written
     unit_test_report: str        # Unit Test: the Markdown report content (per-work-item coverage)
     unit_test_report_path: str   # Unit Test: where the report .md was saved (reports/…)
