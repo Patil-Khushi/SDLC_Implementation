@@ -224,6 +224,7 @@ def render_readme(config: "ScaffoldConfig", design_package: dict[str, Any] | Non
     blocks.append(_routes_section(pkg, config))
     blocks.append(_data_model_section(pkg, config))
     blocks.append(_testing_section(config))
+    blocks.append(_design_gaps_section(pkg))
     blocks.append(_notes_section(pkg))
 
     body = "\n\n".join(b for b in blocks if b).strip()
@@ -318,28 +319,46 @@ def _getting_started_section(config: "ScaffoldConfig") -> str:
     lines += prereqs or ["- None"]
 
     if config.enabled("backend"):
+        root = config.backend_root.rstrip("/")
+        cd = [f"cd {root}"] if root else []
+        boot = config.data.get("_bootstrap")
         if backend_is_node:
             scripts = config.option("backend", "scripts", {}) or {}
             run = "npm run dev" if "dev" in scripts else "npm start"
-            lines += ["", "### Backend", "", "```bash", "npm install", run, "```"]
+            seed = [f"# first administrator (set {boot['email_var']} / {boot['password_var']} in .env first)",
+                    boot["command"]] if boot else []
+            lines += ["", "### Backend", "", "```bash", *cd, "npm install", *seed, run, "```"]
         else:
             framework = config.option("backend", "framework", "fastapi")
             run = "flask --app app.main run --debug" if framework == "flask" else "uvicorn app.main:app --reload"
-            lines += ["", "### Backend", "", "```bash", "pip install -r requirements.txt", run, "```"]
+            migrate = ["alembic upgrade head   # create the tables"] if config.enabled("database") else []
+            seed = [f"# first administrator (set {boot['email_var']} / {boot['password_var']} in .env first)",
+                    boot["command"]] if boot else []
+            lines += ["", "### Backend", "", "```bash", *cd, "cp ../.env.example ../.env   # then edit it" if root else
+                      "cp .env.example .env   # then edit it", "pip install -r requirements.txt", *migrate, *seed, run, "```"]
+        if boot:
+            lines += ["", "### First login", "",
+                      f"The design has a login but no endpoint that creates a user, so a seed command creates the "
+                      f"first administrator (role `{boot['role']}`) from `{boot['email_var']}` and "
+                      f"`{boot['password_var']}`. Run it once after the migrations, then sign in with those "
+                      "credentials."]
 
     if config.enabled("frontend"):
         scripts = config.option("frontend", "scripts", {}) or {}
         cmds = ["npm install"] + [f"npm run {name}" for name in scripts]
-        lines += ["", "### Frontend", "", "```bash", *cmds, "```"]
+        fe_root = config.frontend_root.rstrip("/")
+        lines += ["", "### Frontend", "", "```bash", *([f"cd {fe_root}"] if fe_root else []), *cmds, "```"]
 
     if config.enabled("docker"):
         lines += ["", "### With Docker", "", "```bash", "docker compose up --build", "```"]
 
-    variables = config.option("environment", "variables", []) or []
+    entries = config.option("environment", "entries", []) or []
+    variables = [e["key"] for e in entries] or (config.option("environment", "variables", []) or [])
     if config.enabled("environment") and variables:
         lines += ["", "### Environment variables", "",
-                  "Copy `.env.example` to `.env` and set:", ""]
-        lines += [f"- `{var}`" for var in variables]
+                  "Copy `.env.example` to `.env` and set (secrets are left blank on purpose):", ""]
+        notes = {e["key"]: e.get("comment", "") for e in entries}
+        lines += [f"- `{var}`" + (f" - {notes[var]}" if notes.get(var) else "") for var in variables]
 
     return "\n".join(lines)
 
@@ -387,6 +406,24 @@ def _testing_section(config: "ScaffoldConfig") -> str:
         if "test" in scripts:
             lines += ["", "```bash", "npm test", "```"]
     return "\n".join(lines) if len(lines) > 2 else ""
+
+
+def _design_gaps_section(pkg: dict[str, Any]) -> str:
+    """What the pack left undecided (preflight GAP findings) — so a reader knows which behaviour was
+    a pipeline default rather than a design decision. Empty when there are none."""
+    if not pkg:
+        return ""
+    try:
+        from app.services.pack_preflight import GAP, preflight_for
+
+        gaps = [f for f in preflight_for(pkg).findings if f.severity == GAP]
+    except Exception:  # noqa: BLE001 - a README section is never worth a failed scaffold
+        return ""
+    if not gaps:
+        return ""
+    return "## Open questions in the design\n\nThe design package left these undecided; the generated code " \
+           "makes a default choice that the design team should confirm:\n\n" + "\n".join(
+               f"- **{f.title}**" for f in gaps)
 
 
 def _notes_section(pkg: dict[str, Any]) -> str:

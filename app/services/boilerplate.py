@@ -559,6 +559,18 @@ def _apply_pack_environment(cfg: dict[str, Any], package: dict[str, Any]) -> Non
             by_key[var["key"]] = entry
         entry["value"] = value
         entry["comment"] = str(var.get("comment") or "")
+    boot = None
+    if package:
+        from app.services.pack_preflight import bootstrap_plan
+
+        boot = bootstrap_plan(package)
+    if boot:
+        # The first-admin seed command (a work item the plan adds) reads these.
+        for key, value, comment in ((boot["email_var"], boot["email_example"], "email of the first administrator"),
+                                    (boot["password_var"], "", "password of the first administrator (set it before seeding)")):
+            if key not in by_key:
+                entries.append({"key": key, "value": value, "comment": comment})
+    cfg["_bootstrap"] = boot
     env["entries"] = entries
 
     dsn = next((str(v.get("example") or "") for v in declared

@@ -860,3 +860,40 @@ def preflight_for(design_package: dict[str, Any] | None) -> PreflightResult:
     if len(_RESULT_CACHE) > _RESULT_CACHE_MAX:
         _RESULT_CACHE.popitem(last=False)
     return result
+
+
+# --------------------------------------------------------------------------- first-admin bootstrap
+
+def bootstrap_plan(design_package: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What the pipeline adds when the pack has a login but NO way to create the first user, or
+    ``None`` when it does not apply.
+
+    ``{path, module, command, language, user_table, role, email_var, password_var, email_example}``:
+    one seed command that creates (idempotently) the first administrator from environment
+    variables, with the pack's canonical admin role. ``path`` is project-relative (``backend/...``).
+    The plan builder adds the work item, the scaffold declares the variables, the README tells the
+    reader how to log in — all from this one answer, so they cannot disagree."""
+    if not design_package:
+        return None
+    from app.services.naming_contract import _backend_language
+
+    result = preflight_for(design_package)
+    auth = result.facts.get("auth") or {}
+    if not auth.get("bootstrap_needed"):
+        return None
+    index = index_for(design_package)
+    values = (result.facts.get("roles") or {}).get("values") or []
+    role = next((v for v in values if "admin" in v.lower()), values[0] if values else "")
+    language = _backend_language(index)
+    leaves = [p for p, _d in _structure_leaves(index) if p.startswith("backend/")]
+    entry = next((p for p in leaves if p.rsplit("/", 1)[-1] in ("main.py", "app.py")), "")
+    if language == "js":
+        path, module, command = "backend/scripts/seed-admin.js", "", "node scripts/seed-admin.js"
+    else:
+        folder = entry.rsplit("/", 1)[0] if entry else "backend/app"
+        path = f"{folder}/seed.py"
+        module = folder.removeprefix("backend/").replace("/", ".") + ".seed"
+        command = f"python -m {module}"
+    return {"path": path, "module": module, "command": command, "language": language or "python",
+            "user_table": auth.get("user_table", "users"), "role": role,
+            "email_var": "ADMIN_EMAIL", "password_var": "ADMIN_PASSWORD", "email_example": "admin@example.com"}

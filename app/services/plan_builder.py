@@ -304,6 +304,10 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
                 "%s: %d functional requirement(s) land on no work item, so no file is generated "
                 "with them in view: %s", pack_dir, len(unplaced), ", ".join(unplaced),
             )
+        seed = _bootstrap_item(pack, items)
+        if seed is not None:
+            at = next((n for n, i in enumerate(items) if i.id == "backend-entry"), len(items))
+            items.insert(at, seed)
 
     # Final completeness check, run for BOTH paths: after the builders AND the reconcile sweep,
     # every non-test structure-tree leaf must be targeted by some item. This should be
@@ -325,6 +329,29 @@ def build_plan(pack_dir: str | Path) -> list[WorkItem]:
     # step can group items into ONE commit per feature. Items whose requirements don't map to any
     # feature (bootstrap/cross-cutting files) stay untagged and commit on their own.
     return _assign_features(items, _feature_map(pack, roles))
+
+
+def _bootstrap_item(pack: Path, items: list[WorkItem]) -> WorkItem | None:
+    """The first-administrator seed command, when the pack has a login and no way to create a user
+    (``pack_preflight.bootstrap_plan``). Generated like any other item, with the full contract, so
+    its model class, password hashing and role strings match the rest of the project."""
+    from app.services.pack_index import load_pack
+    from app.services.pack_preflight import bootstrap_plan
+
+    plan = bootstrap_plan(load_pack(pack))
+    if plan is None or any(plan["path"] in i.target_files for i in items):
+        return None
+    spec = (
+        f"First-administrator seed command, run once after the migrations: `{plan['command']}`. Reads "
+        f"{plan['email_var']} and {plan['password_var']} from the environment (exit with a clear message "
+        f"if either is missing), and creates ONE user in `{plan['user_table']}` with the role "
+        f"`{plan['role']}`, the password hashed exactly as the project's login verifies it (reuse its "
+        "own hashing helper and model - import them, never re-implement), and every other required "
+        "column set to a sensible value. Idempotent: if a user with that email exists, leave it "
+        "unchanged and say so. Prints what it did; never prints the password."
+    )
+    return WorkItem(id="backend-seed-admin", target_files=[plan["path"]], file_specs={plan["path"]: spec},
+                    tables=[plan["user_table"]], change_intent="bootstrap: create the first user")
 
 
 def _functional_req_ids(roles: dict) -> list[str]:
