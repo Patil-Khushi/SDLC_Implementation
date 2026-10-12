@@ -388,6 +388,12 @@ class Executor(ABC):
     def close(self) -> None:
         """Release anything held for the run (a throwaway database). Idempotent; default no-op."""
 
+    def environment_facts(self) -> dict[str, str]:
+        """Facts about where the checks run (OS, interpreter and Node versions, whether a database
+        exists) — given to the Debugging agent so it neither "fixes" code for the wrong Python nor
+        chases a connection error to a database that is not there. Default: nothing known."""
+        return {}
+
     # -- fixed-path ONLY: never exposed to the LLM ---------------------------
 
     @abstractmethod

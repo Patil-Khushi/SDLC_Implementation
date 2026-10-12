@@ -198,6 +198,68 @@ def errors_by_file(text: str, *, project_dir: str = "") -> Counter[str]:
     return counts
 
 
+_FRAME_RE = re.compile(rf'^\s*File "(?P<path>[^"]+\.{_SOURCE_EXT})", line (?P<line>\d+)', re.MULTILINE)
+_EXCEPTION_LINE_RE = re.compile(r"^(?:[\w.]+(?:Error|Exception|Exit|Interrupt)|[\w.]+Warning)(?::.*)?$")
+
+
+def culprits(text: str, *, project_dir: str = "") -> list[tuple[str, str]]:
+    """``(file, exception line)`` for every Python traceback in ``text``: the INNERMOST frame that
+    is the project's own code — where an import chain ``main -> router -> service -> repositories``
+    actually broke — not every file the chain passed through. Deduped, in order."""
+    out: list[tuple[str, str]] = []
+    lines = (text or "").splitlines()
+    start = 0
+    while True:
+        try:     # anywhere on the line: a check's block label ("[boot[backend]] ") may precede it
+            begin = next(i for i in range(start, len(lines)) if "Traceback (most recent call last)" in lines[i])
+        except StopIteration:
+            break
+        innermost, exception, j = None, "", begin + 1
+        while j < len(lines):
+            frame = _FRAME_RE.match(lines[j])
+            if frame:
+                path = _normalize_path(frame.group("path"), "", project_dir)
+                if path:
+                    innermost = path
+            elif _EXCEPTION_LINE_RE.match(lines[j].strip()) and not lines[j].startswith(" "):
+                exception = lines[j].strip()
+                break
+            j += 1
+        if innermost and (innermost, exception) not in out:
+            out.append((innermost, exception))
+        start = j + 1
+    return out
+
+
+def frame_counts(text: str, *, project_dir: str = "") -> Counter[str]:
+    """How many of each file's error attributions are Python traceback FRAMES."""
+    counts: Counter[str] = Counter()
+    for match in _FRAME_RE.finditer(text or ""):
+        path = _normalize_path(match.group("path"), "", project_dir)
+        if path:
+            counts[path] += 1
+    return counts
+
+
+def lines_for_file(text: str, path: str, *, limit: int = 12) -> list[str]:
+    """The output lines that point at ``path`` (``project-relative``), matched by any trailing run of
+    at least two of its segments — ``tsc`` prints ``src/pages/X.tsx`` from inside ``frontend/``, a
+    traceback the absolute path — with a traceback frame's source line kept beside it."""
+    segs = [s for s in path.replace("\\", "/").split("/") if s]
+    suffixes = ["/".join(segs[k:]) for k in range(max(0, len(segs) - 1))] or segs[-1:]
+    lines = (text or "").splitlines()
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        flat = line.replace("\\", "/")
+        if any(s and s in flat for s in suffixes):
+            out.append(line.rstrip())
+            if _FRAME_RE.match(line) and i + 1 < len(lines) and not _FRAME_RE.match(lines[i + 1]):
+                out.append(lines[i + 1].rstrip())
+        if len(out) >= limit:
+            break
+    return out
+
+
 def environment_signals(text: str) -> list[str]:
     """Plain-language reasons a failure is environmental (no code edit can fix it). Deduped, ordered."""
     found: list[str] = []

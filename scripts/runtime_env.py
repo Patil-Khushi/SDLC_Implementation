@@ -155,6 +155,8 @@ class PythonEnvs:
         self.base = root / ".venvs"
         self._run = runner
         self.uv = shutil.which("uv")
+        #: backend dir -> (Python version in use, the version the project asked for or None)
+        self.chosen: dict[str, tuple[str, str | None]] = {}
 
     def _python_of(self, venv: Path) -> Path:
         return venv / ("Scripts/python.exe" if _WINDOWS else "bin/python")
@@ -172,18 +174,20 @@ class PythonEnvs:
             return None, []
         venv = self.base / self._key(be_dir)
         python = self._python_of(venv)
-        want = target_python(be_dir) or _FALLBACK_PYTHON
+        asked = target_python(be_dir)
+        want = asked or _FALLBACK_PYTHON
         marker = venv / ".sdlc-python"
-        if python.exists() and marker.is_file() and marker.read_text(encoding="utf-8").strip() == want:
+        if python.exists() and marker.is_file() and marker.read_text(encoding="utf-8").split()[:1] == [want]:
+            used = (marker.read_text(encoding="utf-8").split() + [want])[1]
+            self.chosen[str(be_dir)] = (used, asked)
             return str(python), []
         results: list[tuple[str, RunResult]] = []
-        tried = []
         for version in dict.fromkeys([want, _FALLBACK_PYTHON, f"{sys.version_info.major}.{sys.version_info.minor}"]):
-            tried.append(version)
             res = self._run([self.uv, "venv", "--clear", "--python", version, str(venv)], self.base.parent, timeout=600)
             if res.ok:
                 self.base.mkdir(parents=True, exist_ok=True)
-                marker.write_text(want, encoding="utf-8")
+                marker.write_text(f"{want} {version}", encoding="utf-8")
+                self.chosen[str(be_dir)] = (version, asked)
                 return str(python), results
             results.append((f"venv-{version}", res))     # "[venv-3.11[backend]]" parses as label[dir]
         return None, results

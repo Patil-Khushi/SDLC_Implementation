@@ -22,10 +22,16 @@ REPAIR_CAP = 3
 #: large generated project (259 test files across 59 independently generated work items) the
 #: post-commit failures are a long tail of small INDEPENDENT issues, so *any* flat per-entry cap
 #: cuts off a loop that is still converging, while rounds that fixed nothing cost the same as
-#: rounds that fixed several files. 10 consecutive stalled rounds is a genuinely stuck loop.
+#: rounds that fixed several files.
+#:
+#: 10 was set while "progress" still meant "fewer failing CHECKS" — 2 whether 209 errors remained
+#: or 109, so a converging loop read as stalled and needed the slack. Progress is now the tools'
+#: own error count, and each round works a focused batch with the earlier rounds in view, so 5
+#: consecutive rounds that do not lower the count is a genuinely stuck loop — and each of those
+#: rounds is a full tool session not spent elsewhere.
 #: ``debugging.DEBUG_ROUNDS_CEILING`` separately bounds TOTAL rounds so an oscillating loop (each
 #: fix breaking something else, so "progress" keeps resetting this counter) still terminates.
-DEBUG_CAP = 10
+DEBUG_CAP = 5
 
 #: Local cap for the Security<->Refactoring loop, at the very end of the run. Separate counter
 #: (``security_loop_attempt``) and separate cap from REPAIR_CAP/DEBUG_CAP above — this loop starts

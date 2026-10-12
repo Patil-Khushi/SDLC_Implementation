@@ -133,6 +133,10 @@ class WorkflowState(TypedDict, total=False):
     # TOTAL debugging rounds this run, regardless of progress — the absolute backstop against an
     # oscillating loop that keeps resetting debug_attempt forever (debugging.DEBUG_ROUNDS_CEILING).
     debug_rounds: int
+    # What each debugging round tried — ``{round, kind, before, after, progress, files, notes}`` —
+    # handed back to the next round so it does not repeat a change that did not help, and so a
+    # file edited round after round without the count dropping is called out.
+    debug_history: list[dict[str, Any]]
     debug_result: GateResult | None        # most recent compile+build check outcome (Debugging phase fixed check)
     # Debugging: the accumulated Markdown report (one section per attempt) + where it was saved
     # (reports/…). Rewritten to disk on every attempt so a DEBUG_CAP escalation still leaves a
@@ -319,6 +323,7 @@ def new_state(
         "debug_last_failure_count": -1,  # -1 = nothing measured yet (0 is a legitimate count)
         "debug_last_failure_kind": "",
         "debug_rounds": 0,
+        "debug_history": [],
         "debug_result": None,
         "generation_summary": "",
         "generation_metrics": {},

@@ -535,6 +535,32 @@ class LocalDiskExecutor(Executor):
             self._db.stop()
             self._db = None
 
+    def environment_facts(self) -> dict[str, str]:
+        import platform
+
+        facts = {"host OS": f"{platform.system()} {platform.release()}"}
+        for be_dir, (used, asked) in sorted(self._envs.chosen.items()):
+            name = Path(be_dir).name
+            facts[f"Python for {name}"] = used + (
+                " (the project's own version, from its Dockerfile / .python-version / pyproject)" if asked == used
+                else f" (the project asks for {asked}, which is not installable here)" if asked
+                else " (the project states no version)")
+        if not self._envs.chosen:
+            facts["Python"] = f"{sys.version_info.major}.{sys.version_info.minor} (the tool's own; uv unavailable)" \
+                if not self._envs.uv else "per backend, the version its Dockerfile names (created on first check)"
+        if not hasattr(self, "_node_version"):
+            res = run_process(["node", "--version"], self._root, timeout=20)
+            self._node_version = res.stdout.strip() if res.ok else "not installed"
+        facts["Node"] = self._node_version
+        if self._db is not None:
+            facts["database"] = ("a throwaway PostgreSQL 16 on localhost; its schema is rebuilt from the project's "
+                                 "own migrations (or the pack's DDL) before every boot")
+        elif self._db_tried:
+            facts["database"] = f"UNAVAILABLE here ({self._db_error or 'unknown reason'}) - connection errors are not code bugs"
+        else:
+            facts["database"] = "a throwaway PostgreSQL 16, started on demand for the boot check and tests"
+        return facts
+
     # -- commit (real git) + optional publish to GitHub (real push) ----------
 
     def git_commit(self, project_dir: StrPath, message: str) -> CommitResult:

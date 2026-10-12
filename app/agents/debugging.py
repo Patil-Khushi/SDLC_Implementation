@@ -21,6 +21,16 @@ any sign the failure is ENVIRONMENTAL (no C compiler, no network, a timeout) —
 ``app/services/check_digest.py``. A ``pip`` failure that no code edit can fix used to be invisible
 behind the first failing ``tsc`` block.
 
+**Each round is grounded, focused and remembers.** The project's naming contract, module map and
+conventions travel as the gateway's cacheable prefix (a tool session re-sends its conversation on
+every turn) — a fix that renames a schema class or imports a module that does not exist only moves
+the error. The round works a BATCH (``_batch``) drawn across the failing checks, boot first, each
+file with its own error lines and a traceback's innermost project frame leading; it sees what the
+earlier rounds changed and whether the count fell (``debug_history``), with files edited round
+after round without progress called out; and it sees the environment (``Executor.
+environment_facts``: the project's Python, Node, whether a database exists), what could not be
+verified there, and the reconcile pass's cross-file findings.
+
 This node maintains the LOCAL ``debug_attempt`` counter and never touches ``repair_attempt`` or
 the orchestrator's ``attempt``.
 
@@ -54,7 +64,9 @@ from app.config.settings import get_settings
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, cap_output, get_executor
 from app.services import check_digest
-from app.services.llm_gateway import LLMGateway
+from app.services.llm_gateway import LLMGateway, complete_with_tools_cached, full_prompt
+from app.services.naming_contract import build_module_map, build_naming_contract_from_package
+from app.services.pack_context import pack_conventions
 from app.services.plan_builder import _is_test_path
 from app.services.python_wiring import defined_names
 from app.services.wiring import UnresolvedImport, target_resolves
@@ -93,11 +105,27 @@ DEBUG_ROUNDS_CEILING = 40
 _MAX_UNRESOLVED_IN_PROMPT = 50
 #: How many worst files the prompt's "errors by file" table lists.
 _TOP_FILES_IN_PROMPT = 25
-#: How many files a round is ASKED to aim for. Not enforced — a cheap fix in a 13th file is fine —
-#: but saying it keeps one round's conversation (and its re-sent context) bounded.
-_FILES_PER_ROUND_HINT = 12
+#: The round's BATCH: the files it is asked to fix, chosen worst-first across every failing check
+#: (see ``_batch``). Not a fence — a cheap fix in a 13th file is fine — but the prompt, the per-file
+#: error lines and the tool budget are all sized to it, which keeps one round's conversation (and
+#: its re-sent context) bounded on a project with hundreds of errors.
+_FILES_PER_ROUND = 12
+_FILES_PER_ROUND_HINT = _FILES_PER_ROUND        # the name earlier code and docs used
+#: Error lines shown under each batch file.
+_LINES_PER_FILE = 12
+#: Characters of each failing check's full output kept when a batch already lists its files' errors.
+_OUTPUT_WITH_BATCH = 6000
+#: Earlier rounds summarised in the prompt.
+_HISTORY_IN_PROMPT = 6
+#: A file edited in this many rounds while the count did not drop is called out as a dead end.
+_DEAD_END_ROUNDS = 3
 #: Longest model summary kept in the report.
 _NOTES_CAP = 2000
+#: Longest per-round note kept in the history handed to the next round.
+_HISTORY_NOTE_CAP = 300
+#: Order checks are drawn from when choosing the batch: an app that cannot start blocks every
+#: test, a failing suite matters more than a type error elsewhere.
+_CHECK_PRIORITY = {"boot": 0, "test": 1, "build": 2, "compile": 3}
 
 
 def _slug(value: str) -> str:
@@ -201,6 +229,59 @@ def _failing_checks(state: WorkflowState) -> tuple[str, list[dict[str, Any]]]:
     return "unknown", []
 
 
+def _batch(failing: list[dict[str, Any]], project_dir: str, limit: int = _FILES_PER_ROUND) -> list[tuple[str, int, list[str]]]:
+    """``(file, errors, its error lines)`` this round should fix: drawn round-robin across the
+    failing checks in priority order (boot, test, build, compile), worst file first within each.
+
+    Worst-first over the WHOLE failure would hand a round twelve TypeScript files while the one
+    backend file that stops the app from starting sat at position 40. A traceback's innermost
+    project frame (where an import chain actually broke) leads its check's list, with the exception
+    line shown under it — every other frame of that chain is only the path to it.
+    """
+    lists: list[list[tuple[str, int, list[str]]]] = []
+    for check in sorted(failing, key=lambda c: _CHECK_PRIORITY.get(str(c.get("name")), 9)):
+        text = check_digest.check_output(check)
+        counts = check_digest.errors_by_file(text, project_dir=project_dir)
+        found = check_digest.culprits(text, project_dir=project_dir)
+        # A traceback counts every frame it passes through; only its innermost project frame is
+        # where it broke. A file attributed ONLY by intermediate frames is the path, not the fault.
+        frames = check_digest.frame_counts(text, project_dir=project_dir)
+        for path in list(counts):
+            if counts[path] <= frames.get(path, 0) and path not in {p for p, _e in found}:
+                del counts[path]
+        ordered: list[tuple[str, int, list[str]]] = []
+        for path, exception in found:
+            lines = check_digest.lines_for_file(text, path, limit=_LINES_PER_FILE - 1) + ([exception] if exception else [])
+            ordered.append((path, max(1, counts.get(path, 1)), lines))
+        seen = {p for p, _n, _l in ordered}
+        for path, n in counts.most_common():
+            if path not in seen:
+                ordered.append((path, n, check_digest.lines_for_file(text, path, limit=_LINES_PER_FILE)))
+        lists.append(ordered)
+    batch: list[tuple[str, int, list[str]]] = []
+    taken: set[str] = set()
+    while len(batch) < limit and any(lists):
+        for files in lists:
+            while files and files[0][0] in taken:
+                files.pop(0)
+            if files and len(batch) < limit:
+                entry = files.pop(0)
+                batch.append(entry)
+                taken.add(entry[0])
+    return batch
+
+
+def _dead_ends(history: list[dict[str, Any]]) -> list[str]:
+    """Files edited in ``_DEAD_END_ROUNDS``+ rounds that did NOT reduce the count — a sign the
+    approach to them is wrong, not that they need the same edit again."""
+    counts: dict[str, int] = {}
+    for entry in history:
+        if not entry.get("progress"):
+            for path in entry.get("files") or []:
+                counts[path] = counts.get(path, 0) + 1
+    return sorted(p for p, n in counts.items() if n >= _DEAD_END_ROUNDS)
+
+
 def _code_failure(check: dict[str, Any]) -> bool:
     """A failing check the CODE may have caused. An inconclusive one (every tool failed for an
     environment reason) is left out: no edit can fix a missing compiler or an unreachable registry."""
@@ -299,6 +380,12 @@ class DebuggingAgent(BaseAgent):
             state["debug_attempt"] = 0 if made_progress else int(state.get("debug_attempt", 0)) + 1
         state["debug_last_failure_count"] = failures_now
         state["debug_last_failure_kind"] = check_name
+        # The PREVIOUS round's changes are judged by THIS measurement — fill in its outcome.
+        history = list(state.get("debug_history") or [])
+        if history and history[-1].get("after") is None:
+            history[-1] = {**history[-1], "after": failures_now, "kind_after": check_name,
+                           "progress": None if kind_changed else failures_now < failures_before}
+        state["debug_history"] = history
         state["debug_rounds"] = int(state.get("debug_rounds", 0)) + 1
         logger.info(
             "[debugging] run=%s | round %s: %s failing [%s] across %d file(s) (was %s%s) — %s, "
@@ -316,16 +403,29 @@ class DebuggingAgent(BaseAgent):
 
         system = self._load_prompt("debugging")
         unresolved = list(state.get("unresolved_imports", []))
-        prompt = self._build_prompt(check_name, failing, digest, manifest, unresolved)
+        batch = _batch(failing, project_dir)
+        try:
+            facts = executor.environment_facts()
+        except Exception:  # noqa: BLE001 - facts are context, never a reason to lose the round
+            facts = {}
+        prompt = self._build_prompt(
+            check_name, failing, digest, manifest, unresolved,
+            batch=batch, history=list(state.get("debug_history") or []), facts=facts,
+            integration=list(state.get("integration_findings") or []),
+            unverified=list(state.get("unverified_checks") or []),
+        )
+        # The project's binding context — naming contract, module map, conventions — is the same
+        # every round and every tool turn: sent as the cacheable prefix, it is paid for once.
+        prefix = self._project_context(state)
         touched: list[str] = []          # workspace paths written by write_file/edit_file, live
-        max_iters = self._max_iters_for(len(digest.errors_by_file))
+        max_iters = self._max_iters_for(len(batch) or len(digest.errors_by_file))
 
         raw = ""
         llm_error = ""
         try:
-            raw = self.llm.complete_with_tools(
-                prompt=prompt, system=system, tools=self._tools(executor, project_dir, touched),
-                max_iters=max_iters,
+            raw = complete_with_tools_cached(
+                self.llm, prompt, cache_prefix=prefix, system=system,
+                tools=self._tools(executor, project_dir, touched), max_iters=max_iters,
             )
         except Exception as exc:  # noqa: BLE001 - a provider/network failure ends THIS round, not the run
             llm_error = f"{type(exc).__name__}: {exc}"
@@ -347,7 +447,7 @@ class DebuggingAgent(BaseAgent):
                 "COMPLETE corrected content of each file you change."
             )
             try:
-                retry_raw = self.llm.complete(prompt=retry_prompt, system=system)
+                retry_raw = self.llm.complete(prompt=full_prompt(retry_prompt, prefix), system=system)
                 fixes, parse_error = _parse_files(retry_raw)
                 if fixes is not None or not raw:
                     raw = retry_raw
@@ -420,6 +520,25 @@ class DebuggingAgent(BaseAgent):
         return state
 
     @staticmethod
+    def _project_context(state: WorkflowState) -> list[str]:
+        """The binding context every round shares: the naming contract and module map (the names
+        and imports the generated files must agree on — a fix that renames a schema class or
+        imports a module that does not exist trades one error for another), then the conventions."""
+        package = state.get("design_package") or {}
+        segments: list[str] = []
+        try:
+            binding = [s for s in (build_naming_contract_from_package(package),
+                                   build_module_map(state.get("work_items"))) if s]
+            if binding:
+                segments.append("\n\n".join(binding))
+            conventions = pack_conventions(package)
+            if conventions:
+                segments.append("## Conventions (the project's coding guidelines)\n" + conventions)
+        except Exception:  # noqa: BLE001 - context is help, never a reason to lose the round
+            logger.exception("[debugging] could not assemble the project context")
+        return segments
+
+    @staticmethod
     def _written_contents(executor: Executor, project_dir: str, written_paths: list[str]) -> list[dict[str, str]]:
         """``[{path, content}]`` (project-relative) for what this round wrote, for import pruning."""
         prefix = f"{project_dir}/"
@@ -475,6 +594,15 @@ class DebuggingAgent(BaseAgent):
         # Always reaches the live UI log, even past graph_server's per-stage line cap (a 16+-turn
         # tool loop alone exceeds it, which used to hide exactly this closing line).
         logger.info(headline, extra={"ui_always": True})
+        prefix = f"{_project_dir(state)}/"
+        history = list(state.get("debug_history") or [])
+        history.append({
+            "round": round_no, "kind": check_name, "before": failures_now, "after": None, "progress": None,
+            "files": [p[len(prefix):] if p.startswith(prefix) else p for p in written_paths][:20],
+            "notes": (notes or (f"LLM call failed: {llm_error}" if llm_error else "")
+                      or ("" if written_paths else "changed no file"))[:_HISTORY_NOTE_CAP],
+        })
+        state["debug_history"] = history[-20:]
 
         checks_cell = ", ".join(str(c.get("name", "?")) for c in (failing or [])) or check_name
         rows = "\n".join(f"| `{p}` | {'TEST' if _is_test_path(p) else 'source'} |" for p in written_paths)
@@ -536,6 +664,12 @@ class DebuggingAgent(BaseAgent):
         digest: check_digest.CheckDigest,
         manifest: list[str],
         unresolved_imports: list[dict[str, Any]] | None = None,
+        *,
+        batch: list[tuple[str, int, list[str]]] | None = None,
+        history: list[dict[str, Any]] | None = None,
+        facts: dict[str, str] | None = None,
+        integration: list[dict[str, Any]] | None = None,
+        unverified: list[dict[str, Any]] | None = None,
     ) -> str:
         """Point the model at the WHOLE failure + what exists, and let it pull content on demand.
 
@@ -555,6 +689,12 @@ class DebuggingAgent(BaseAgent):
             f"{digest.error_count} error(s) counted across {len(digest.errors_by_file)} file(s)."
         ]
 
+        if facts or unverified:
+            lines = [f"- {k}: {v}" for k, v in (facts or {}).items()]
+            lines += [f"- NOT verified here: {u.get('check')} - {u.get('reason')}" for u in unverified or []]
+            parts.append("Where the checks run (facts about the environment, not things to fix in the code):\n"
+                         + "\n".join(lines))
+
         if digest.environment:
             parts.append(
                 "These failures look ENVIRONMENTAL — they come from the build host, not from the "
@@ -564,7 +704,24 @@ class DebuggingAgent(BaseAgent):
                 "code, and name these in your summary."
             )
 
-        if digest.errors_by_file:
+        if batch:
+            sections = []
+            for path, n, lines in batch:
+                body = "\n".join(lines) if lines else "(see the check output below)"
+                sections.append(f"### {path} ({n} error{'s' if n != 1 else ''})\n{body}")
+            rest = [(p, n) for p, n in digest.top_files(_TOP_FILES_IN_PROMPT + len(batch)) if p not in {b[0] for b in batch}]
+            parts.append(
+                f"THIS ROUND: fix these {len(batch)} file(s) — chosen worst-first across every failing "
+                "check (a file that stops the app from starting comes before type errors elsewhere). "
+                "The check re-runs after you; whatever is left comes back next round, so a thorough "
+                "fix of these beats a shallow pass over everything.\n\n" + "\n\n".join(sections)
+                + (("\n\nOther files with errors, for later rounds: "
+                    + ", ".join(f"{p} ({n})" for p, n in rest[:_TOP_FILES_IN_PROMPT])
+                    + (f" (+{len(digest.errors_by_file) - len(batch) - _TOP_FILES_IN_PROMPT} more)"
+                       if len(digest.errors_by_file) - len(batch) > _TOP_FILES_IN_PROMPT else ""))
+                   if rest else "")
+            )
+        elif digest.errors_by_file:
             top = digest.top_files(_TOP_FILES_IN_PROMPT)
             table = "\n".join(f"| {n} | {p} |" for p, n in top)
             more = len(digest.errors_by_file) - len(top)
@@ -576,8 +733,44 @@ class DebuggingAgent(BaseAgent):
                 + (f"\n(+{more} more file(s) with errors)" if more > 0 else "")
             )
 
+        if history:
+            shown = history[-_HISTORY_IN_PROMPT:]
+            rows = []
+            for entry in shown:
+                files = entry.get("files") or []
+                outcome = ("not measured yet" if entry.get("after") is None
+                           else f"the next check found {entry['after']}"
+                           + (" (progress)" if entry.get("progress") else " (NO progress)" if entry.get("progress") is False
+                              else f" [{entry.get('kind_after')}]"))
+                rows.append(
+                    f"- round {entry.get('round')} [{entry.get('kind')}]: {entry.get('before')} failing; changed "
+                    + (f"{len(files)} file(s) ({', '.join(files[:6])}{', ...' if len(files) > 6 else ''})" if files else "nothing")
+                    + f"; {outcome}" + (f" - notes: {entry['notes']}" if entry.get("notes") else "")
+                )
+            dead = _dead_ends(history)
+            parts.append(
+                "Earlier rounds (most recent last). Do not repeat a change that did not reduce the count; "
+                "if a fix did not hold, find out why before trying it again:\n" + "\n".join(rows)
+                + (f"\n\nEdited in {_DEAD_END_ROUNDS}+ rounds without the count dropping: {', '.join(dead)}. The "
+                   "approach to these is wrong, not unfinished — read what imports them and what they import, "
+                   "and check them against the NAMING CONTRACT and MODULE MAP above, before editing them again."
+                   if dead else "")
+            )
+
+        if integration:
+            parts.append(
+                "Cross-file problems the reconcile pass found before this loop started (not auto-fixed — they "
+                "need a choice; check whether each still holds):\n"
+                + "\n".join(f"- [{i.get('kind')}] {i.get('detail')}" for i in integration[:20])
+            )
+
         for check in failing:
             text = cap_output(check_digest.check_output(check))
+            if batch and len(text) > _OUTPUT_WITH_BATCH:
+                # The batch above already carries each of its files' own error lines; the full
+                # output is background, so its head and tail are enough.
+                head, tail = text[: _OUTPUT_WITH_BATCH * 2 // 3], text[-_OUTPUT_WITH_BATCH // 3:]
+                text = f"{head}\n... ({len(text) - len(head) - len(tail)} characters omitted) ...\n{tail}"
             parts.append(f"Output of the failing `{check.get('name', '?')}` check:\n{text or '(no output)'}")
 
         if unresolved_imports:

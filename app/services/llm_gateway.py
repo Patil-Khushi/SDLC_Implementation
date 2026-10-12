@@ -295,6 +295,7 @@ class LLMGateway:
 		system: str | None = None,
 		tools: list | None = None,
 		max_iters: int = 6,
+		cache_prefix: str | list[str] | None = None,
 	) -> str:
 		"""Tool-augmented completion: bind ``tools`` to the model and run a tool-use loop.
 
@@ -302,15 +303,40 @@ class LLMGateway:
 		repair node never import the SDK. Each tool may be a repair-tool wrapper (with a
 		``handler``) or a LangChain tool (with ``invoke``). Returns the model's final text
 		(which carries the proposed fix). Falls back to :meth:`complete` when no tools are given.
+
+		Every turn re-sends the whole conversation, so with caching on, ``cache_prefix`` (context
+		shared with other calls — see :meth:`complete`) is marked cacheable in the first message,
+		and a rolling breakpoint follows the newest tool results: each turn re-reads everything
+		before it from cache instead of paying for it again.
 		"""
 		if not tools:
-			return self.complete(prompt, system=system)
+			return self.complete(prompt, system=system, cache_prefix=cache_prefix)
 
 		client = self._get_client()
 		specs = [self._tool_spec(tool) for tool in tools]
 		by_name = {getattr(tool, "name", ""): tool for tool in tools}
-		messages: list = [{"role": "user", "content": prompt}]
+		use_cache = self._prompt_cache
+		first: Any = _cached_user_content(prompt, cache_prefix) if use_cache else full_prompt(prompt, cache_prefix)
+		messages: list = [{"role": "user", "content": first}]
+		rolling: dict | None = None          # the tool_result block carrying the rolling breakpoint
 		final_text = ""
+
+		def _create(call_kwargs: dict) -> Any:
+			nonlocal use_cache
+			try:
+				return _with_rate_limit_retry(lambda: client.messages.create(**call_kwargs))
+			except anthropic.BadRequestError as exc:
+				if not (use_cache and "cache" in str(exc).lower()):
+					raise
+				logger.warning("prompt caching rejected by the deployment (%s); continuing without it", _truncate(str(exc)))
+				self._prompt_cache = use_cache = False
+				messages[0]["content"] = full_prompt(prompt, cache_prefix)
+				for message in messages:
+					for block in message["content"] if isinstance(message["content"], list) else []:
+						if isinstance(block, dict):
+							block.pop("cache_control", None)
+				return _with_rate_limit_retry(lambda: client.messages.create(**call_kwargs))
+
 		for turn in range(1, max_iters + 1):
 			kwargs: dict = {
 				"model": self._model,
@@ -323,7 +349,7 @@ class LLMGateway:
 			# Same 429 backoff as complete() — see _with_rate_limit_retry. Not streamed: proposed
 			# fixes are small compared to a full-module generation, so the blocking HTTP timeout
 			# is not the risk here; the rate limit from repeated repair/tool-loop calls is.
-			response = _with_rate_limit_retry(lambda: client.messages.create(**kwargs))
+			response = _create(kwargs)
 			self.last_stop_reason = getattr(response, "stop_reason", None)
 			final_text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 			tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
@@ -341,6 +367,13 @@ class LLMGateway:
 				outcome = self._run_tool(by_name.get(tu.name), tu.input)
 				logger.info("  tool_result %s -> %s", tu.name, _truncate(str(outcome)))
 				results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(outcome)})
+			if use_cache and results:
+				# Move the rolling breakpoint to the newest turn (the API allows 4 breakpoints:
+				# up to 2 in the prefix, this one, and one spare).
+				if rolling is not None:
+					rolling.pop("cache_control", None)
+				rolling = results[-1]
+				rolling["cache_control"] = {"type": "ephemeral"}
 			messages.append({"role": "user", "content": results})
 
 		# The model was STILL calling tools on the last allowed turn — every caller here (the
@@ -362,7 +395,7 @@ class LLMGateway:
 		final_kwargs: dict = {"model": self._model, "max_tokens": self._max_tokens, "messages": messages}
 		if system:
 			final_kwargs["system"] = system
-		response = _with_rate_limit_retry(lambda: client.messages.create(**final_kwargs))
+		response = _create(final_kwargs)
 		self.last_stop_reason = getattr(response, "stop_reason", None)
 		return "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 
@@ -451,8 +484,23 @@ class FakeLLMGateway(LLMGateway):
 		system: str | None = None,
 		tools: list | None = None,
 		max_iters: int = 6,
+		cache_prefix: str | list[str] | None = None,
 	) -> str:
 		# Deterministic double: ignore tools, return the next scripted response.
 		# TODO: to catch accidental misuse (repair path calling the wrong method), tests could
 		# script a distinct response here vs. complete() and assert which one was served.
-		return self.complete(prompt, system=system)
+		return self.complete(prompt, system=system, cache_prefix=cache_prefix)
+
+
+def complete_with_tools_cached(
+	gateway: LLMGateway, prompt: str, *, cache_prefix: str | list[str] | None, **kwargs: Any
+) -> str:
+	"""``gateway.complete_with_tools`` with a cacheable prefix — or, for a gateway stand-in that
+	predates ``cache_prefix`` (tests and scripts patch the method with plain functions), the same
+	text as one prompt. What the model reads is identical either way."""
+	try:
+		return gateway.complete_with_tools(prompt=prompt, cache_prefix=cache_prefix, **kwargs)
+	except TypeError as exc:
+		if "cache_prefix" not in str(exc):
+			raise
+		return gateway.complete_with_tools(prompt=full_prompt(prompt, cache_prefix), **kwargs)

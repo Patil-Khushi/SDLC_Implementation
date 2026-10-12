@@ -119,7 +119,8 @@ def test_prompt_carries_every_failing_check_errors_by_file_and_environment() -> 
     prompt = llm.prompts[0]
     assert "Output of the failing `compile` check" in prompt
     assert "Output of the failing `build` check" in prompt          # the second failure is no longer hidden
-    assert "| 2 | frontend/src/pages/Login.tsx |" in prompt           # worst file first, project-relative
+    assert "### frontend/src/pages/Login.tsx (2 errors)" in prompt    # worst file first, project-relative
+    assert prompt.index("### frontend/src/pages/Login.tsx") < prompt.index("### frontend/src/App.tsx")
     assert "ENVIRONMENTAL" in prompt and "C compiler" in prompt
     assert '"files"' not in prompt                                     # no JSON reply format demanded
 
