@@ -492,6 +492,19 @@ class FakeLLMGateway(LLMGateway):
 		return self.complete(prompt, system=system, cache_prefix=cache_prefix)
 
 
+def complete_cached(
+	gateway: LLMGateway, prompt: str, *, cache_prefix: str | list[str] | None, **kwargs: Any
+) -> str:
+	"""``gateway.complete`` with a cacheable prefix — falling back to one joined prompt for a
+	stand-in that predates ``cache_prefix`` (see :func:`complete_with_tools_cached`)."""
+	try:
+		return gateway.complete(prompt=prompt, cache_prefix=cache_prefix, **kwargs)
+	except TypeError as exc:
+		if "cache_prefix" not in str(exc):
+			raise
+		return gateway.complete(prompt=full_prompt(prompt, cache_prefix), **kwargs)
+
+
 def complete_with_tools_cached(
 	gateway: LLMGateway, prompt: str, *, cache_prefix: str | list[str] | None, **kwargs: Any
 ) -> str:

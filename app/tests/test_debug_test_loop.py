@@ -57,11 +57,11 @@ ITEM = WorkItem(
     target_files=["app/api/thing.py"],
 )
 
-CODEGEN_JSON = json.dumps({"files": [{"path": "app/api/thing.py", "content": "# v1\n"}], "notes": ""})
+CODEGEN_JSON = json.dumps({"files": [{"path": "app/api/thing.py", "content": "def thing():\n    return 1\n"}], "notes": ""})
 TEST_JSON = json.dumps(
     {"files": [{"path": "tests/test_thing.py", "content": "def test_thing():\n    assert True\n"}], "notes": ""}
 )
-FIX_JSON = json.dumps({"files": [{"path": "app/api/thing.py", "content": "# fixed\n"}], "notes": "fixed"})
+FIX_JSON = json.dumps({"files": [{"path": "app/api/thing.py", "content": "def thing():\n    return 2\n"}], "notes": "fixed"})
 
 
 class _ScriptedLLM:
