@@ -49,13 +49,13 @@ NEVER_ITEM = WorkItem(
 
 # The gate is completeness-only (no compile). Codegen always writes login.py; a partial reply for
 # a multi-file item therefore leaves the gate failing until repair supplies the rest.
-CODEGEN_JSON = json.dumps({"files": [{"path": "app/api/login.py", "content": "# v1\n"}], "notes": ""})
+CODEGEN_JSON = json.dumps({"files": [{"path": "app/api/login.py", "content": "def login():\n    return True\n"}], "notes": ""})
 # Repair is shown files by their real (project-prefixed) paths and echoes them back; it supplies
 # login.py (fixed) + session.py, but never never.py.
 REPAIR_JSON = json.dumps(
     {
         "files": [
-            {"path": "p1/app/api/login.py", "content": "# v2 fixed\n"},
+            {"path": "p1/app/api/login.py", "content": "def login():\n    return 2\n"},
             {"path": "p1/app/api/session.py", "content": "# session\n"},
         ],
         "notes": "fixed",
@@ -115,7 +115,7 @@ def _complete_with_tools_dispatch(prompt: str, *, system: str | None = None,
         read, write = by_name["read_file"], by_name["write_file"]
         for f in re.findall(r"^File: (.+)$", prompt, re.MULTILINE):
             if not str(read.handler(path=f)).startswith("ERROR"):
-                write.handler(path=f, content="# refactored\n")
+                write.handler(path=f, content="def login():  # refactored\n    return True\n")
         return "applied the review's fix"
     return REPAIR_JSON
 
@@ -345,7 +345,7 @@ def test_refactoring_publish_commits_the_edited_file_after_review(monkeypatch, t
 
     assert final["workflow_status"] == "completed"
     assert final["refactored_files"] == ["p1/app/api/login.py"]
-    assert executor.files["p1/app/api/login.py"] == "# refactored\n"   # debug_check saw this content
+    assert executor.files["p1/app/api/login.py"] == "def login():  # refactored\n    return True\n"   # debug_check saw this content
     # Three commits, in order: (0) commit_node's run-level commit, (1) refactoring_publish's
     # refactor commit — proves that node is wired and actually ran — and (2) debug_publish's commit
     # of the generated unit tests on the passing test run.

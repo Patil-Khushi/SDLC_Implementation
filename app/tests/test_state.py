@@ -5,6 +5,8 @@ from app.models import WorkItem
 
 ALL_FIELDS = {
     "project_id", "run_id", "attempt", "design_package", "repo_url", "branch", "commit_sha",
+    # pack preflight: findings + canonical facts computed by scaffold_node (never seeded)
+    "pack_findings", "pack_facts", "pack_preflight_report", "pack_preflight_report_path",
     "base_branch",
     # brownfield: an existing codebase + a change request, instead of a design pack
     "source_mode", "source_repo_url", "change_request", "base_ref",
@@ -14,17 +16,20 @@ ALL_FIELDS = {
     "test_command", "baseline_test", "verify_test", "verify_verdict",
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
     "codegen_ok", "gate_result", "repair_attempt", "debug_attempt", "debug_last_failure_count",
-    "debug_last_failure_kind", "debug_rounds", "debug_result", "debug_report", "debug_report_path",
+    "debug_last_failure_kind", "debug_rounds", "debug_history", "debug_result", "debug_report", "debug_report_path",
     "tests_ok", "test_result", "unit_test_report", "unit_test_report_path",
     "generation_summary", "generation_metrics",
     "push_enabled", "git_remote", "git_token",
     "review_report", "review_report_path", "review_findings_path", "refactored_code",
     "refactored_files", "refactoring_report", "refactoring_report_path",
-    "unresolved_imports", "unit_tests",
+    "unresolved_imports", "integration_findings", "unverified_checks", "unit_tests",
     "unit_test_report", "unit_test_report_path",
     "debugging_report", "debugging_report_path",
     "documentation", "security_report", "security_report_path", "security_verdict",
     "security_findings_path", "security_loop_attempt", "pr_url", "finalize_status", "package_path",
+    # conversational code generation: a chat-driven patch to the plan, applied between work items
+    "chat_enabled", "chat_seq", "chat_pending", "chat_patch", "chat_planner_notes", "chat_log",
+    "chat_turns", "requirement_ledger", "pre_item_digests", "orphan_files",
     "workflow_status",
 }
 
@@ -32,13 +37,17 @@ INITIALIZED_FIELDS = {
     "project_id", "run_id", "attempt", "design_package",
     "work_items", "work_item_index", "current_work_item", "generated_code", "scaffold_files",
     "gate_result", "repair_attempt", "debug_attempt", "debug_last_failure_count",
-    "debug_last_failure_kind", "debug_rounds",
+    "debug_last_failure_kind", "debug_rounds", "debug_history",
     "debug_result", "generation_summary",
     "generation_metrics",
     "push_enabled", "git_remote", "git_token", "security_loop_attempt", "workflow_status",
     # brownfield INPUTS are always seeded (defaulting to greenfield) so route_entry reads a real
     # value rather than an absent key — the mode decision is never left implicit.
     "source_mode", "source_repo_url", "change_request", "base_ref",
+    # conversational code generation is seeded the same way, and for the same reason: chat_intake
+    # reads a real chat_enabled (False) rather than an absent key, so the pass-through is explicit.
+    "chat_enabled", "chat_seq", "chat_pending", "chat_patch", "chat_planner_notes", "chat_log",
+    "chat_turns", "requirement_ledger", "pre_item_digests", "orphan_files",
 }
 
 
@@ -64,6 +73,18 @@ def test_new_state_defaults() -> None:
     assert state["workflow_status"] == "pending"
     assert state["push_enabled"] is False        # push OFF by default (opt-in)
     assert state["git_remote"] == "" and state["git_token"] == ""
+    # Chat OFF by default: this is what keeps a run byte-identical to before the feature existed.
+    assert state["chat_enabled"] is False
+    assert state["chat_seq"] == 0 and state["chat_turns"] == 0
+    assert state["chat_pending"] == [] and state["chat_log"] == []
+    assert state["chat_patch"] == {} and state["chat_planner_notes"] == ""
+    assert state["requirement_ledger"] == []
+    assert state["pre_item_digests"] == {} and state["orphan_files"] == []
+
+
+def test_new_state_can_opt_into_chat() -> None:
+    state = new_state(run_id="r", attempt=0, chat_enabled=True)
+    assert state["chat_enabled"] is True
 
 
 def test_new_state_accepts_push_config() -> None:

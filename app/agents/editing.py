@@ -77,8 +77,15 @@ def editing_tools(
     *,
     allowed_paths: set[str] | None = None,
     label: str = "editing",
+    edit: bool = False,
 ) -> list[Any]:
-    """The ``read_file`` / ``write_file`` pair, scoped to ``project_dir``.
+    """The ``read_file`` / ``write_file`` pair, scoped to ``project_dir`` — plus ``edit_file`` when
+    ``edit=True``.
+
+    ``edit_file`` replaces ONE exact snippet instead of re-sending the whole file. A fix that
+    touches three lines of a 400-line page no longer has to carry the other 397 back through the
+    model's output budget, which is what made large debugging rounds come back cut off. It is
+    opt-in because the brownfield Change Modifier's tool list is part of its reviewed contract.
 
     ``touched`` accumulates every workspace path actually written, so the caller knows what changed
     without asking the model to report it.
@@ -126,7 +133,41 @@ def editing_tools(
             touched.append(out_path)
         return f"wrote {path} ({len(content)} chars)"
 
-    return [
+    def _edit(path: str, old: str, new: str) -> str:
+        rel = path.lstrip("/")
+        if rel.startswith(f"{project_dir}/"):
+            rel = rel[len(project_dir) + 1:]
+        if allowed_paths is not None and rel not in allowed_paths:
+            logger.warning("[%s] refused out-of-plan edit to %s", label, rel)
+            return (
+                f"REFUSED: {rel} is not one of this work item's target files "
+                f"({', '.join(sorted(allowed_paths)) or 'none'})."
+            )
+        out_path = project_path(project_dir, path)
+        try:
+            before = executor.read_file(out_path)
+        except Exception as exc:  # noqa: BLE001 - report to the model, don't crash the loop
+            return f"ERROR: could not read {path}: {type(exc).__name__}: {exc}. Use write_file to create a new file."
+        if not old:
+            return "ERROR: `old` is empty. Pass the exact text to replace (copy it from read_file)."
+        hits = before.count(old)
+        if hits == 0:
+            return (
+                f"ERROR: the `old` text was not found in {path}. It must match the file EXACTLY, "
+                "including whitespace and indentation — re-read the file and copy the snippet."
+            )
+        if hits > 1:
+            return (
+                f"ERROR: the `old` text occurs {hits} times in {path}. Include more surrounding "
+                "lines so it matches exactly one place."
+            )
+        after = before.replace(old, new, 1)
+        executor.write_file(out_path, after)
+        if out_path not in touched:
+            touched.append(out_path)
+        return f"edited {path} ({len(before)} -> {len(after)} chars)"
+
+    tools = [
         RepairTool(
             name="read_file",
             description="Read a file's current text content. Path is repo-relative.",
@@ -146,5 +187,95 @@ def editing_tools(
                 "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
                 "required": ["path", "content"],
             },
+        ),
+    ]
+    if edit:
+        tools.append(RepairTool(
+            name="edit_file",
+            description=(
+                "Replace ONE exact snippet of an existing file. `old` must appear exactly once in "
+                "the file (copy it verbatim from read_file, with enough context to be unique); it "
+                "is replaced by `new`. Prefer this over write_file for small fixes. Path is "
+                "repo-relative."
+            ),
+            handler=_edit,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old": {"type": "string"},
+                    "new": {"type": "string"},
+                },
+                "required": ["path", "old", "new"],
+            },
+        ))
+    return tools
+
+
+#: Cap on a single file read served to a question-answering agent. Generous enough for any real
+#: source file, small enough that one curious question cannot blow the context window.
+MAX_READABLE_FILE_CHARS = 40_000
+
+#: Cap on how many paths `list_files` reports in one call. A generated project runs to hundreds of
+#: files; the point of the listing is orientation, not a manifest.
+MAX_LISTED_FILES = 400
+
+
+def reading_tools(executor: Executor, project_dir: str, *, label: str = "reading") -> list[Any]:
+    """A READ-ONLY ``read_file`` / ``list_files`` pair scoped to ``project_dir``.
+
+    The sibling of :func:`editing_tools`, for agents that must understand a project without being
+    able to touch it — answering a question about generated code, for instance. There is no write
+    tool here at all, which is the safety property: an agent given these cannot modify the project
+    even if its prompt is talked into trying, because the capability is absent rather than guarded.
+
+    Reads are truncated rather than refused (``MAX_READABLE_FILE_CHARS``): a partial read still
+    answers most questions, whereas a refusal answers none. The truncation is announced in the
+    returned text so the model does not treat a cut-off file as the whole thing.
+    """
+    def _read(path: str) -> str:
+        try:
+            text = executor.read_file(project_path(project_dir, path))
+        except Exception as exc:  # noqa: BLE001 - report to the model, don't crash the loop
+            return f"ERROR: could not read {path}: {type(exc).__name__}: {exc}"
+        if len(text) > MAX_READABLE_FILE_CHARS:
+            return (
+                text[:MAX_READABLE_FILE_CHARS]
+                + f"\n\n... [truncated: {path} is {len(text)} chars, showing the first "
+                  f"{MAX_READABLE_FILE_CHARS}]"
+            )
+        return text
+
+    def _list(prefix: str = "") -> str:
+        try:
+            paths = executor.list_files(project_dir, prefix)
+        except Exception as exc:  # noqa: BLE001
+            return f"ERROR: could not list {prefix or '/'}: {type(exc).__name__}: {exc}"
+        if not paths:
+            return f"(no files under {prefix or 'the project root'})"
+        shown = sorted(paths)[:MAX_LISTED_FILES]
+        out = "\n".join(shown)
+        if len(paths) > len(shown):
+            out += f"\n... and {len(paths) - len(shown)} more (narrow the prefix to see them)"
+        logger.debug("[%s] listed %d file(s) under %r", label, len(shown), prefix)
+        return out
+
+    return [
+        RepairTool(
+            name="read_file",
+            description="Read a file's text content. Path is repo-relative. Read-only.",
+            handler=_read,
+            input_schema={"type": "object", "properties": {"path": {"type": "string"}},
+                          "required": ["path"]},
+        ),
+        RepairTool(
+            name="list_files",
+            description=(
+                "List the project's files, optionally under a repo-relative directory prefix. "
+                "Use this to orient yourself before reading."
+            ),
+            handler=_list,
+            input_schema={"type": "object", "properties": {"prefix": {"type": "string"}},
+                          "required": []},
         ),
     ]

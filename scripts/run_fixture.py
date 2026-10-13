@@ -38,10 +38,14 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # so `app.*` imports work
 
+from app.config.settings import get_settings  # noqa: E402
 from app.graph.graph import resolve_checkpoint_db_path, workflow  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, MCPExecutor, set_executor  # noqa: E402
+from app.services import chat_inbox  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
+from app.services.pack_index import load_pack  # noqa: E402
+from app.services.pack_preflight import preflight_for  # noqa: E402
 from app.services.run_transcript import (  # noqa: E402
     DEFAULT_REPLAY_SECONDS,
     RunTranscript,
@@ -110,29 +114,71 @@ def _fresh_project_name(project: str, *, out_base: Path, owner: str, check_githu
     return candidate
 
 
+def _item_side(item_id: str) -> str:
+    """``backend`` / ``frontend`` (the plan builder's id prefix), else the whole id."""
+    return item_id.split("-", 1)[0]
+
+
+def _select_slice(work_items: list[Any], needle: str, *, exact: bool = False) -> tuple[list[Any], list[str]]:
+    """Pick the ``--only`` slice: the items that match ``needle``, plus the shared infrastructure
+    needed to boot them.
+
+    An item matches when the needle is in its id, one of its endpoints, or one of its screen names
+    (case-insensitive). Ids alone are not enough: a tree-structured pack names items after
+    directories (``backend-modules-auth``, ``frontend-pages``), so ``--only login`` would select
+    nothing even though ``POST /auth/login`` and the Login screen are right there.
+
+    Infrastructure = items on the SAME side(s) as a match that carry no endpoints and no screens:
+    the entry point, config, db, models, middleware, shared components. Without them a slice is a
+    router with no app to mount it in — it can be generated but never booted, so nothing
+    downstream (debug_check, unit tests) could say whether the feature actually works.
+
+    Returns ``(selected items in plan order, ids added as infrastructure)``. ``exact=True`` keeps
+    the old behaviour: matches only, no closure.
+    """
+    low = needle.lower()
+
+    def _matches(item: Any) -> bool:
+        haystack = [item.id, *item.endpoints, *item.screens]
+        return any(low in str(h).lower() for h in haystack)
+
+    matched = {w.id for w in work_items if _matches(w)}
+    if exact or not matched:
+        return [w for w in work_items if w.id in matched], []
+    sides = {_item_side(i) for i in matched}
+    infra = [
+        w.id for w in work_items
+        if w.id not in matched and _item_side(w.id) in sides and not w.endpoints and not w.screens
+    ]
+    keep = matched | set(infra)
+    return [w for w in work_items if w.id in keep], infra
+
+
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
-    """Load a pack's top-level artifacts into a name -> content dict (.json parsed, else text)."""
-    package: dict[str, Any] = {}
-    for path in sorted(pack_dir.iterdir()):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, ValueError):
-            # Binary artifacts (e.g. .docx/.pdf) carry no text role the resolver uses — skip them.
-            continue
-        if path.suffix == ".json":
-            try:
-                package[path.name] = json.loads(text)
-                continue
-            except json.JSONDecodeError:
-                pass
-        package[path.name] = text
-    return package
+    """Load a pack into the name -> content dict the graph carries as ``design_package``.
+
+    One implementation for every caller (``app.services.pack_index.load_pack``): .json parsed,
+    everything else raw text, subfolders included, pipeline state files and binaries skipped."""
+    return load_pack(pack_dir)
 
 
 def _canned_llm_reply(prompt: str, **_kw: Any) -> str:
-    """Dry-run stand-in: return placeholder content for every file the prompt actually asks for."""
+    """Dry-run stand-in: return placeholder content for every file the prompt actually asks for.
+
+    The PER-FILE branch comes first because ``code_generator._generate_files`` routes any work item
+    with two or more targets there, and that prompt asks for one named file without printing the
+    "Target files" block. Matching only the block meant every such call answered with
+    ``placeholder.py``, no reply matched its requested path, and the item failed the gate with
+    "0 of N planned files" — so a dry-run of any realistic pack escalated at the first work item.
+    """
+    one = re.search(r"Generate EXACTLY ONE file now: (.+)", prompt)
+    if one:
+        path = one.group(1).strip()
+        return json.dumps({
+            "files": [{"path": path, "content": f"# placeholder for {path}\n"}],
+            "notes": "dry-run canned content",
+        })
+
     match = re.search(r"Target files \(produce ONLY these\):\n((?:- .+\n?)*)", prompt)
     lines = match.group(1).splitlines() if match else []
     paths = [ln[2:].strip() for ln in lines if ln.startswith("- ")]
@@ -142,6 +188,26 @@ def _canned_llm_reply(prompt: str, **_kw: Any) -> str:
     ]
     return json.dumps({"files": files, "notes": "dry-run canned content"})
 
+
+
+def _print_preflight(design_package: dict[str, Any]) -> None:
+    """Show the pack's contradictions and gaps at the approval gate, so a human sees them BEFORE
+    hours of generation — not only in a report afterwards."""
+    try:
+        result = preflight_for(design_package)
+    except Exception as exc:  # noqa: BLE001 - informational only; never blocks the run
+        print(f"\nPack preflight could not run ({type(exc).__name__}: {exc}) — continuing without it.")
+        return
+    print("\n" + "=" * 70)
+    print(f"PACK PREFLIGHT - {result.summary_line()}")
+    print("=" * 70)
+    for finding in result.findings:
+        if finding.severity in ("gap", "normalized"):
+            print(f"  [{finding.severity}] {finding.title}")
+    if result.findings:
+        print("  Policy: normalize + warn. Contradictions use the canonical value (DB schema for stored "
+              "values,\n  OpenAPI for the wire format, the pack's env files for names). Full report: "
+              "reports/<project>/pack-preflight.md")
 
 
 def _confirm_plan(work_items: list, *, auto_yes: bool) -> bool:
@@ -250,8 +316,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--only", default=None,
-        help="only generate work items whose id contains this substring, e.g. --only login "
-             "(matches backend-loginUser + frontend-login). Cheap way to test one feature.",
+        help="only generate the work items matching this substring (in the item id, an endpoint, "
+             "or a screen name), e.g. --only login, PLUS the shared infrastructure items of the "
+             "same side(s) (entry point, config, db, models, middleware ...) so the slice can "
+             "actually boot. Cheap way to test one feature end to end.",
+    )
+    parser.add_argument(
+        "--only-exact", action="store_true",
+        help="with --only: select just the matching items, without the infrastructure closure "
+             "(the pre-2026-10 behaviour; the slice will usually not boot)",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -373,12 +446,17 @@ def _run(args: argparse.Namespace, *, mode: str, do_publish: bool,
     design_package = _load_pack(pack_dir)
     work_items = build_plan(pack_dir)
     if args.only:
-        needle = args.only.lower()
-        work_items = [w for w in work_items if needle in w.id.lower()]
+        all_items = work_items
+        work_items, infra = _select_slice(all_items, args.only, exact=args.only_exact)
         if not work_items:
-            all_ids = ", ".join(w.id for w in build_plan(pack_dir))
+            all_ids = ", ".join(w.id for w in all_items)
             print(f"No work items match --only {args.only!r}.\nAvailable ids: {all_ids}")
             return
+        if infra:
+            print(
+                f"--only {args.only!r}: added {len(infra)} shared infrastructure item(s) so the "
+                f"slice can boot: {', '.join(infra)} (pass --only-exact to skip them)"
+            )
     print(
         f"Built {len(work_items)} work item(s)"
         + (f" matching --only '{args.only}'" if args.only else "")
@@ -386,6 +464,7 @@ def _run(args: argparse.Namespace, *, mode: str, do_publish: bool,
         + ", ".join(w.id for w in work_items)
     )
 
+    _print_preflight(design_package)
     # Terminal plan-approval gate (CLI-only — the automated service / HTTP API still has no HITL).
     if not _confirm_plan(work_items, auto_yes=args.yes):
         print("\nAborted - no code generated (plan not approved).")
@@ -430,7 +509,12 @@ def _run(args: argparse.Namespace, *, mode: str, do_publish: bool,
         run_id=run_id, attempt=0, project_id=args.project,
         design_package=design_package, work_items=work_items,
         push_enabled=push_enabled, git_remote=git_remote, git_token=git_token,
+        # Opt-in (CHAT_ENABLED). Off => chat_intake passes through and this run is unchanged.
+        chat_enabled=bool(get_settings().chat_enabled),
     )
+    # This run owns only messages sent WHILE it runs. Seeding the mark past whatever the inbox
+    # already holds stops a project's conversational history being re-applied to a fresh build.
+    initial["chat_seq"] = chat_inbox.high_water(args.project)
     config = {"configurable": {"thread_id": run_id}, "recursion_limit": 1000}
     workflow.invoke(initial, config)
     state = workflow.get_state(config).values  # runs to completion (auto-commit, no HITL)

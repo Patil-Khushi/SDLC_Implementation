@@ -22,16 +22,30 @@ REPAIR_CAP = 3
 #: large generated project (259 test files across 59 independently generated work items) the
 #: post-commit failures are a long tail of small INDEPENDENT issues, so *any* flat per-entry cap
 #: cuts off a loop that is still converging, while rounds that fixed nothing cost the same as
-#: rounds that fixed several files. 10 consecutive stalled rounds is a genuinely stuck loop.
+#: rounds that fixed several files.
+#:
+#: 10 was set while "progress" still meant "fewer failing CHECKS" — 2 whether 209 errors remained
+#: or 109, so a converging loop read as stalled and needed the slack. Progress is now the tools'
+#: own error count, and each round works a focused batch with the earlier rounds in view, so 5
+#: consecutive rounds that do not lower the count is a genuinely stuck loop — and each of those
+#: rounds is a full tool session not spent elsewhere.
 #: ``debugging.DEBUG_ROUNDS_CEILING`` separately bounds TOTAL rounds so an oscillating loop (each
 #: fix breaking something else, so "progress" keeps resetting this counter) still terminates.
-DEBUG_CAP = 10
+DEBUG_CAP = 5
 
 #: Local cap for the Security<->Refactoring loop, at the very end of the run. Separate counter
 #: (``security_loop_attempt``) and separate cap from REPAIR_CAP/DEBUG_CAP above — this loop starts
 #: only after Code Gen, Debugging, and Unit Test have already finished, and reuses the SAME
 #: Refactoring agent/node Code Review's one-shot call uses (see ``route_after_refactoring``).
 SECURITY_LOOP_CAP = 3
+
+#: Local cap on conversational turns absorbed by ONE run (``chat_turns``, advanced by
+#: ``chat_intake_node``). Same family as the counters above — local, never the orchestrator's
+#: ``attempt`` — but note it caps a count of *user requests*, not retries of a failing step, so
+#: hitting it is not an error and does not escalate: intake simply stops draining the inbox and the
+#: build finishes the plan it has. Crude on purpose: each turn costs one planner call plus whatever
+#: it regenerates, so this is a stop against an unbounded conversation, not a token budget.
+CHAT_TURN_CAP = 20
 
 
 def route_entry(state: WorkflowState) -> str:
@@ -154,7 +168,11 @@ def route_after_debug_check(state: WorkflowState) -> str:
     prior pass, else generate them for the first time; fail with budget left → debugging; fail with
     the budget spent → escalate (needs_human_review)."""
     debug_result = state.get("debug_result")
-    if debug_result and debug_result.get("passed"):
+    # An INCONCLUSIVE result (every failure was the environment's: a wheel needing a missing
+    # compiler, no network, no database) proves nothing either way. The Debugging agent cannot fix
+    # the environment, and escalating would skip docs, security, the PR and the zip — so the run
+    # carries on, recorded in ``unverified_checks``.
+    if debug_result and (debug_result.get("passed") or debug_result.get("inconclusive")):
         return "unit_test_run" if state.get("unit_tests") else "unit_test_generate"
     if _debug_budget_left(state):
         return "debugging"
@@ -173,8 +191,8 @@ def route_after_test_run(state: WorkflowState) -> str:
     run; NOT the real END sentinel); fail under cap → debugging; fail at cap → escalate
     (needs_human_review)."""
     test_result = state.get("test_result")
-    if test_result and test_result.get("passed"):
-        return "done"
+    if test_result and (test_result.get("passed") or test_result.get("inconclusive")):
+        return "done"     # inconclusive: the suite could not run here (see route_after_debug_check)
     if _debug_budget_left(state):
         return "debugging"
     return "escalate"

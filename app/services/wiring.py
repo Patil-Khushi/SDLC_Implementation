@@ -605,9 +605,15 @@ class UnresolvedImport:
     specifier: str                      #: the specifier exactly as written (``'../config/db'``)
     target: str                         #: normalized project-relative path it points at
     candidates: tuple[str, ...] = ()    #: existing files whose basename matches — likely intent
+    #: Set when the MODULE exists but does not define the imported name (Python ``from x import
+    #: Y``); ``target`` is then the module file, and ``candidates`` the files that DO define it.
+    name: str = ""
 
     def as_note(self) -> str:
         """One-line, human-readable form for a ``generation_summary`` note or a log line."""
+        if self.name:
+            hint = f" (defined in {', '.join(self.candidates)})" if self.candidates else ""
+            return f"{self.importer} imports '{self.name}' from '{self.specifier}' -> {self.target} does not define it{hint}"
         hint = f" (did you mean {', '.join(self.candidates)}?)" if self.candidates else ""
         return f"{self.importer} imports '{self.specifier}' -> no such module {self.target}{hint}"
 
@@ -615,12 +621,15 @@ class UnresolvedImport:
         """Plain-dict form for storage in ``WorkflowState.unresolved_imports`` — a TypedDict that
         flows through the LangGraph checkpointer, which is not obliged to round-trip an arbitrary
         dataclass. ``candidates`` becomes a list (not a tuple) for the same reason."""
-        return {
+        out = {
             "importer": self.importer,
             "specifier": self.specifier,
             "target": self.target,
             "candidates": list(self.candidates),
         }
+        if self.name:
+            out["name"] = self.name
+        return out
 
 
 def _basename_matches(target: str, files_by_stem: dict[str, list[str]]) -> tuple[str, ...]:
@@ -650,15 +659,23 @@ def find_unresolved_imports(files: dict[str, str]) -> list[UnresolvedImport]:
         stem = (base.rsplit(".", 1)[0] if "." in base else base).lower()
         files_by_stem.setdefault(stem, []).append(_norm(path))
 
+    manifests = _manifests(files)
     found: dict[tuple[str, str], UnresolvedImport] = {}
     for path, content in sorted(files.items()):
         if not _is_js_source(path):
             continue
         from_dir = posixpath.dirname(_norm(path))
         for spec in _imported_specifiers(content):
-            if not (spec.startswith("./") or spec.startswith("../")):
+            if spec.startswith("./") or spec.startswith("../"):
+                target = _norm(posixpath.join(from_dir, spec))
+            elif spec.startswith("@/"):
+                # The `@/` alias (never an npm name) points into the frontend's source root.
+                alias_root = _at_alias_root(files, path, manifests)
+                if alias_root is None:
+                    continue
+                target = _norm(posixpath.join(alias_root, spec[2:]))
+            else:
                 continue
-            target = _norm(posixpath.join(from_dir, spec))
             if target.startswith("..") or target in (".", ""):
                 continue                                # outside the known tree — can't judge it
             if _resolve_module(target, all_paths):
@@ -669,7 +686,30 @@ def find_unresolved_imports(files: dict[str, str]) -> list[UnresolvedImport]:
                 target=target,
                 candidates=_basename_matches(target, files_by_stem),
             )
-    return [found[k] for k in sorted(found)]
+    js = [found[k] for k in sorted(found)]
+    from app.services.python_wiring import find_unresolved_python_imports
+
+    return js + find_unresolved_python_imports(files)
+
+
+def _at_alias_root(files: dict[str, str], path: str, manifests: dict[str, tuple[str, dict]]) -> str | None:
+    """Where ``@/`` points for a file: the nearest package's tsconfig/jsconfig ``paths["@/*"]``
+    target, else its ``src/``. ``None`` when the file belongs to no package (nothing to anchor on)."""
+    manifest = _owning_manifest(path, manifests)
+    if manifest is None:
+        return None
+    pkg_dir = manifests[manifest][0]
+    for cfg in ("tsconfig.json", "tsconfig.app.json", "jsconfig.json"):
+        name = posixpath.join(pkg_dir, cfg) if pkg_dir else cfg
+        data = _loads_jsonc(files[name]) if name in files else None
+        options = (data or {}).get("compilerOptions") if isinstance(data, dict) else None
+        mapped = (options or {}).get("paths") if isinstance(options, dict) else None
+        target = (mapped or {}).get("@/*") if isinstance(mapped, dict) else None
+        if isinstance(target, list) and target and isinstance(target[0], str):
+            base_url = str((options or {}).get("baseUrl") or ".")
+            sub = target[0].rstrip("*").rstrip("/")
+            return _norm(posixpath.join(pkg_dir, base_url, sub)) if (pkg_dir or base_url != ".") else _norm(sub)
+    return _norm(posixpath.join(pkg_dir, "src")) if pkg_dir else "src"
 
 
 def target_resolves(target: str, paths: "set[str] | list[str]") -> bool:
@@ -683,26 +723,197 @@ def target_resolves(target: str, paths: "set[str] | list[str]") -> bool:
     ``app.agents.debugging._prune_unresolved``).
     """
     normalized = {_norm(p) for p in paths}
-    return _resolve_module(_norm(target), normalized) is not None
+    target = _norm(target)
+    if _resolve_module(target, normalized) is not None:
+        return True
+    # A Python module: ``pkg/mod.py``, a package's ``__init__.py``, or a namespace package (a
+    # directory holding any module).
+    return (f"{target}.py" in normalized or f"{target}/__init__.py" in normalized
+            or any(p.startswith(target + "/") and p.endswith(".py") for p in normalized))
 
 
 def reconcile_wiring(files: dict[str, str]) -> dict[str, str]:
     """Run all deterministic wiring fixers over ``files``; return the union of changed files.
 
-    Fixers: Express router registration (issue 2a), missing npm dependency declaration, and
-    package.json peer-dep repair (issue 6a) — each fixer sees the previous fixers' output, so the
-    dependency pass reads the routers the first fixer just wired in and the peer-dep pass reads the
-    manifest the second one just extended.
+    Fixers: Express router registration (issue 2a), missing npm dependency declaration,
+    package.json peer-dep repair (issue 6a), FastAPI router wiring (imports from a module that
+    does not exist / a prefix mounted twice / a router nothing includes — see
+    ``app.services.python_wiring``) and missing ``requirements.txt`` entries. Each fixer sees the
+    previous fixers' output, so the dependency passes read the routers just wired in.
 
     Kept as the single entry point so more fixers can be added here without changing the caller;
     the return type stays ``{path: new_content}``. Report-only analysis that changes no file lives
-    in its own entry point (:func:`find_unresolved_imports`) rather than here.
+    in its own entry points (:func:`find_unresolved_imports`, :func:`find_integration_issues`).
     """
+    from app.services.python_wiring import (
+        reconcile_fastapi_routers,
+        reconcile_python_import_roots,
+        reconcile_python_requirements,
+    )
+
     changed: dict[str, str] = {}
     changed.update(reconcile_express_routers({**files, **changed}))
     changed.update(reconcile_package_dependencies({**files, **changed}))
     changed.update(reconcile_package_peerdeps({**files, **changed}))
+    changed.update(reconcile_python_import_roots({**files, **changed}))
+    changed.update(reconcile_fastapi_routers({**files, **changed}))
+    changed.update(reconcile_python_requirements({**files, **changed})[0])
     return changed
+
+
+def reconcile_scaffold_manifests(files: dict[str, str], scaffold: dict[str, str]) -> dict[str, str]:
+    """Put back what the scaffold's ``package.json`` had and the generated one dropped.
+
+    The scaffold renders a working test harness (a ``test`` script, jest/babel devDependencies
+    matching the ``jest.config.cjs`` it also renders). A work item that writes ``package.json``
+    replaces the whole file from its own narrow view, and the harness silently stops running —
+    the unit-test stage then fails on "jest: not found" or runs nothing. Only MISSING entries are
+    added: anything the generated manifest states itself wins. Idempotent.
+    """
+    changed: dict[str, str] = {}
+    for path, scaffold_text in scaffold.items():
+        if _basename(path).lower() != "package.json" or path not in files or files[path] == scaffold_text:
+            continue
+        try:
+            generated, original = json.loads(files[path]), json.loads(scaffold_text)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(generated, dict) or not isinstance(original, dict):
+            continue
+        edited = False
+        scripts = generated.get("scripts") if isinstance(generated.get("scripts"), dict) else {}
+        test = (original.get("scripts") or {}).get("test")
+        if test and "test" not in scripts:
+            generated["scripts"] = {**scripts, "test": test}
+            edited = True
+        declared = _declared(generated)
+        missing = {n: v for n, v in (original.get("devDependencies") or {}).items() if n not in declared}
+        if missing:
+            _merge_dep_section(generated, "devDependencies", missing)
+            edited = True
+        if edited:
+            indent, trailing_nl = _json_style(files[path])
+            changed[path] = json.dumps(generated, indent=indent, ensure_ascii=False) + ("\n" if trailing_nl else "")
+    return changed
+
+
+# --- cross-file integration report (report-only) ------------------------------------------------
+#
+# Mismatches between files no single generation call could see — the backend mounted at one path,
+# the frontend calling another; one helper defined in two places — that no fixer can settle
+# without choosing a side. Returned as findings for the debugging agent and the run summary.
+
+_URL_PATH_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*://[^/\s]*)?(/[^\s?#'\"`]*)?", re.IGNORECASE)
+_FRONTEND_BASE_RES = (
+    re.compile(r"\bbaseURL\s*[:=]\s*([`'\"])([^`'\"]*)\1"),
+    re.compile(r"\b(?:API_BASE(?:_URL)?|BASE_URL|apiBase(?:Url)?)\s*=\s*[^;\n]*?([`'\"])([^`'\"$]*)\1"),
+)
+_ENV_BASE_RE = re.compile(r"^(?:VITE|REACT_APP|NEXT_PUBLIC)_\w*API\w*\s*=\s*(\S+)", re.MULTILINE)
+_PROXY_RE = re.compile(r"\bproxy\s*:\s*\{\s*([`'\"])(/[\w/-]*)\1")
+
+
+def _url_path(value: str) -> str:
+    m = _URL_PATH_RE.match(value.strip().strip("'\""))
+    path = (m.group(1) or "") if m else ""
+    return "/" + path.strip("/") if path.strip("/") else ""
+
+
+def _common_path(paths: list[str]) -> str:
+    split = [[s for s in p.split("/") if s] for p in paths if p is not None]
+    if not split:
+        return ""
+    common = []
+    for parts in zip(*split):
+        if len(set(parts)) != 1 or parts[0].startswith("{"):
+            break
+        common.append(parts[0])
+    return "/" + "/".join(common) if common else ""
+
+
+def _frontend_bases(files: dict[str, str]) -> dict[str, list[str]]:
+    """``{base path: [where]}`` the frontend sends its API calls to."""
+    found: dict[str, list[str]] = {}
+    for path, content in sorted(files.items()):
+        p = _norm(path)
+        if "frontend" not in p and "client" not in p:
+            continue
+        base = _basename(p)
+        sources: list[str] = []
+        if base.startswith(".env"):
+            sources = _ENV_BASE_RE.findall(content)
+        elif _is_js_source(p) and not _is_test(p):
+            for rx in _FRONTEND_BASE_RES:
+                sources += [m[1] for m in rx.findall(content)]
+        for value in sources:
+            found.setdefault(_url_path(value), []).append(p)
+    return found
+
+
+def _defines(content: str, symbol: str, path: str) -> bool:
+    s = re.escape(symbol)
+    if path.endswith(".py"):
+        return bool(re.search(rf"^(?:async[ \t]+)?def[ \t]+{s}\b|^class[ \t]+{s}\b|^{s}[ \t]*(?::[^=\n]*)?=", content, re.MULTILINE))
+    return bool(re.search(rf"\b(?:function\s+{s}\b|(?:const|let|var|class)\s+{s}\b)", content))
+
+
+def find_integration_issues(
+    files: dict[str, str], *, api_base_path: str = "", symbol_owners: dict[str, str] | None = None
+) -> list[dict[str, Any]]:
+    """Cross-file disagreements no generation call could see, as ``{kind, detail, files}`` dicts.
+
+    * ``base_path`` — the backend's routes do not live under the pack's API base path, or the
+      frontend calls a base path the backend does not serve;
+    * ``unmounted_router`` — a FastAPI router no file includes (and the fixer could not mount, as it
+      declares no prefix of its own);
+    * ``duplicate_definition`` — a helper the pack says is defined ONCE (preflight's symbol
+      owners) defined in several files;
+    * ``session_style`` — an async SQLAlchemy engine with routes injecting a sync ``Session``.
+    """
+    from app.services.python_wiring import fastapi_mounts
+
+    issues: list[dict[str, Any]] = []
+    prefixes, unmounted, root_path = fastapi_mounts(files)
+    express = [
+        m for path, content in files.items() if _is_js_source(path) and "backend" in _norm(path) and not _is_test(path)
+        for m in re.findall(r"\b\w+\.use\(\s*['\"](/[^'\"]*)['\"]", content)
+    ]
+    mounted = [root_path + p for p in prefixes] + express
+    backend_base = _common_path(mounted) if mounted else ""
+    want = _url_path(api_base_path) if api_base_path else ""
+    if want and mounted and not (backend_base + "/").startswith(want + "/") and not (root_path + "/").startswith(want + "/"):
+        examples = ", ".join(sorted(set(p or "/" for p in mounted))[:4])
+        issues.append({"kind": "base_path", "files": [], "detail": (
+            f"The pack's API base path is `{want}` but the backend mounts its routes at {examples} - "
+            f"mount every router under `{want}` (one prefix where the routers are included).")})
+    frontend = _frontend_bases(files)
+    proxied = any(_PROXY_RE.search(c) and "rewrite" in c for c in files.values())
+    served = backend_base or ""
+    for base, where in sorted(frontend.items()):
+        if not base or proxied or not mounted:
+            continue
+        if not (served + "/").startswith(base + "/") and not (base + "/").startswith(served + "/"):
+            issues.append({"kind": "base_path", "files": sorted(set(where))[:5], "detail": (
+                f"The frontend calls the API at `{base}` but the backend serves it at `{served or '/'}`.")})
+    for path in unmounted:
+        issues.append({"kind": "unmounted_router", "files": [path], "detail": (
+            f"{path} defines an APIRouter that no file includes, so none of its endpoints are reachable.")})
+    for symbol, owner in sorted((symbol_owners or {}).items()):
+        defining = sorted(p for p, c in files.items() if not _is_test(p) and (p.endswith(".py") or _is_js_source(p))
+                          and _defines(c, symbol, p))
+        if len(defining) > 1:
+            issues.append({"kind": "duplicate_definition", "files": defining, "detail": (
+                f"`{symbol}` is defined in {', '.join(defining)}; the design says it lives in {owner} - keep "
+                "that one and import it everywhere else.")})
+    async_engine = [p for p, c in files.items() if p.endswith(".py") and "create_async_engine" in c]
+    sync_routes = sorted(p for p, c in files.items() if p.endswith(".py") and not _is_test(p)
+                         and re.search(r"from\s+sqlalchemy\.orm\s+import\s+[^\n]*\bSession\b", c)
+                         and re.search(r":\s*Session\s*=\s*Depends\(", c))
+    if async_engine and sync_routes:
+        issues.append({"kind": "session_style", "files": sync_routes[:10], "detail": (
+            f"{async_engine[0]} creates an ASYNC engine, but {len(sync_routes)} file(s) inject a sync "
+            "`sqlalchemy.orm.Session` (e.g. " + ", ".join(sync_routes[:3]) + ") - use AsyncSession and await "
+            "the queries, or make the engine synchronous; mixing them fails at the first request.")})
+    return issues
 
 
 # --- reverse import graph (who depends on this file?) -------------------------------------------

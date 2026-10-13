@@ -19,6 +19,39 @@ from app.config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
+#: Prompt-cache breakpoints a single call may set (the API allows 4; one is left for callers
+#: that also cache a system prompt or tools).
+_MAX_CACHE_BREAKPOINTS = 3
+
+
+def _prefix_segments(cache_prefix: str | list[str] | None) -> list[str]:
+	segments = [cache_prefix] if isinstance(cache_prefix, str) else list(cache_prefix or [])
+	return [s for s in segments if s]
+
+
+def full_prompt(prompt: str, cache_prefix: str | list[str] | None = None) -> str:
+	"""The whole user message as one string: the cacheable prefix segments, then ``prompt``.
+
+	What a model without prompt caching receives, and what test doubles record, so a caller that
+	moves its shared context into ``cache_prefix`` changes nothing about what the model reads."""
+	return "\n\n".join([*_prefix_segments(cache_prefix), prompt])
+
+
+def _cached_user_content(prompt: str, cache_prefix: str | list[str] | None) -> list[dict[str, Any]]:
+	"""The user message as text blocks, a cache breakpoint closing each prefix segment.
+
+	Segments run from most to least shared (the run's naming contract, then one work item's
+	slices), so a call reuses the longest prefix any earlier call wrote. A segment below the
+	model's minimum cacheable size is simply not cached; that is not an error."""
+	segments = _prefix_segments(cache_prefix)
+	cached, extra = segments[:_MAX_CACHE_BREAKPOINTS], segments[_MAX_CACHE_BREAKPOINTS:]
+	blocks: list[dict[str, Any]] = [
+		{"type": "text", "text": f"{s}\n\n", "cache_control": {"type": "ephemeral"}} for s in cached
+	]
+	blocks.append({"type": "text", "text": "\n\n".join([*extra, prompt])})
+	return blocks
+
+
 def _retry_after_seconds(exc: Exception, default: float) -> float:
 	"""How long to wait before retrying a 429, from the ``Retry-After`` header or the error body.
 
@@ -165,11 +198,16 @@ class LLMGateway:
 		settings = get_settings()
 		self._model = settings.llm_model
 		self._max_tokens = settings.llm_max_tokens
+		# stop_reason of the most recent model response ('end_turn', 'tool_use', 'max_tokens' ...).
+		# Read by agents that report on a call after the fact (the Debugging report records it):
+		# 'max_tokens' is the only direct evidence that a reply was cut off rather than wrong.
+		self.last_stop_reason: str | None = None
 		self._api_key = settings.anthropic_foundry_api_key or None
 		self._base_url = settings.anthropic_foundry_base_url or None
 		self._resource = settings.anthropic_foundry_resource or None
 		self._timeout = settings.llm_timeout_seconds
 		self._use_thinking = settings.llm_thinking
+		self._prompt_cache = bool(getattr(settings, "llm_prompt_cache", True))
 		# Build the client lazily (see _get_client). The Anthropic SDK raises
 		# at construction if no credentials/endpoint are resolvable, so building
 		# it here would make merely importing this module require Foundry config —
@@ -194,13 +232,21 @@ class LLMGateway:
 		*,
 		system: str | None = None,
 		max_tokens: int | None = None,
+		cache_prefix: str | list[str] | None = None,
 	) -> str:
-		"""Run a single prompt and return the model's text response."""
+		"""Run a single prompt and return the model's text response.
+
+		``cache_prefix`` is context that comes BEFORE ``prompt`` and that other calls send
+		identically (one string, or segments from most to least shared). The model reads exactly
+		``full_prompt(prompt, cache_prefix)``; with caching on, the prefix is marked cacheable so
+		repeated calls pay for it once per few minutes rather than every time."""
+		use_cache = self._prompt_cache and bool(_prefix_segments(cache_prefix))
+		content: Any = _cached_user_content(prompt, cache_prefix) if use_cache else full_prompt(prompt, cache_prefix)
 		kwargs: dict = {
 			"model": self._model,
 			"max_tokens": max_tokens or self._max_tokens,
 			"system": system or anthropic.NOT_GIVEN,
-			"messages": [{"role": "user", "content": prompt}],
+			"messages": [{"role": "user", "content": content}],
 		}
 		# Adaptive thinking is only supported on Claude 4.6+ models. Disable it
 		# via LLM_THINKING=false if LLM_MODEL points at a model without it.
@@ -217,11 +263,24 @@ class LLMGateway:
 			with self._get_client().messages.stream(**kwargs) as stream:
 				return stream.get_final_message()
 
-		response = _with_rate_limit_retry(_stream_once)
+		try:
+			response = _with_rate_limit_retry(_stream_once)
+		except anthropic.BadRequestError as exc:
+			# A deployment without prompt caching rejects cache_control. Losing the cache costs
+			# money; losing the run costs hours — so drop it for this process and carry on.
+			if not (use_cache and "cache" in str(exc).lower()):
+				raise
+			logger.warning("prompt caching rejected by the deployment (%s); continuing without it", _truncate(str(exc)))
+			self._prompt_cache = False
+			kwargs["messages"] = [{"role": "user", "content": full_prompt(prompt, cache_prefix)}]
+			response = _with_rate_limit_retry(_stream_once)
+		self.last_stop_reason = getattr(response, "stop_reason", None)
 		logger.info(
-			"llm_call model=%s input_tokens=%s output_tokens=%s stop=%s",
+			"llm_call model=%s input_tokens=%s cache_read=%s cache_write=%s output_tokens=%s stop=%s",
 			self._model,
 			response.usage.input_tokens,
+			getattr(response.usage, "cache_read_input_tokens", None),
+			getattr(response.usage, "cache_creation_input_tokens", None),
 			response.usage.output_tokens,
 			response.stop_reason,  # 'max_tokens' here means the reply was truncated
 		)
@@ -236,6 +295,7 @@ class LLMGateway:
 		system: str | None = None,
 		tools: list | None = None,
 		max_iters: int = 6,
+		cache_prefix: str | list[str] | None = None,
 	) -> str:
 		"""Tool-augmented completion: bind ``tools`` to the model and run a tool-use loop.
 
@@ -243,15 +303,40 @@ class LLMGateway:
 		repair node never import the SDK. Each tool may be a repair-tool wrapper (with a
 		``handler``) or a LangChain tool (with ``invoke``). Returns the model's final text
 		(which carries the proposed fix). Falls back to :meth:`complete` when no tools are given.
+
+		Every turn re-sends the whole conversation, so with caching on, ``cache_prefix`` (context
+		shared with other calls — see :meth:`complete`) is marked cacheable in the first message,
+		and a rolling breakpoint follows the newest tool results: each turn re-reads everything
+		before it from cache instead of paying for it again.
 		"""
 		if not tools:
-			return self.complete(prompt, system=system)
+			return self.complete(prompt, system=system, cache_prefix=cache_prefix)
 
 		client = self._get_client()
 		specs = [self._tool_spec(tool) for tool in tools]
 		by_name = {getattr(tool, "name", ""): tool for tool in tools}
-		messages: list = [{"role": "user", "content": prompt}]
+		use_cache = self._prompt_cache
+		first: Any = _cached_user_content(prompt, cache_prefix) if use_cache else full_prompt(prompt, cache_prefix)
+		messages: list = [{"role": "user", "content": first}]
+		rolling: dict | None = None          # the tool_result block carrying the rolling breakpoint
 		final_text = ""
+
+		def _create(call_kwargs: dict) -> Any:
+			nonlocal use_cache
+			try:
+				return _with_rate_limit_retry(lambda: client.messages.create(**call_kwargs))
+			except anthropic.BadRequestError as exc:
+				if not (use_cache and "cache" in str(exc).lower()):
+					raise
+				logger.warning("prompt caching rejected by the deployment (%s); continuing without it", _truncate(str(exc)))
+				self._prompt_cache = use_cache = False
+				messages[0]["content"] = full_prompt(prompt, cache_prefix)
+				for message in messages:
+					for block in message["content"] if isinstance(message["content"], list) else []:
+						if isinstance(block, dict):
+							block.pop("cache_control", None)
+				return _with_rate_limit_retry(lambda: client.messages.create(**call_kwargs))
+
 		for turn in range(1, max_iters + 1):
 			kwargs: dict = {
 				"model": self._model,
@@ -264,7 +349,8 @@ class LLMGateway:
 			# Same 429 backoff as complete() — see _with_rate_limit_retry. Not streamed: proposed
 			# fixes are small compared to a full-module generation, so the blocking HTTP timeout
 			# is not the risk here; the rate limit from repeated repair/tool-loop calls is.
-			response = _with_rate_limit_retry(lambda: client.messages.create(**kwargs))
+			response = _create(kwargs)
+			self.last_stop_reason = getattr(response, "stop_reason", None)
 			final_text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 			tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
 			logger.info(
@@ -281,6 +367,13 @@ class LLMGateway:
 				outcome = self._run_tool(by_name.get(tu.name), tu.input)
 				logger.info("  tool_result %s -> %s", tu.name, _truncate(str(outcome)))
 				results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(outcome)})
+			if use_cache and results:
+				# Move the rolling breakpoint to the newest turn (the API allows 4 breakpoints:
+				# up to 2 in the prefix, this one, and one spare).
+				if rolling is not None:
+					rolling.pop("cache_control", None)
+				rolling = results[-1]
+				rolling["cache_control"] = {"type": "ephemeral"}
 			messages.append({"role": "user", "content": results})
 
 		# The model was STILL calling tools on the last allowed turn — every caller here (the
@@ -302,7 +395,8 @@ class LLMGateway:
 		final_kwargs: dict = {"model": self._model, "max_tokens": self._max_tokens, "messages": messages}
 		if system:
 			final_kwargs["system"] = system
-		response = _with_rate_limit_retry(lambda: client.messages.create(**final_kwargs))
+		response = _create(final_kwargs)
+		self.last_stop_reason = getattr(response, "stop_reason", None)
 		return "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
 
 	@staticmethod
@@ -368,8 +462,12 @@ class FakeLLMGateway(LLMGateway):
 		self._queue: deque[str] = deque([] if callable(responses) else (responses or []))
 		self._default = default
 		self.calls: list[dict[str, Any]] = []
+		self.last_stop_reason: str | None = None
 
 	def complete(self, prompt: str, *, system: str | None = None, **kwargs: Any) -> str:
+		# Record (and answer from) the WHOLE message the model would read — a cache_prefix is
+		# part of the prompt, not a side channel.
+		prompt = full_prompt(prompt, kwargs.get("cache_prefix"))
 		self.calls.append({"prompt": prompt, "system": system, "kwargs": kwargs})
 		if self._responder is not None:
 			return self._responder(prompt)
@@ -386,8 +484,36 @@ class FakeLLMGateway(LLMGateway):
 		system: str | None = None,
 		tools: list | None = None,
 		max_iters: int = 6,
+		cache_prefix: str | list[str] | None = None,
 	) -> str:
 		# Deterministic double: ignore tools, return the next scripted response.
 		# TODO: to catch accidental misuse (repair path calling the wrong method), tests could
 		# script a distinct response here vs. complete() and assert which one was served.
-		return self.complete(prompt, system=system)
+		return self.complete(prompt, system=system, cache_prefix=cache_prefix)
+
+
+def complete_cached(
+	gateway: LLMGateway, prompt: str, *, cache_prefix: str | list[str] | None, **kwargs: Any
+) -> str:
+	"""``gateway.complete`` with a cacheable prefix — falling back to one joined prompt for a
+	stand-in that predates ``cache_prefix`` (see :func:`complete_with_tools_cached`)."""
+	try:
+		return gateway.complete(prompt=prompt, cache_prefix=cache_prefix, **kwargs)
+	except TypeError as exc:
+		if "cache_prefix" not in str(exc):
+			raise
+		return gateway.complete(prompt=full_prompt(prompt, cache_prefix), **kwargs)
+
+
+def complete_with_tools_cached(
+	gateway: LLMGateway, prompt: str, *, cache_prefix: str | list[str] | None, **kwargs: Any
+) -> str:
+	"""``gateway.complete_with_tools`` with a cacheable prefix — or, for a gateway stand-in that
+	predates ``cache_prefix`` (tests and scripts patch the method with plain functions), the same
+	text as one prompt. What the model reads is identical either way."""
+	try:
+		return gateway.complete_with_tools(prompt=prompt, cache_prefix=cache_prefix, **kwargs)
+	except TypeError as exc:
+		if "cache_prefix" not in str(exc):
+			raise
+		return gateway.complete_with_tools(prompt=full_prompt(prompt, cache_prefix), **kwargs)

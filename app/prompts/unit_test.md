@@ -14,6 +14,20 @@ Reply with a single JSON object and NOTHING else — no prose, no markdown fence
 - `content` is the COMPLETE, runnable test file — no placeholders, no "TODO", no ellipses.
 - Do not wrap the JSON in code fences. Do not emit any text before or after the JSON.
 
+## What you are given
+
+Above the task: the project's NAMING CONTRACT and MODULE MAP (import project code ONLY by the names
+they give; assert on the entity, field, schema and stored role/enum names they state), the work
+item's sources, the requirement text it implements, the validation rules and sample payloads that
+belong to it, and a "Test environment" section (how to call the app, what is installed, whether a
+database exists). Use them: assert the stated messages VERBATIM, use the sample payloads as test
+data, and cover each requirement listed.
+
+Each reply is ONE test file for ONE source file, at the path you are told. Define its fixtures and
+mocks inside it; never write conftest.py or shared helpers. For HTTP code, drive the app through the
+framework's test client and replace its dependencies with the framework's own override mechanism
+(`app.dependency_overrides` for FastAPI) — never reach a real database or network.
+
 ## What to build
 
 - You will be told which test runner this project actually uses (read from its package.json, or

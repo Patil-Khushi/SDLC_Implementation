@@ -12,8 +12,10 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 from app.agents.change_planner import ChangePlannerAgent
+from app.agents.chat_planner import ChatPlannerAgent
 from app.agents.code_generator import CodeGeneratorAgent
 from app.agents.code_modifier import CodeModifierAgent
 # _slug is the report-folder naming convention Code Review and Refactoring already share; the
@@ -25,12 +27,17 @@ from app.agents.security import SecurityAgent
 from app.agents.unit_test import UnitTestAgent
 from app.config.settings import get_settings
 from app.graph.state import GateCheck, WorkflowState
-from app.integrations.executor import get_executor
+from app.integrations.executor import Executor, get_executor
+from app.models import WorkItem
 from app.integrations.github import get_github_client
 from app.integrations.review_sandbox import is_allowed_repo_url
+from app.graph import router
+from app.services import chat_inbox, codegen_digest, plan_patch
 from app.services.boilerplate import render_scaffold
+from app.services.pack_preflight import preflight_for
 from app.services.change_gate import classify_regressions, evaluate
 from app.services.change_plan import normalize_target, render_plan, validate_plan
+from app.services.plan_patch import PlanPatch
 from app.services.packaging import build_project_zip
 from app.services.test_command import detect as detect_test_command
 from app.services.test_command import run as run_tests
@@ -43,7 +50,9 @@ from app.services.repo_inventory import (
 from app.services.wiring import (
     build_import_graph,
     dependents_of,
+    find_integration_issues,
     find_unresolved_imports,
+    reconcile_scaffold_manifests,
     reconcile_wiring,
 )
 
@@ -81,6 +90,41 @@ def _note(state: WorkflowState, line: str) -> WorkflowState:
     return state
 
 
+def _run_pack_preflight(state: WorkflowState) -> None:
+    """Find the design pack's contradictions and gaps and record the canonical values chosen for
+    them (``app/services/pack_preflight.py``) — before anything is generated, so every later stage
+    can read ``pack_facts``. Deterministic and best-effort: a preflight failure is logged and the
+    run continues exactly as it did before preflight existed.
+    """
+    package = state.get("design_package") or {}
+    if not package:
+        return
+    try:
+        result = preflight_for(package)
+    except Exception:  # noqa: BLE001 - an analysis bug must never stop a build
+        logger.exception("pack preflight failed for run %s — continuing without it", state.get("run_id"))
+        return
+    payload = result.to_dict()
+    state["pack_findings"] = payload["findings"]
+    state["pack_facts"] = payload["facts"]
+    project = state.get("project_id") or state.get("run_id") or "project"
+    report = result.to_markdown(project)
+    state["pack_preflight_report"] = report
+    try:
+        run_dir = Path(get_settings().reports_dir) / _slug(project)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / "pack-preflight.md"
+        path.write_text(report, encoding="utf-8")
+        state["pack_preflight_report_path"] = str(path)
+    except Exception:  # noqa: BLE001 - a reporting failure must never break the run
+        logger.exception("pack preflight: could not write the report for run %s", state.get("run_id"))
+    state["generation_summary"] = (state.get("generation_summary") or "") + f"[preflight] {result.summary_line()}\n"
+    logger.info("[preflight] %s", result.summary_line())
+    for finding in result.findings:
+        if finding.severity == "gap":
+            logger.warning("[preflight] gap: %s", finding.title)
+
+
 def scaffold_node(state: WorkflowState) -> WorkflowState:
     """FIXED, deterministic: render the repo-root boilerplate once, before any work item.
 
@@ -91,6 +135,7 @@ def scaffold_node(state: WorkflowState) -> WorkflowState:
     """
     _stage("Scaffold (boilerplate)", "rendering project boilerplate (Dockerfile, requirements, "
            "package.json, ...) and, if publishing, creating the repo + pushing 'main'")
+    _run_pack_preflight(state)
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     files = render_scaffold(project_dir, state.get("design_package"))
@@ -242,11 +287,103 @@ def select_work_item_node(state: WorkflowState) -> WorkflowState:
         raise ValueError(f"work_items must be a list, got {type(items).__name__}")
     index = int(state.get("work_item_index", 0))
     if index < len(items):
-        state["current_work_item"] = items[index]
+        item = items[index]
+        state["current_work_item"] = item
         state["work_item_index"] = index + 1
         state["repair_attempt"] = 0  # LOCAL, reset per work item (never touches `attempt`)
+        # Baseline for the gate's files_changed check. Taken HERE, before code_generator runs,
+        # because by gate time the edit has happened and there is nothing left to compare against.
+        # Only for edit-in-place items: for a create item files_complete is already sufficient, and
+        # hashing files that do not exist yet would be pure cost.
+        if item.action in ("modify", "delete"):
+            try:
+                state["pre_item_digests"] = codegen_digest.snapshot(
+                    get_executor(),
+                    state.get("project_id") or state.get("run_id") or "project",
+                    list(item.target_files),
+                )
+            except Exception:  # noqa: BLE001 - no baseline is a gate failure later, not a crash here
+                logger.exception("select: digest snapshot raised for %s", item.id)
+                state["pre_item_digests"] = {}
+        else:
+            state["pre_item_digests"] = {}
     else:
         state["current_work_item"] = None  # plan exhausted -> auto-commit
+    return state
+
+
+def chat_intake_node(state: WorkflowState) -> WorkflowState:
+    """Absorb any chat messages queued since the last turn, and patch the PENDING plan.
+
+    Sits on the ``feature_publish -> select`` edge, which is what makes a conversational build
+    possible without an ``interrupt()``: ``select_work_item_node`` re-reads ``work_items`` and
+    ``work_item_index`` on every pass, so a plan edited between items is simply picked up.
+
+    Three separate reasons to be a pure pass-through, all cheap to check before any work: chat is
+    off (the default), nothing is queued, or the turn cap is spent. The node is on the hot loop of
+    every run, so the disabled path must cost nothing.
+
+    ``chat_seq`` advances even when the planner refuses or the patch errors. That is deliberate: a
+    message nobody can act on would otherwise be re-proposed on every later turn, and — because the
+    mark is checkpointed — by every later ``--resume`` of the same thread, forever.
+    """
+    if not state.get("chat_enabled"):
+        return state
+
+    project = state.get("project_id") or state.get("run_id") or "project"
+    seq = int(state.get("chat_seq", 0))
+    turns = int(state.get("chat_turns", 0))
+
+    if turns >= router.CHAT_TURN_CAP:
+        return state
+
+    try:
+        pending = chat_inbox.read_new(project, seq)
+    except Exception:  # noqa: BLE001 - an unreadable inbox must not stop a multi-hour build
+        logger.exception("chat_intake: could not read the inbox for %s", project)
+        return state
+    if not pending:
+        return state
+
+    highest = max(int(m["seq"]) for m in pending)
+    logger.info(
+        "chat_intake: %d message(s) queued for %s (seq %d..%d)",
+        len(pending), project, seq + 1, highest,
+    )
+
+    state["chat_pending"] = pending
+    state = ChatPlannerAgent().execute(state)
+
+    before = list(state.get("work_items") or [])
+    cursor = int(state.get("work_item_index", 0))
+    try:
+        patch = PlanPatch(**(state.get("chat_patch") or {}))
+    except Exception as exc:  # noqa: BLE001 - a malformed patch is a refused turn
+        patch = PlanPatch(refusal=f"the proposed patch could not be read ({exc})")
+
+    items, report = plan_patch.apply_patch(before, cursor, patch, state.get("requirement_ledger"))
+
+    state["work_items"] = items
+    state["orphan_files"] = sorted(set((state.get("orphan_files") or []) + report["orphans"]))
+    state["chat_log"] = list(state.get("chat_log") or []) + [{
+        "seq": highest,
+        "messages": [m.get("text", "") for m in pending],
+        "report": report,
+        "diff": plan_patch.plan_diff(before, items),
+    }]
+    # Advance the mark and the turn counter regardless of outcome (see the docstring).
+    state["chat_seq"] = highest
+    state["chat_turns"] = turns + 1
+    state["chat_pending"] = []
+
+    logger.info(
+        "chat_intake: turn %d applied for %s | +%d -%d ~%d | plan %d -> %d%s",
+        turns + 1, project, len(report["added"]), len(report["removed"]), len(report["modified"]),
+        len(before), len(items),
+        f" | refused: {report['refusal']}" if report["refusal"] else "",
+    )
+    for line in report["skipped"] + report["errors"]:
+        logger.info("chat_intake:   %s", line)
     return state
 
 
@@ -821,6 +958,11 @@ def gate_node(state: WorkflowState) -> WorkflowState:
     repair proposes the missing/fixed file, the gate re-checks. NOTE: ``compile``/``build``/
     ``test``/``lint`` remain on the Executor for later pipeline agents that own them, but are not
     part of this gate.
+
+    For an ``action="modify"`` item ``files_complete`` is **vacuous** — the target already exists,
+    so it passes whether or not the agent wrote a byte — so a second check compares content digests
+    against the snapshot ``select_work_item_node`` took, and fails when no target moved. Without it
+    a no-op conversational edit would be committed and reported as an applied change.
     """
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
@@ -835,8 +977,54 @@ def gate_node(state: WorkflowState) -> WorkflowState:
         logger.exception("gate: files_complete raised for run %s", state.get("run_id"))
         checks.append({"name": "files_complete", "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1, "scope": ""})
 
+    if work_item is not None and work_item.action in ("modify", "delete"):
+        checks.append(_files_changed_check(state, executor, project_dir, work_item))
+
     state["gate_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
     return state
+
+
+def _files_changed_check(
+    state: WorkflowState, executor: Executor, project_dir: str, work_item: WorkItem
+) -> GateCheck:
+    """Did an edit-in-place item actually move at least one of its targets?
+
+    Deliberately NOT a whole-tree scan for collateral damage. On this path writes are fenced at the
+    tool layer by ``editing_tools(allowed_paths=work_item.target_files)``, which refuses an
+    out-of-plan write before it reaches disk — so hashing an entire generated project every item
+    would cost time proportional to project size and prove nothing the fence has not already
+    guaranteed. Please do not "fix" this into a full scan.
+    """
+    before = state.get("pre_item_digests") or {}
+    try:
+        after = codegen_digest.snapshot(executor, project_dir, list(work_item.target_files))
+    except Exception as exc:  # noqa: BLE001 - a read failure is a gate failure, not a crash
+        logger.exception("gate: digest snapshot raised for run %s", state.get("run_id"))
+        return {"name": "files_changed", "passed": False, "stderr": f"executor error: {exc}",
+                "stdout": "", "exit_code": -1, "scope": ""}
+
+    changed = codegen_digest.changed_paths(before, after)
+    if changed:
+        logger.info(
+            "gate: %s changed %d target(s): %s", work_item.id, len(changed), ", ".join(changed)
+        )
+        return {"name": "files_changed", "passed": True, "stderr": "", "stdout": ", ".join(changed),
+                "exit_code": 0, "scope": ""}
+
+    targets = ", ".join(work_item.target_files) or "(none declared)"
+    return {
+        "name": "files_changed",
+        "passed": False,
+        "stderr": (
+            f"{work_item.id} is a '{work_item.action}' item but none of its target files changed: "
+            f"{targets}. The requested change was: {work_item.change_intent or '(none recorded)'}. "
+            "Read each target and apply the change, or the run would report an edit that never "
+            "happened."
+        ),
+        "stdout": "",
+        "exit_code": 1,
+        "scope": "",
+    }
 
 
 def debug_check_node(state: WorkflowState) -> WorkflowState:
@@ -847,21 +1035,79 @@ def debug_check_node(state: WorkflowState) -> WorkflowState:
     as a failing check — recorded, not raised — rather than crashing the graph (mirrors
     ``gate_node``'s defensive style exactly).
     """
-    _stage("Debugging", "compile + build check on the generated code")
+    _stage("Debugging", "compile + build + boot check on the generated code")
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
     checks: list[GateCheck] = []
 
     for name, check in (("compile", executor.compile), ("build", executor.build)):
-        try:
-            result = check(project_dir)
-            checks.append({"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code, "scope": result.scope})
-        except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
-            logger.exception("debug_check: %s raised for run %s", name, state.get("run_id"))
-            checks.append({"name": name, "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1, "scope": ""})
+        checks.append(_run_check(name, check, project_dir, state))
 
-    state["debug_result"] = {"passed": bool(checks) and all(c["passed"] for c in checks), "checks": checks}
+    # Boot unless a backend's dependencies failed to install — then every boot failure would be a
+    # "No module named ..." echo of that. A frontend type error does NOT hold the backend's boot
+    # back: the two are independent, and one round can fix both. When the only failures are the
+    # environment's, the app was never startable here — say so, don't guess.
+    install_failed = any(
+        re.search(r"^\[(?:pip|venv-[\d.]+|install)\[", c.get("stderr", ""), re.MULTILINE)
+        for c in checks if not c["passed"]
+    )
+    if not install_failed:
+        try:
+            from app.services.pack_context import _sql_texts
+            from app.services.pack_index import index_for
+
+            executor.schema_sql = "\n\n".join(_sql_texts(index_for(state.get("design_package") or {})))
+        except Exception:  # noqa: BLE001 - no DDL just means "migrations only"
+            pass
+        checks.append(_run_check("boot", executor.boot, project_dir, state))
+    elif all(c["passed"] or c.get("inconclusive") for c in checks):
+        checks.append({
+            "name": "boot", "passed": False, "inconclusive": True, "stdout": "", "exit_code": -1, "scope": "",
+            "stderr": "[boot] not attempted: the dependencies could not be installed in this environment",
+            "environment": "boot: not attempted - the dependencies could not be installed",
+        })
+
+    passed = bool(checks) and all(c["passed"] for c in checks)
+    state["debug_result"] = {
+        "passed": passed,
+        "inconclusive": not passed and all(c["passed"] or c.get("inconclusive") for c in checks),
+        "checks": checks,
+    }
+    _record_unverified(state, checks)
     return state
+
+
+def _run_check(name: str, check: Any, project_dir: str, state: WorkflowState) -> GateCheck:
+    """One fixed-path check as a ``GateCheck``. An executor error (timeout, sandbox/disk failure)
+    becomes a failing check — recorded, not raised — rather than crashing the graph."""
+    try:
+        result = check(project_dir)
+    except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
+        logger.exception("%s check raised for run %s", name, state.get("run_id"))
+        return {"name": name, "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1, "scope": ""}
+    out: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout,
+                      "exit_code": result.exit_code, "scope": result.scope}
+    if getattr(result, "inconclusive", False):
+        out["inconclusive"] = True
+        out["environment"] = getattr(result, "environment", "") or "environment"
+    return out
+
+
+def _record_unverified(state: WorkflowState, checks: list[GateCheck]) -> None:
+    """Keep ``unverified_checks`` current: an inconclusive check is (re)recorded with its reason, a
+    check that has since PASSED is removed — it is verified now."""
+    current = {u["check"]: u for u in state.get("unverified_checks") or []}
+    for check in checks:
+        if check.get("inconclusive"):
+            reason = check.get("environment") or "environment"
+            if current.get(check["name"], {}).get("reason") != reason:
+                state["generation_summary"] = (state.get("generation_summary") or "") + (
+                    f"[unverified] {check['name']}: {reason} (an environment problem, not a code failure)\n")
+            current[check["name"]] = {"check": check["name"], "reason": reason}
+            logger.warning("[%s] unverified - %s", check["name"], reason)
+        elif check["passed"]:
+            current.pop(check["name"], None)
+    state["unverified_checks"] = list(current.values())
 
 
 def unit_test_generate_node(state: WorkflowState) -> WorkflowState:
@@ -885,14 +1131,9 @@ def unit_test_run_node(state: WorkflowState) -> WorkflowState:
     executor = get_executor()
     project_dir = state.get("project_id") or state.get("run_id") or "project"
 
-    try:
-        result = executor.test(project_dir)
-        check: GateCheck = {"name": result.name, "passed": result.passed, "stderr": result.stderr, "stdout": result.stdout, "exit_code": result.exit_code, "scope": result.scope}
-    except Exception as exc:  # noqa: BLE001 - executor failure becomes a failing check, not a crash
-        logger.exception("unit_test_run: test raised for run %s", state.get("run_id"))
-        check = {"name": "test", "passed": False, "stderr": f"executor error: {exc}", "stdout": "", "exit_code": -1, "scope": ""}
-
-    state["test_result"] = {"passed": check["passed"], "checks": [check]}
+    check = _run_check("test", executor.test, project_dir, state)
+    state["test_result"] = {"passed": check["passed"], "inconclusive": bool(check.get("inconclusive")), "checks": [check]}
+    _record_unverified(state, [check])
     return state
 
 
@@ -1275,6 +1516,11 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
 
     try:
         changed = reconcile_wiring(files)
+        # The scaffold's test harness (a `test` script and its jest/babel devDependencies) put back
+        # where a generated package.json replaced the scaffold's. Re-rendered, not stored: the
+        # scaffold is deterministic in (project, pack), exactly as scaffold_node rendered it.
+        scaffold = {e["path"]: e["content"] for e in render_scaffold(project_dir, state.get("design_package"))}
+        changed.update(reconcile_scaffold_manifests({**files, **changed}, scaffold))
     except Exception as exc:  # noqa: BLE001 - a reconciler bug must never crash a finished plan
         logger.exception("wiring reconciliation failed for run %s", state.get("run_id"))
         state["generation_summary"] = (state.get("generation_summary") or "") + f"[reconcile] FAILED: {exc}\n"
@@ -1310,6 +1556,28 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
         state["generation_summary"] = (state.get("generation_summary") or "") + (
             f"[reconcile] {len(unresolved)} unresolved import(s) (not auto-fixed):\n"
             + "".join(f"    - {item.as_note()}\n" for item in unresolved)
+        )
+
+    # Report-only: disagreements between files that no fixer can settle without choosing a side
+    # (base paths, define-once helpers defined twice, an async engine behind sync sessions). Judged
+    # against the pack's canonical facts, which preflight settled before generation began.
+    try:
+        facts = preflight_for(state.get("design_package") or {}).facts if state.get("design_package") else {}
+        issues = find_integration_issues(
+            {**files, **changed},
+            api_base_path=str(facts.get("api_base_path") or ""),
+            symbol_owners=facts.get("symbol_owners") or {},
+        )
+    except Exception:  # noqa: BLE001 - an analysis bug must never crash a finished plan
+        logger.exception("integration analysis failed for run %s", state.get("run_id"))
+        issues = []
+    state["integration_findings"] = issues
+    if issues:
+        logger.warning("[reconcile] run=%s | %d integration issue(s) - left for the debugging agent",
+                       state.get("run_id") or "-", len(issues))
+        state["generation_summary"] = (state.get("generation_summary") or "") + (
+            f"[reconcile] {len(issues)} integration issue(s) (not auto-fixed):\n"
+            + "".join(f"    - [{i['kind']}] {i['detail']}\n" for i in issues)
         )
 
     if not changed:
@@ -1432,6 +1700,29 @@ def escalate_node(state: WorkflowState) -> WorkflowState:
     Flags ``needs_human_review`` so the orchestrator knows the run needs attention, then ends the
     run. It no longer pauses on an interrupt — that HITL pause had no resume contract and always
     ended the run anyway.
+
+    Also accounts for any chat message still queued. ``chat_intake`` only runs on the
+    ``feature_publish -> select`` edge, which this path never reaches, so a run that dies here can
+    leave requests undrained. They are REPORTED rather than dropped or silently consumed: the user
+    asked for something the run could not deliver, and that belongs in the record next to the
+    failure, not discarded.
     """
     state["workflow_status"] = "needs_human_review"
+
+    if state.get("chat_enabled"):
+        project = state.get("project_id") or state.get("run_id") or "project"
+        try:
+            undrained = chat_inbox.read_new(project, int(state.get("chat_seq", 0)))
+        except Exception:  # noqa: BLE001 - never let reporting break a terminal node
+            logger.exception("escalate: could not read the chat inbox for %s", project)
+            undrained = []
+        if undrained:
+            texts = [m.get("text", "") for m in undrained]
+            logger.warning(
+                "escalate: %d chat request(s) were never applied because the run escalated: %s",
+                len(undrained), " | ".join(texts),
+            )
+            state["generation_summary"] = (state.get("generation_summary") or "") + "\n" + "\n".join(
+                f"[chat] NOT APPLIED (run escalated before it could be planned): {t}" for t in texts
+            )
     return state

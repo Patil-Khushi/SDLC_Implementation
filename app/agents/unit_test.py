@@ -43,7 +43,10 @@ from app.config.settings import get_settings
 from app.graph.state import WorkflowState
 from app.integrations.executor import Executor, get_executor
 from app.models import WorkItem
-from app.services.llm_gateway import LLMGateway
+from app.services import pack_context as pc
+from app.services.llm_gateway import LLMGateway, complete_cached
+from app.services.naming_contract import build_module_map, build_naming_contract_from_package
+from app.services.pack_index import index_for
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +102,69 @@ def _runner_fact_line(runner: str) -> str:
     )
 
 
+_CODE_EXTS = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+_TEST_NAME_RE = re.compile(r"(^test_.*\.py$|_test\.py$|\.(?:test|spec)\.[cm]?[jt]sx?$)", re.IGNORECASE)
+_TOOL_CONFIG_PREFIXES = ("vite.config", "vitest.config", "jest.config", "jest.setup", "babel.config",
+                         "postcss.config", "tailwind.config", "eslint.config", ".eslintrc", "webpack.config")
+_UNTESTED_DIRS = {"migrations", "alembic", "versions", "seeds", "seeders", "tests", "test", "__tests__", "test-utils"}
+_RUNTIME_JS_RE = re.compile(r"\bfunction\b|=>|\bclass\s+\w|module\.exports|export\s+default\b|export\s+(?:async\s+)?function")
+
+
+def _is_test_file(path: str) -> bool:
+    return bool(_TEST_NAME_RE.search(path.replace("\\", "/").rsplit("/", 1)[-1]))
+
+
+def _testable(path: str, content: str) -> bool:
+    """Is there behaviour in this file to test? Not for a package marker, a type-only module, a
+    tool config, a migration, an entry that only renders into the DOM, or a test itself — asking
+    for tests of those produces tests of nothing (or of the framework)."""
+    parts = path.replace("\\", "/").split("/")
+    base = parts[-1].lower()
+    if not base.endswith(_CODE_EXTS) or base.endswith(".d.ts") or base.startswith(_TOOL_CONFIG_PREFIXES):
+        return False
+    if _is_test_file(path) or any(p.lower() in _UNTESTED_DIRS for p in parts[:-1]):
+        return False
+    if base.endswith(".py"):
+        return bool(re.search(r"^\s*(?:async\s+)?def\s|^\s*class\s", content, re.MULTILINE))
+    if re.search(r"\bcreateRoot\(|ReactDOM\.render\(", content) and not re.search(r"export\s", content):
+        return False
+    return bool(_RUNTIME_JS_RE.search(content))
+
+
+def _suggested_test_path(path: str, python_paths: list[str]) -> str:
+    """Where this source file's tests go — unique per source file, so one call never overwrites
+    another's. Python: ``<import root>/tests/test_<module path>.py`` (``app.modules.depots.service``
+    -> ``backend/tests/test_modules_depots_service.py``), importable as ``app...`` because the
+    runner starts from the backend folder. JS/TS: colocated ``<stem>.test.<ext>``."""
+    from app.services.python_wiring import PyProject
+
+    norm = path.replace("\\", "/")
+    if norm.endswith(".py"):
+        project = PyProject(dict.fromkeys(python_paths or [norm], ""))
+        dotted = project.dotted_of(norm) or norm.rsplit("/", 1)[-1][:-3]
+        roots = [r for r in project.roots_for(norm) if norm.startswith(r)]
+        root = roots[0] if roots else (norm.split("/", 1)[0] + "/" if "/" in norm else "")
+        parts = dotted.split(".")
+        return f"{root}tests/test_{'_'.join(parts[1:] or parts)}.py"
+    folder, _, base = norm.rpartition("/")
+    stem, dot, ext = base.rpartition(".")
+    return f"{folder + '/' if folder else ''}{stem}.test.{ext}" if dot else f"{norm}.test.js"
+
+
+def _app_import(work_items: list[Any], side: str) -> tuple[str, str] | None:
+    """``(module, variable)`` of the backend's FastAPI app (``app.main``, ``app``), from where the
+    plan put its entry file."""
+    from app.services.python_wiring import PyProject
+
+    paths = [p for item in work_items or [] for p in (getattr(item, "target_files", None) or []) if p.endswith(".py")
+             and p.startswith(side)]
+    entry = next((p for p in paths if p.rsplit("/", 1)[-1] in ("main.py", "app.py", "asgi.py")), None)
+    if not entry:
+        return None
+    dotted = PyProject(dict.fromkeys(paths, "")).dotted_of(entry)
+    return (dotted, "app") if dotted else None
+
+
 def _cap_files_block(text: str) -> str:
     """Head+tail-preserved truncation for the assembled source block — mirrors
     ``app.integrations.executor.cap_output``'s shape so a truncation marker and the trailing
@@ -139,6 +205,7 @@ class UnitTestAgent(BaseAgent):
         attempted = 0    # work items the model was actually asked about (readable source existed)
         succeeded = 0    # of those, how many yielded at least one test file
         skipped = 0      # work items with NO readable source — never sent to the model (U3)
+        untestable = 0   # readable, but no behaviour to test — never sent to the model either
         rows: list[dict[str, Any]] = []  # per-item outcome, for the report
 
         logger.info("[unit_test] run=%s | [1/%d] generating tests for %d work item(s)...",
@@ -163,13 +230,36 @@ class UnitTestAgent(BaseAgent):
                 )
                 continue
 
+            testable = [p for p, content in sources.items() if _testable(p, content)]
+            if not testable:
+                # Nothing to test (types, config, package markers, a DOM-mount entry) — not a
+                # generation failure: unlike an unreadable item, it never counts against tests_ok.
+                untestable += 1
+                rows.append({"id": work_item.id, "status": "NOTHING TO TEST", "files": []})
+                self._append_summary(
+                    state, f"[unit_test] {work_item.id}: nothing to test (types, config, markers only)"
+                )
+                continue
+
             attempted += 1
             runner = self._detect_test_runner(executor, project_dir, work_item)
             logger.info(
-                "[unit_test] run=%s | [%d/%d] %s: read %d source file(s), asking the model for tests...",
-                run_id, i, total_items, work_item.id, len(sources),
+                "[unit_test] run=%s | [%d/%d] %s: read %d source file(s), asking the model for tests of %d...",
+                run_id, i, total_items, work_item.id, len(sources), len(testable),
             )
-            files = self._generate_tests(work_item, sources, system, runner)
+            # Shared by every item of the run (the contract, the module map), then by every file of
+            # this item (its sources and pack slices): the gateway's cacheable prefix.
+            prefix = [s for s in (self._shared_context(state, work_item),
+                                  self._item_context(state, work_item, sources, runner, executor)) if s]
+            python_paths = [p for item in items for p in item.target_files if p.endswith(".py")]
+            files: list[dict[str, str]] | None = []
+            for source in testable:
+                rel = source[len(project_dir) + 1:] if source.startswith(f"{project_dir}/") else source
+                produced = self._generate_test_file(rel, _suggested_test_path(rel, python_paths), prefix, system)
+                if produced:
+                    files.extend(produced)
+            if not files:
+                files = None
 
             if files is None:
                 self._append_summary(
@@ -206,7 +296,9 @@ class UnitTestAgent(BaseAgent):
         state["unit_tests"] = written
         # False only when there WERE work items but none yielded a test file — an empty plan has
         # nothing to test and must not be misrouted to escalate (no-human-in-the-loop invariant).
-        state["tests_ok"] = bool(written) or not (state.get("work_items") or [])
+        # ...and an item with nothing testable is not one of those failures: a project whose every
+        # item is types/config/markers had nothing to test, which is not "test generation failed".
+        state["tests_ok"] = bool(written) or not (state.get("work_items") or []) or (attempted == 0 and skipped == 0)
         self._bump_metrics(state, files=total_new)
         self._write_report(state, run_id, rows, total_new, attempted=attempted, succeeded=succeeded, skipped=skipped)
         return state
@@ -256,6 +348,117 @@ class UnitTestAgent(BaseAgent):
             logger.exception("[unit_test] run=%s | could not persist the report", run_id)
 
     # -- generation -----------------------------------------------------------
+
+    def _generate_test_file(
+        self, source: str, test_path: str, prefix: list[str], system: str
+    ) -> list[dict[str, str]] | None:
+        """ONE test file for ONE source file; re-ask once on a parse failure. One file per reply,
+        so a module with many files cannot truncate the reply at the output cap (the failure the
+        code generator's per-file path exists for). The reply's own path is kept when it names a
+        test file; otherwise the suggested one is used."""
+        prompt = self._file_prompt(source, test_path)
+        parsed, error = self._parse(complete_cached(self.llm, prompt, cache_prefix=prefix, system=system))
+        if parsed is None:
+            retry = (
+                f"{prompt}\n\nYour previous reply was not valid JSON matching "
+                f'{{"files":[{{"path":...,"content":...}}]}}. Error: {error}. '
+                "Reply with STRICT JSON only — no prose, no code fences."
+            )
+            parsed, error = self._parse(complete_cached(self.llm, retry, cache_prefix=prefix, system=system))
+        if parsed is None:
+            return None
+        tests = [f for f in parsed if _is_test_file(f["path"])]
+        if not tests:
+            tests = [{"path": test_path, "content": parsed[0]["content"]}]
+        return tests
+
+    @staticmethod
+    def _file_prompt(source: str, test_path: str) -> str:
+        return (
+            f"Source file(s) to test: {source}  (its content is among this work item's sources above)\n"
+            f"Write the test file for THIS source file only, at: {test_path}\n"
+            'Respond with STRICT JSON only, containing exactly one file: '
+            '{"files":[{"path":...,"content":...}],"notes":...}'
+        )
+
+    @staticmethod
+    def _shared_context(state: WorkflowState, work_item: WorkItem) -> str:
+        """The names and imports the tests must use — the naming contract and this side's module
+        map. A test importing ``app.routers.auth`` or asserting on ``UserSchema`` when the code says
+        ``UserOut`` fails for a reason that has nothing to do with the behaviour under test."""
+        package = state.get("design_package") or {}
+        try:
+            blocks = [build_naming_contract_from_package(package),
+                      build_module_map(state.get("work_items"), for_item=work_item)]
+        except Exception:  # noqa: BLE001 - context is help, never a reason to lose the tests
+            logger.exception("[unit_test] could not assemble the project context")
+            return ""
+        return "\n\n".join(b for b in blocks if b)
+
+    def _item_context(
+        self, state: WorkflowState, work_item: WorkItem, sources: dict[str, str], runner: str, executor: Executor
+    ) -> str:
+        """What THIS item's tests are written against: its sources, what they must do (requirement
+        text), the exact messages and shapes to assert (validation rules, sample payloads), and the
+        environment the tests run in."""
+        joined = "\n\n".join(f"### {path}\n{content}" for path, content in sources.items())
+        parts = [
+            f"Work item: {work_item.id}",
+            _runner_fact_line(runner).strip(),
+            "Sources of this work item (the code under test — import it, never copy it):\n" + _cap_files_block(joined),
+        ]
+        try:
+            index = index_for(state.get("design_package") or {})
+            endpoints = list(work_item.endpoints) or pc.screen_endpoints(index, work_item.screens)
+            ops = pc.operations_for(index, endpoints)
+            sections = (
+                ("## Requirements these files implement — test THESE behaviours",
+                 pc.requirements_section(index, work_item.requirement_ids)),
+                ("## Validation rules — assert these messages VERBATIM", pc.validation_section(index, ops, endpoints)),
+                ("## Sample requests/responses from the design — use them as test data",
+                 pc.payloads_section(index, ops)),
+            )
+            parts += [f"{title}\n{body}" for title, body in sections if body]
+        except Exception:  # noqa: BLE001
+            logger.exception("[unit_test] could not slice the design pack for %s", work_item.id)
+        try:
+            facts = executor.environment_facts()
+        except Exception:  # noqa: BLE001
+            facts = {}
+        parts.append("## Test environment\n" + "\n".join(f"- {line}" for line in
+                                                          self._environment_lines(state, work_item, sources, runner, facts)))
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _environment_lines(
+        state: WorkflowState, work_item: WorkItem, sources: dict[str, str], runner: str, facts: dict[str, str]
+    ) -> list[str]:
+        lines: list[str] = []
+        side = _work_item_root(work_item)
+        code = "\n".join(sources.values())
+        if runner == "pytest":
+            app = _app_import(state.get("work_items") or [], side)
+            if "fastapi" in code.lower():
+                where = f"`from {app[0]} import {app[1]}`" if app else "the FastAPI app module"
+                lines.append(
+                    f"HTTP behaviour: `from fastapi.testclient import TestClient` against {where}; replace "
+                    "dependencies with `app.dependency_overrides[<dependency>] = <fake>` (the database session, "
+                    "the current user and role checks) and clear them after each test.")
+            lines.append("pytest, pytest-asyncio and httpx are installed. Tests run with `python -m pytest` from "
+                         "the backend folder: import the project exactly as the MODULE MAP names it.")
+        elif runner in ("jest", "vitest") and side == "frontend/":
+            lines.append("Components: @testing-library/react on jsdom; jest-dom matchers are already set up; CSS and "
+                         "asset imports are mapped to stubs. Mock the API module a component calls; never hit the "
+                         "network.")
+        elif runner in ("jest", "vitest"):
+            lines.append("HTTP routes: supertest against the exported app (require the app module, never call "
+                         "listen()); mock repository / database modules.")
+        if facts.get("database"):
+            lines.append(f"Database: {facts['database']}. Unit tests must not depend on it — isolate with the "
+                         "overrides/mocks above; a test that does touch it creates and removes its own rows.")
+        lines.append("Each reply is ONE self-contained test file: define its fixtures and mocks inside it. Never "
+                     "write conftest.py, setup files or shared helpers — other calls write the other test files.")
+        return lines
 
     def _generate_tests(
         self, work_item: WorkItem, sources: dict[str, str], system: str, runner: str

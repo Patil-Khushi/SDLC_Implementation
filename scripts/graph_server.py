@@ -49,6 +49,8 @@ import re
 import shutil
 import sys
 import threading
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -66,12 +68,20 @@ from app.config.settings import get_settings  # noqa: E402
 from app.graph.graph import workflow  # noqa: E402
 from app.graph.state import new_state  # noqa: E402
 from app.integrations.executor import Executor, FakeExecutor, set_executor  # noqa: E402
+from app.agents.project_qa import ProjectQAAgent, build_facts_for  # noqa: E402
+from app.integrations.review_sandbox import is_allowed_repo_url  # noqa: E402
 from app.models import WorkItem  # noqa: E402
+from app.services import chat_inbox  # noqa: E402
+from app.services.pack_index import load_pack  # noqa: E402
 from app.services import design_pack  # noqa: E402
 from app.services import llm_gateway  # noqa: E402
 from app.services.plan_builder import build_plan  # noqa: E402
 from scripts.feature_commit import _DEFAULT_OUT_DIR  # noqa: E402
 from scripts.local_executor import LocalDiskExecutor  # noqa: E402
+
+# Module logger. The brownfield run's error handler logs through it; without it a failing run
+# raised NameError inside its own `except`, so the client never received the error event.
+logger = logging.getLogger(__name__)
 
 
 def _find_repo_root(start: Path) -> Path:
@@ -119,6 +129,12 @@ _NODE_TO_STAGE: dict[str, str | None] = {
     "unit_test_generate": "unit-test-generation",
     "unit_test_run": "unit-test-run",
     "debug_publish": None,  # persisted-to-dev step; shown as a log, not a tile
+    # Conversational intake, on the feature_publish -> select edge. Mapped to None ON PURPOSE: it
+    # runs on EVERY loop pass and is a no-op on almost all of them (chat off, or nothing queued), so
+    # a tile would flash 59 times a run and mean nothing. The turns that DO apply a patch announce
+    # themselves through the dedicated `chat` SSE event, which carries the plan diff a tile could
+    # not. Give it a tile only if the frontend grows a conversation panel with its own stage id.
+    "chat_intake": None,
     "documentation": "documentation",
     "security": "security-review",
     "finalize": "finalize",
@@ -150,6 +166,7 @@ _NODE_LABEL: dict[str, str] = {
     "unit_test_generate": "Unit Test Generation",
     "unit_test_run": "Unit Test Run",
     "debug_publish": "Debug Publish",
+    "chat_intake": "Chat Intake",
     "documentation": "Documentation",
     "security": "Security Review",
     "finalize": "Finalize",
@@ -171,7 +188,24 @@ _NODE_RESULT_KEY: dict[str, str] = {
 
 
 def _canned_llm_reply(prompt: str, **_kw: Any) -> str:
-    """Dry-run stand-in (identical shape to run_fixture.py): return the requested target files."""
+    """Dry-run stand-in (identical shape to run_fixture.py): return the requested target files.
+
+    Handles BOTH generation prompt shapes. ``code_generator._generate_files`` sends a work item with
+    two or more targets down the PER-FILE path, which asks for one named file at a time and never
+    prints the "Target files" block — so matching only that block returned ``placeholder.py`` for
+    every call, no reply matched its requested path, and the item failed the gate with "0 of 4
+    planned files". Since every item in the sample pack has four targets, that made a dry-run
+    escalate at work item 1: the whole point of the mode (exercise the wiring with no API key) was
+    silently unavailable.
+    """
+    one = re.search(r"Generate EXACTLY ONE file now: (.+)", prompt)
+    if one:
+        path = one.group(1).strip()
+        return json.dumps({
+            "files": [{"path": path, "content": f"# placeholder for {path}\n"}],
+            "notes": "dry-run canned content",
+        })
+
     match = re.search(r"Target files \(produce ONLY these\):\n((?:- .+\n?)*)", prompt)
     lines = match.group(1).splitlines() if match else []
     paths = [ln[2:].strip() for ln in lines if ln.startswith("- ")]
@@ -371,7 +405,21 @@ def _plan_item_dict(w: Any) -> dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "modes": ["dry-run", "real"]}
+    """Liveness, plus the server-side switches the UI must not guess at.
+
+    ``chat_enabled`` matters because ``POST /api/chat`` accepts a message whether or not the
+    pipeline will ever drain it — acceptance is deliberately independent of the run. With
+    ``CHAT_ENABLED=false`` (the default) ``chat_intake`` is a pass-through, so a queued request
+    would sit there forever and the UI would have no way to explain why. Reporting the flag lets it
+    say so instead of looking broken.
+    """
+    settings = get_settings()
+    return {
+        "ok": True,
+        "modes": ["dry-run", "real"],
+        "chat_enabled": bool(settings.chat_enabled),
+        "chat_turn_cap": int(settings.chat_turn_cap),
+    }
 
 
 @app.get("/api/packs")
@@ -628,6 +676,117 @@ _MAX_LOG_LINES_PER_NODE = 60
 #: error, or early return) — tells the consuming generator to stop waiting for more items.
 _DONE = object()
 
+#: How many SSE frames one run keeps for replay. A 59-item run emits a few thousand (log lines
+#: dominate, capped per node by _MAX_LOG_LINES_PER_NODE), so this is generous; at ~200 bytes a
+#: frame the ceiling is a few MB, which is the right trade for a single-operator local bridge.
+_MAX_REPLAY_FRAMES = 20_000
+#: Frames never trimmed. run_start and plan live at the very front, and a client that reattaches
+#: without them cannot rebuild the board at all — so trimming eats the oldest LOG-era frame after
+#: the head rather than the literal oldest frame.
+_REPLAY_HEAD_KEEP = 50
+
+
+class _Broadcast:
+    """Fan-out sink for one run's SSE frames, with a replay buffer so a dropped client can reattach.
+
+    The problem this solves: a client whose connection drops cannot simply re-open
+    ``/api/run/stream``. That path acquires ``_run_lock`` in order to START a run, and the original
+    run's driver thread is still holding it — a network blip in the browser does not stop a
+    background thread that is three hours into generating code — so the reconnect was told "a run
+    is already in progress" and gave up. The run kept going, invisibly, with no way back to it.
+
+    So readers and runs are now separate concerns. The driver publishes here; any number of readers
+    subscribe. ``_run_lock`` still admits exactly one RUN, but no longer limits how many clients
+    can watch it, or when they may join.
+
+    One instance module-wide rather than one per project, deliberately: the executor and LLM
+    gateway are process-global, so only one run can exist at a time anyway (the same reason
+    ``_last_run`` is a single dict).
+
+    Frames are buffered as already-serialized SSE strings — replay is then a verbatim re-yield,
+    with no risk of the second rendering differing from the first.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subs: list[queue.Queue[Any]] = []
+        self._buffer: list[str] = []
+        self.project = ""
+        self.kind = ""          # "pack" | "brownfield" — how a client should read these frames
+        self.active = False     # is a driver still publishing?
+
+    def reset(self, *, project: str, kind: str) -> None:
+        """Begin a new run: release the previous run's readers and drop its buffer."""
+        with self._lock:
+            subs, self._subs = self._subs, []
+            self._buffer = []
+            self.project = project
+            self.kind = kind
+            self.active = True
+        for q in subs:  # a straggler still reading the PREVIOUS run must not hang forever
+            q.put(_DONE)
+
+    def put(self, line: str) -> None:
+        """Publish one already-serialized SSE frame. Same signature as ``queue.Queue.put`` so the
+        driver threads and ``_SSELogCapture`` can treat this as their sink unchanged."""
+        with self._lock:
+            self._buffer.append(line)
+            if len(self._buffer) > _MAX_REPLAY_FRAMES:
+                del self._buffer[_REPLAY_HEAD_KEEP]
+            subs = list(self._subs)
+        for q in subs:
+            q.put(line)
+
+    def subscribe(self) -> "queue.Queue[Any]":
+        """A live queue for the run's own driver-side reader (the launching request)."""
+        q: "queue.Queue[Any]" = queue.Queue()
+        with self._lock:
+            self._subs.append(q)
+        return q
+
+    def unsubscribe(self, q: "queue.Queue[Any]") -> None:
+        with self._lock:
+            if q in self._subs:
+                self._subs.remove(q)
+
+    def attach(self, project: str) -> tuple[str, str, list[str], "queue.Queue[Any] | None"]:
+        """Join an existing run. Returns ``(status, kind, buffered_frames, live_queue)``.
+
+        ``status`` is ``"running"`` (frames replayed, live queue follows), ``"finished"`` (frames
+        replayed, nothing more coming) or ``"none"`` (this project is not the run we hold).
+
+        The snapshot and the subscribe happen under ONE lock acquisition. That is the whole
+        correctness argument: a frame published between "copy the buffer" and "register the queue"
+        would otherwise be either lost or delivered twice, and a client rebuilding a stage board
+        from a replay cannot tell the difference.
+        """
+        with self._lock:
+            if not self.project or (project and project != self.project):
+                return "none", self.kind, [], None
+            frames = list(self._buffer)
+            if not self.active:
+                return "finished", self.kind, frames, None
+            q: "queue.Queue[Any]" = queue.Queue()
+            self._subs.append(q)
+            return "running", self.kind, frames, q
+
+    def snapshot_meta(self) -> tuple[int, bool]:
+        """``(buffered frame count, is a driver still publishing)`` — for the cheap JSON probe."""
+        with self._lock:
+            return len(self._buffer), self.active
+
+    def close(self) -> None:
+        """The driver is done: stop accepting readers and release every current one."""
+        with self._lock:
+            self.active = False
+            subs, self._subs = self._subs, []
+        for q in subs:
+            q.put(_DONE)
+
+
+#: The single live-run event bus (see _Broadcast — one run at a time, process-wide).
+_bus = _Broadcast()
+
 
 class _SSELogCapture(logging.Handler):
     """Pushes ``app.*`` log records onto the run's SSE queue AS THEY HAPPEN.
@@ -674,6 +833,12 @@ class _SSELogCapture(logging.Handler):
 
         label = self._current_label[0]
         count = self._current_label[1]
+        if getattr(record, "ui_always", False):
+            # A record an agent marked as its stage's outcome (e.g. a debugging round's closing
+            # summary) is forwarded even past the cap: a long tool loop alone exceeds it, and the
+            # cap used to drop exactly the line saying what the stage achieved.
+            self._sink.put(_sse({"type": "log", "agent": label, "level": level, "text": text}))
+            return
         if count > _MAX_LOG_LINES_PER_NODE:
             return  # already told the frontend lines are being omitted for this node
         if count == _MAX_LOG_LINES_PER_NODE:
@@ -683,6 +848,475 @@ class _SSELogCapture(logging.Handler):
             return
         self._current_label[1] = count + 1
         self._sink.put(_sse({"type": "log", "agent": label, "level": level, "text": text}))
+
+
+@contextmanager
+def dry_run_gateway() -> Iterator[None]:
+    """Patch the process-global LLM gateway to canned replies, and ALWAYS put it back.
+
+    ``llm_gateway.llm_gateway`` is a singleton that every agent binds at construction
+    (``app/agents/base.py``), so patching it is process-wide and outlives the run that did it. It
+    used to be patched here and never restored: after one dry-run, every subsequent *real* run in
+    the same server process silently generated canned placeholder files, and ``/api/plan/revise``
+    returned canned JSON that parsed as "the planner did not return a valid plan". Restarting the
+    server was the only reset.
+
+    A context manager rather than an inline try/finally so the restore is provable in a test — and
+    so it cannot be separated from the patch by a later edit.
+
+    Restores by DELETING the instance attribute when there was not one to begin with, rather than
+    writing back the bound method it read. Reading ``instance.method`` on a class-defined method
+    creates a fresh bound object each time, so assigning one back would leave a permanent instance
+    attribute holding a redundant self-reference — pristine-looking but not pristine. Deleting
+    returns the object to normal class lookup, which is what "unpatched" actually means.
+    """
+    gateway = llm_gateway.llm_gateway
+    sentinel = object()
+    original = {
+        name: gateway.__dict__.get(name, sentinel)
+        for name in ("complete", "complete_with_tools")
+    }
+
+    gateway.complete = _canned_llm_reply  # type: ignore[method-assign]
+    gateway.complete_with_tools = (  # type: ignore[method-assign]
+        lambda prompt, **kw: _canned_llm_reply(prompt)
+    )
+    try:
+        yield
+    finally:
+        for name, prior in original.items():
+            if prior is sentinel:
+                gateway.__dict__.pop(name, None)
+            else:
+                gateway.__dict__[name] = prior
+
+
+class ChatRequest(BaseModel):
+    project: str
+    text: str
+
+
+@app.post("/api/chat", status_code=202)
+def chat(req: ChatRequest) -> dict[str, Any]:
+    """Queue a change request for a project, and return immediately.
+
+    **202, and deliberately nothing else.** This handler must be callable at any instant — including
+    while work item 23 of 59 is blocked inside a multi-minute LLM call — so it touches none of the
+    run's machinery: it does not acquire ``_run_lock``, does not read or write ``_last_run``, and
+    never waits on the driver thread. All it does is append one fsync'd line to the inbox.
+
+    Application happens later and elsewhere: ``chat_intake_node`` drains the inbox at the next work
+    item boundary. Separating acceptance from application is what makes a conversational build work
+    without an ``interrupt()`` and without the run needing to be idle — and it is why a message
+    survives even if the run it was aimed at then crashes.
+    """
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text must not be empty")
+    project = (req.project or "").strip()
+    if not project:
+        raise HTTPException(status_code=400, detail="project must not be empty")
+
+    try:
+        seq = chat_inbox.append(
+            project,
+            text,
+            received_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"could not queue the message: {exc}") from exc
+
+    pending = chat_inbox.pending_count(project, _consumed_seq(project))
+    return {"seq": seq, "queued": pending, "project": project}
+
+
+@app.post("/api/chat/message")
+def chat_message(req: ChatRequest) -> dict[str, Any]:
+    """One channel, two intents: answer a question NOW, or queue a change request.
+
+    The chat could previously only mutate the plan, so a question ("how many work items are left?",
+    "what did the security scan find?") reached the change planner and came back as its refusal —
+    correct for a change, useless as a reply to a question.
+
+    So this classifies first (``ProjectQAAgent``, one LLM call) and then:
+
+    * **question** — answered synchronously, right here, from the run's facts plus read-only access
+      to the generated files. A read needs no plan mutation, no lock and no work-item boundary;
+      routing it through the graph would mean waiting minutes to be told what is already known.
+    * **change** — appended to the inbox exactly as ``POST /api/chat`` does, for
+      ``chat_intake_node`` to apply at the next boundary with a validated file list.
+
+    Notably it does NOT take ``_run_lock``: answering is read-only, and blocking a question behind a
+    3-hour build would defeat the point. It does make an LLM call from a request handler, which
+    ``/api/plan/revise`` already does. Two consequences worth knowing: in dry-run the process-global
+    gateway is patched to canned replies, so answers there are canned too; and the answer describes
+    the run's state at the moment it was asked, which on a live run is a moving target.
+    """
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text must not be empty")
+    project = (req.project or "").strip()
+    if not project:
+        raise HTTPException(status_code=400, detail="project must not be empty")
+
+    # Answer against the run we actually hold. A question about a DIFFERENT project than the one
+    # loaded would otherwise be answered from the wrong facts, confidently.
+    same_project = _last_run.get("project") == project
+    facts = build_facts_for(_last_run) if same_project else ""
+    executor = _last_run.get("executor") if same_project else None
+
+    agent = ProjectQAAgent(executor=executor if isinstance(executor, Executor) else None)
+    result = agent.ask(text, facts=facts, project_dir=project if same_project else "")
+
+    if result.error:
+        # Fall back to treating it as a change request rather than losing the message: queuing is
+        # the behaviour that existed before this endpoint, and it is recoverable.
+        seq = _queue_change(project, text)
+        return {
+            "kind": "change", "seq": seq, "project": project,
+            "queued": chat_inbox.pending_count(project, _consumed_seq(project)),
+            "note": f"Could not classify this message ({result.error}), so it was queued as a "
+                    "change request.",
+        }
+
+    if result.kind == "change":
+        seq = _queue_change(project, text)
+        return {
+            "kind": "change", "seq": seq, "project": project,
+            "queued": chat_inbox.pending_count(project, _consumed_seq(project)),
+            # A change request can still carry a question worth answering immediately.
+            "answer": result.answer,
+        }
+
+    return {
+        "kind": "answer", "project": project, "answer": result.answer,
+        "grounded": bool(facts),
+        "note": "" if same_project else
+                f"No run named {project!r} is loaded, so this was answered without run facts.",
+    }
+
+
+def _queue_change(project: str, text: str) -> int:
+    """Append one change request to the inbox; shared by both chat endpoints."""
+    try:
+        return chat_inbox.append(
+            project,
+            text,
+            received_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"could not queue the message: {exc}") from exc
+
+
+def _consumed_seq(project: str) -> int:
+    """How far the live run has drained this project's inbox (0 when no run of it is in flight)."""
+    if _last_run.get("project") != project:
+        return 0
+    return int((_last_run.get("state") or {}).get("chat_seq", 0) or 0)
+
+
+@app.get("/api/chat/log")
+def chat_log(project: str) -> dict[str, Any]:
+    """Everything accepted for ``project``, plus what the live run has actually applied.
+
+    Follows the artifact endpoints' convention: 200 with ``available: false`` and a reason rather
+    than a 4xx, so the UI renders an explanation instead of an error.
+    """
+    project = (project or "").strip()
+    if not project:
+        return {"available": False, "reason": "no project given", "messages": [], "turns": []}
+
+    messages = chat_inbox.read_new(project, 0)
+    applied = (_last_run.get("state") or {}).get("chat_log") or [] \
+        if _last_run.get("project") == project else []
+    if not messages and not applied:
+        return {
+            "available": False,
+            "reason": f"nothing has been sent for {project!r} yet",
+            "messages": [], "turns": [],
+        }
+    return {
+        "available": True,
+        "project": project,
+        "messages": messages,
+        "consumed_seq": _consumed_seq(project),
+        "turns": applied,
+    }
+
+
+# ---------------------------------------------------------------- Brownfield (existing repo + a
+# change request), the frontend-facing bridge for scripts/run_change_request.py's lane.
+#
+# Deliberately a SEPARATE endpoint pair and a separate SSE event vocabulary from the pack-driven
+# run above, not a mode flag on it: the two lanes take different inputs (repo_url + change_request
+# vs. a design pack), use a different executor rooting (workspace/<project>-<run>, never
+# generated-apps/ — that directory is greenfield output and _run_events wipes it on every real run),
+# and the brownfield graph shape has no stage tiles (_NODE_TO_STAGE maps every brownfield node to
+# None on purpose — see that map's comment). Reusing _run_events' pack-shaped setup would mean
+# threading a second, unrelated input path through code that already carries a lot of state.
+
+_BROWNFIELD_KINDS = ("bug", "feature", "modification")
+
+#: repo_url/change_request submitted via POST, waiting for the matching GET stream to claim them.
+#: Token-addressed rather than passed as query params on the stream URL itself: EventSource is a
+#: GET with no body, and a multi-line description plus lists of acceptance criteria/constraints
+#: does not belong in a query string. In-memory only — this is a single-operator local bridge, the
+#: same trust model as the rest of this server; an entry is consumed (popped) by the one stream
+#: that claims it, so it cannot be replayed.
+_pending_change_requests: dict[str, dict[str, Any]] = {}
+_pending_lock = threading.Lock()
+
+
+class ChangeRequestSubmission(BaseModel):
+    repo_url: str
+    title: str = ""
+    kind: str = "modification"
+    description: str
+    acceptance_criteria: list[str] = []
+    constraints: list[str] = []
+    base_ref: str = ""
+
+
+@app.post("/api/brownfield/change-request", status_code=201)
+def submit_change_request(req: ChangeRequestSubmission) -> dict[str, Any]:
+    """Validate and queue a change request; return a token the stream endpoint claims.
+
+    Validation happens here, at submission, rather than only inside ``acquire_repo_node`` — the
+    node's checks are the ones that matter (defense in depth, not duplicated for its own sake), but
+    failing a malformed request before a background thread and a queue even exist gives a plain
+    HTTP error instead of one more SSE `error` event to parse.
+    """
+    repo_url = req.repo_url.strip()
+    if not is_allowed_repo_url(repo_url):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{repo_url!r} is not an allowed repository URL "
+                    "(expected a public https://github.com/<owner>/<repo>)",
+        )
+    description = req.description.strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description must not be empty")
+    kind = req.kind.strip() or "modification"
+    if kind not in _BROWNFIELD_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind must be one of {_BROWNFIELD_KINDS}, got {kind!r}")
+
+    token = uuid.uuid4().hex
+    change_request = {
+        "id": token[:8],
+        "title": req.title.strip() or description[:80],
+        "kind": kind,
+        "description": description,
+        "acceptance_criteria": [c.strip() for c in req.acceptance_criteria if c.strip()],
+        "constraints": [c.strip() for c in req.constraints if c.strip()],
+    }
+    with _pending_lock:
+        _pending_change_requests[token] = {
+            "repo_url": repo_url,
+            "base_ref": req.base_ref.strip(),
+            "change_request": change_request,
+        }
+    return {"token": token}
+
+
+#: Curated per-node summaries for the brownfield stream — see ``_run_events_brownfield``. Kept in
+#: one place so adding a field to a node's output is a one-line change, not a scan of the loop body.
+def _brownfield_detail(node: str, delta: dict[str, Any]) -> dict[str, Any]:
+    if node == "acquire":
+        inv = delta.get("repo_inventory") or {}
+        return {
+            "baseBranch": delta.get("base_branch") or "",
+            "baseSha": (delta.get("base_sha") or "")[:12],
+            "branch": delta.get("branch") or "",
+            "files": len(inv.get("files") or []) if inv else None,
+            "sourceFiles": len(inv.get("source_files") or []) if inv else None,
+            "primaryLanguage": inv.get("primary_language") or "",
+        }
+    if node == "change_plan":
+        items = delta.get("work_items") or []
+        errors = delta.get("change_plan_errors") or []
+        impacts = delta.get("change_impacts") or {}
+        return {
+            "itemCount": len(items),
+            "itemIds": [w.id if hasattr(w, "id") else w.get("id") for w in items][:20],
+            "errors": errors,
+            "impactedFileCount": len({d for deps in impacts.values() for d in deps}),
+        }
+    if node == "change_gate":
+        result = delta.get("gate_result") or {}
+        checks = result.get("checks") or []
+        return {
+            "passed": bool(result.get("passed")),
+            "checks": [
+                {"name": c.get("name"), "passed": c.get("passed"),
+                 "stderr": (c.get("stderr") or "")[:400]}
+                for c in checks
+            ],
+        }
+    if node == "change_verify":
+        return {
+            "verdict": delta.get("verify_verdict") or "",
+            "testCommand": delta.get("test_command") or "",
+        }
+    if node == "change_commit":
+        return {"changedFiles": delta.get("changed_files") or []}
+    if node == "finalize":
+        return {
+            "prUrl": delta.get("pr_url") or "",
+            "status": delta.get("finalize_status") or "",
+        }
+    if node == "package":
+        return {"packagePath": delta.get("package_path") or ""}
+    return {}
+
+
+def _run_events_brownfield(*, token: str, project: str, push: bool) -> Iterator[str]:
+    """Drive a brownfield (existing repo + change request) run; yield SSE lines as it progresses.
+
+    Structurally mirrors ``_run_events``'s lock/queue/capture-thread pattern (same reasons apply: a
+    disconnected client must not abort a run still editing a clone, and the driver thread is the
+    only place holding ``_run_lock``/the executor) but is otherwise independent — see the module
+    comment above this section for why the two are not merged.
+    """
+    if not _run_lock.acquire(blocking=False):
+        yield _sse({"type": "error", "message": "A run is already in progress. Try again shortly."})
+        return
+
+    with _pending_lock:
+        pending = _pending_change_requests.pop(token, None)
+    if pending is None:
+        _run_lock.release()
+        yield _sse({"type": "error", "message": "Unknown or already-used token. Submit the change request again."})
+        return
+
+    # Publish through the bus rather than a private queue: it keeps a replay buffer and fans out to
+    # any number of readers, which is what lets a dropped client rejoin this run through
+    # /api/run/attach instead of losing it. `sse_q` remains the driver's sink (the bus has the same
+    # put() signature, so nothing downstream changes); `reader` is THIS request's live queue.
+    _bus.reset(project=project, kind="brownfield")
+    sse_q: Any = _bus
+    reader = _bus.subscribe()
+    current_label: list[Any] = ["System", 0]
+    capture = _SSELogCapture(sse_q, current_label)
+    app_logger = logging.getLogger("app")
+
+    def _drive() -> None:
+        restore_level: int | None = None
+        if not app_logger.isEnabledFor(logging.INFO):
+            restore_level = app_logger.level
+            app_logger.setLevel(logging.INFO)
+        app_logger.addHandler(capture)
+        try:
+            repo_url = pending["repo_url"]
+            run_id = uuid.uuid4().hex[:8]
+            workspace = _IMPL_DIR / "workspace" / f"{project}-{run_id}"
+
+            git_remote = ""
+            git_token = ""
+            if push:
+                match = re.match(r"^https://github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", repo_url)
+                if not match:
+                    sse_q.put(_sse({"type": "error", "message":
+                                    f"push needs a https://github.com/<owner>/<repo> URL, got {repo_url!r}"}))
+                    return
+                git_remote = f"{match.group(1)}/{match.group(2)}"
+                git_token = os.environ.get("GITHUB_PAT", "").strip()
+
+            executor = LocalDiskExecutor(workspace)
+            set_executor(executor)
+
+            sse_q.put(_sse({
+                "type": "run_start", "run_id": f"{project}-{run_id}", "project": project,
+                "repoUrl": repo_url, "push": push,
+            }))
+
+            state = new_state(
+                run_id=f"{project}-{run_id}", attempt=0, project_id=project,
+                source_mode="brownfield", source_repo_url=repo_url,
+                change_request=pending["change_request"], base_ref=pending["base_ref"],
+                push_enabled=push, git_remote=git_remote, git_token=git_token,
+            )
+            # A per-run thread_id, never just the project name: LangGraph MERGES an invoke input
+            # onto whatever checkpoint already exists for the id, so reusing one across runs would
+            # silently inherit a prior run's fields (e.g. a stale gate_result rerouting the graph).
+            config = {"configurable": {"thread_id": f"{project}-{run_id}"}, "recursion_limit": 1000}
+
+            for stream_mode_name, chunk in workflow.stream(state, config, stream_mode=["updates", "tasks"]):
+                if stream_mode_name == "tasks":
+                    if "input" not in chunk:
+                        continue
+                    node = chunk.get("name", "")
+                    current_label[0] = _NODE_LABEL.get(node, node)
+                    current_label[1] = 0
+                    continue
+
+                for node, delta in chunk.items():
+                    if not isinstance(delta, dict):
+                        continue
+                    label = _NODE_LABEL.get(node, node)
+                    failed = delta.get("workflow_status") == "needs_human_review"
+                    if node == "change_gate" and "gate_result" in delta:
+                        failed = not (delta["gate_result"] or {}).get("passed", True)
+                    sse_q.put(_sse({
+                        "type": "brownfield_step", "node": node, "label": label,
+                        "status": "failed" if failed else "completed",
+                        "detail": _brownfield_detail(node, delta),
+                    }))
+
+            final = workflow.get_state(config).values
+            sse_q.put(_sse({
+                "type": "done",
+                "status": final.get("workflow_status") or "",
+                "branch": final.get("branch") or "",
+                "baseBranch": final.get("base_branch") or "",
+                "prUrl": final.get("pr_url") or "",
+                "changeReportPath": final.get("change_report_path") or "",
+                "packagePath": final.get("package_path") or "",
+                "changedFiles": final.get("changed_files") or [],
+                "workspace": str(workspace),
+            }))
+        except Exception as exc:  # noqa: BLE001 - report to the client, don't just die silently
+            logger.exception("brownfield run failed")
+            sse_q.put(_sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"}))
+        finally:
+            # close() releases every reader, including any that attached mid-run — not just the
+            # request that launched it.
+            _bus.close()
+            app_logger.removeHandler(capture)
+            if restore_level is not None:
+                app_logger.setLevel(restore_level)
+            _run_lock.release()
+
+    driver = threading.Thread(target=_drive, name=f"brownfield-driver-{project}", daemon=True)
+    try:
+        driver.start()
+    except Exception as exc:  # noqa: BLE001 - couldn't start the thread; release synchronously
+        _bus.close()
+        _run_lock.release()
+        yield _sse({"type": "error", "message": f"could not start run: {type(exc).__name__}: {exc}"})
+        return
+
+    try:
+        while True:
+            item = reader.get()
+            if item is _DONE:
+                break
+            yield item
+    finally:
+        # This request is gone (finished, or the client disconnected). Drop its queue so the driver
+        # stops filling a buffer nobody drains — the run itself continues, and a later attach picks
+        # it up from the replay buffer.
+        _bus.unsubscribe(reader)
+
+
+@app.get("/api/brownfield/stream")
+def brownfield_stream(token: str, project: str, push: bool = False) -> StreamingResponse:
+    project = (project or "").strip()
+    if not project:
+        raise HTTPException(status_code=400, detail="project must not be empty")
+    return StreamingResponse(
+        _run_events_brownfield(token=token, project=project, push=push),
+        media_type="text/event-stream",
+    )
 
 
 def _failed_checks(result: Any) -> list[tuple[str, str]]:
@@ -724,7 +1358,13 @@ def _run_events(
         yield _sse({"type": "error", "message": "A run is already in progress. Try again shortly."})
         return
 
-    sse_q: "queue.Queue[Any]" = queue.Queue()
+    # Publish through the bus rather than a private queue: it keeps a replay buffer and fans out to
+    # any number of readers, which is what lets a dropped client rejoin this run through
+    # /api/run/attach instead of losing it. `sse_q` remains the driver's sink (the bus has the same
+    # put() signature, so nothing downstream changes); `reader` is THIS request's live queue.
+    _bus.reset(project=project, kind="pack")
+    sse_q: Any = _bus
+    reader = _bus.subscribe()
     current_label: list[Any] = ["System", 0]  # [0]=agent label, [1]=lines emitted for it so far
     capture = _SSELogCapture(sse_q, current_label)
     app_logger = logging.getLogger("app")
@@ -744,6 +1384,9 @@ def _run_events(
         for up to the run's full remaining duration.
         """
         restore_level: int | None = None
+        # The active dry-run gateway patch, entered in the dry-run branch and exited in the
+        # finally. None = never patched, so nothing to put back.
+        gateway_patch: Any = None
         if not app_logger.isEnabledFor(logging.INFO):  # respect, then restore, the server's config
             restore_level = app_logger.level
             app_logger.setLevel(logging.INFO)
@@ -774,10 +1417,10 @@ def _run_events(
             git_remote = ""
             git_token = ""
             if mode == "dry-run":
-                llm_gateway.llm_gateway.complete = _canned_llm_reply  # type: ignore[method-assign]
-                llm_gateway.llm_gateway.complete_with_tools = (  # type: ignore[method-assign]
-                    lambda prompt, **kw: _canned_llm_reply(prompt)
-                )
+                # Entered here, exited in this function's finally — see dry_run_gateway's docstring
+                # for why the restore is mandatory rather than tidy.
+                gateway_patch = dry_run_gateway()
+                gateway_patch.__enter__()
                 executor = FakeExecutor()
             else:  # real
                 out_base = (_DEFAULT_OUT_DIR).resolve()
@@ -830,13 +1473,31 @@ def _run_events(
                 run_id=project, attempt=0, project_id=project,
                 design_package=design_package, work_items=work_items,
                 push_enabled=push_enabled, git_remote=git_remote, git_token=git_token,
+                # Conversational turns are opt-in per deployment (CHAT_ENABLED). Off => chat_intake
+                # is a pass-through and this run behaves exactly as it did before the feature.
+                chat_enabled=bool(get_settings().chat_enabled),
             )
-            config = {"configurable": {"thread_id": project}, "recursion_limit": 1000}
+            # This run owns only messages sent WHILE it runs. Seeding the mark past whatever the
+            # inbox already holds stops a project's conversational history being re-applied to a
+            # fresh build (the inbox outlives the run - it lives outside the project dir).
+            initial["chat_seq"] = chat_inbox.high_water(project)
+            # A per-run thread_id, never just the project name (same reason as the brownfield path
+            # above): LangGraph MERGES an invoke input onto whatever checkpoint already exists for
+            # the id, so a second build of the same project silently inherited the previous run's
+            # debugging_report, unit_tests, test_result and security_verdict — a stale
+            # security_verdict alone reroutes route_after_refactoring past the debug/test loop.
+            config = {
+                "configurable": {"thread_id": f"{project}-{uuid.uuid4().hex[:8]}"},
+                "recursion_limit": 1000,
+            }
 
             seen_files: set[str] = set()
             seen_reports: set[str] = set()
             repo_sent = False
             security_seen = False
+            # Highest conversational turn already announced, so a turn is reported exactly once
+            # (see the chat_intake branch below).
+            last_chat_seq = 0
 
             # "tasks" gives a start event (node name) the instant a node is dispatched — BEFORE
             # its body runs — so current_label is correct for that node's very first log line.
@@ -885,7 +1546,8 @@ def _run_events(
                         ("review_report_path", "code-review"),
                         ("refactoring_report_path", "refactoring"),
                         ("security_report_path", "security"),
-                        ("debug_report_path", "debugging"),
+                        ("debugging_report_path", "debugging"),
+                        ("pack_preflight_report_path", "pack-preflight"),
                         ("unit_test_report_path", "unit-test"),
                     ):
                         rp = delta.get(key)
@@ -911,6 +1573,33 @@ def _run_events(
                     stage_id = _NODE_TO_STAGE.get(node, None)
                     if node == "refactoring" and security_seen:
                         stage_id = "refactoring-security-loop"
+
+                    # A conversational turn that actually changed the plan. Announced on its own
+                    # event rather than through `log`, which truncates at _MAX_LOG_TEXT and caps
+                    # lines per node — and because the interesting payload is the plan diff, which
+                    # a log line could not carry. Also refresh plan_count: it was captured once
+                    # from the initial plan, so after a patch the dashboard would read "60 of 59".
+                    if node == "chat_intake":
+                        turns = delta.get("chat_log")
+                        # Emit only a turn we have not already announced. chat_intake_node returns
+                        # the WHOLE state on every pass — including the no-op passes where nothing
+                        # was queued — so `chat_log` stays non-empty for the rest of the run and a
+                        # naive `if turns:` re-sent the newest turn on every remaining loop pass
+                        # (measured: 59 identical frames for ONE request on a 59-item plan, which
+                        # the UI faithfully rendered as 59 rows and 59 notifications).
+                        if turns and int(turns[-1].get("seq") or 0) > last_chat_seq:
+                            live_plan = delta.get("work_items") or _last_run.get("state", {}).get("work_items") or []
+                            _last_run["plan_count"] = len(live_plan)
+                            last = turns[-1]
+                            last_chat_seq = int(last.get("seq") or 0)
+                            sse_q.put(_sse({
+                                "type": "chat",
+                                "seq": last.get("seq"),
+                                "messages": last.get("messages") or [],
+                                "report": last.get("report") or {},
+                                "diff": last.get("diff") or {},
+                                "planCount": len(live_plan),
+                            }))
 
                     if node == "escalate":
                         sse_q.put(_sse({"type": "log", "agent": label, "level": "warn",
@@ -963,10 +1652,16 @@ def _run_events(
                 _last_run["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             sse_q.put(_sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"}))
         finally:
-            sse_q.put(_DONE)
+            # close() releases every reader, including any that attached mid-run — not just the
+            # request that launched it.
+            _bus.close()
             app_logger.removeHandler(capture)
             if restore_level is not None:
                 app_logger.setLevel(restore_level)
+            # Un-patch the process-global LLM gateway. MUST happen even when the run raised, or a
+            # failed dry-run poisons every subsequent real run in this process.
+            if gateway_patch is not None:
+                gateway_patch.__exit__(None, None, None)
             _run_lock.release()
 
     driver = threading.Thread(target=_drive, name=f"run-driver-{project}", daemon=True)
@@ -975,39 +1670,33 @@ def _run_events(
     except Exception as exc:  # noqa: BLE001 - couldn't even start the background run (e.g. OS
         # thread-limit pressure): nothing is running yet, so release synchronously right here —
         # this is the "exception before the first yield" case, entirely on the calling thread.
+        _bus.close()
         _run_lock.release()
         yield _sse({"type": "error", "message": f"could not start run: {type(exc).__name__}: {exc}"})
         return
 
-    # Just drain the queue for as long as this generator is iterated. If the client disconnects,
+    # Just drain this reader for as long as the generator is iterated. If the client disconnects,
     # iteration simply stops here — the run keeps going in the background regardless (see _drive's
     # docstring) and _drive's own finally releases _run_lock/removes the handler when it actually
-    # finishes. Nothing to clean up on THIS side: this generator owns none of that thread's state.
-    while True:
-        item = sse_q.get()
-        if item is _DONE:
-            break
-        yield item
+    # finishes. The only thing to clean up on THIS side is our own queue.
+    try:
+        while True:
+            item = reader.get()
+            if item is _DONE:
+                break
+            yield item
+    finally:
+        # Drop this reader so the driver stops filling a queue nobody drains. The run continues,
+        # and a reconnecting client picks it up from the replay buffer via /api/run/attach.
+        _bus.unsubscribe(reader)
 
 
 def _load_pack(pack_dir: Path) -> dict[str, Any]:
-    """Load a pack's top-level artifacts into a name -> content dict (.json parsed, else text)."""
-    package: dict[str, Any] = {}
-    for path in sorted(pack_dir.iterdir()):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, ValueError):
-            continue
-        if path.suffix == ".json":
-            try:
-                package[path.name] = json.loads(text)
-                continue
-            except json.JSONDecodeError:
-                pass
-        package[path.name] = text
-    return package
+    """Load a pack into the name -> content dict the graph carries as ``design_package``.
+
+    One implementation for every caller (``app.services.pack_index.load_pack``): .json parsed,
+    everything else raw text, subfolders included, pipeline state files and binaries skipped."""
+    return load_pack(pack_dir)
 
 
 @app.get("/api/run/stream")
@@ -1027,6 +1716,83 @@ def run_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
+
+
+def _attach_events(project: str) -> Iterator[str]:
+    """Rejoin the run already in flight (or read back the one that just finished).
+
+    Read-only, and deliberately so: it never touches ``_run_lock`` and never starts a driver. That
+    separation is the point — re-opening ``/api/run/stream`` cannot work as a reconnect, because
+    that path's whole job is to START a run and the original driver still holds the lock.
+
+    Serves a ``snapshot`` frame first, so the client knows what it has joined and can reset its
+    board before replaying:
+
+    * ``status: "running"``  — every frame so far, then the live tail.
+    * ``status: "finished"`` — every frame so far, then the stream closes. This is what a browser
+      refresh after a completed run gets, and it is why the dashboard can be rebuilt from cold.
+    * ``status: "none"``     — nothing to resume for this project. ``current_project`` names what
+      the server actually holds, so the UI can say "a different run is in progress" rather than
+      spinning forever.
+
+    Replayed frames are the SAME serialized frames the original stream sent, so a client that
+    resets and replays lands in exactly the state it would have been in had it never dropped.
+    """
+    status, kind, frames, reader = _bus.attach(project)
+    yield _sse({
+        "type": "snapshot",
+        "status": status,
+        "kind": kind,
+        "project": _bus.project,
+        "requested_project": project,
+        "frames": len(frames),
+        "run_status": _last_run.get("status", "") if _last_run.get("project") == _bus.project else "",
+    })
+    for line in frames:
+        yield line
+    if reader is None:
+        return
+    try:
+        while True:
+            item = reader.get()
+            if item is _DONE:
+                break
+            yield item
+    finally:
+        _bus.unsubscribe(reader)
+
+
+@app.get("/api/run/attach")
+def run_attach(project: str = "") -> StreamingResponse:
+    """Reconnect to a run in progress, or read back the last one. See ``_attach_events``.
+
+    Serves BOTH lanes — the bus is lane-agnostic and reports which one it holds in its ``kind``,
+    since only one run can exist at a time process-wide.
+    """
+    return StreamingResponse(
+        _attach_events(project.strip()),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+@app.get("/api/run/current")
+def run_current() -> dict[str, Any]:
+    """What run, if any, this server is holding — a cheap poll for "is there anything to resume?".
+
+    The attach stream answers the same question, but a plain JSON probe is what the app wants on
+    boot before deciding whether to open an EventSource at all.
+    """
+    frames, active = _bus.snapshot_meta()
+    return {
+        "project": _bus.project,
+        "kind": _bus.kind,
+        "active": active,
+        "frames": frames,
+        "status": _last_run.get("status", "") if _last_run.get("project") == _bus.project else "",
+        "started_at": _last_run.get("started_at", "") if _last_run.get("project") == _bus.project else "",
+        "finished_at": _last_run.get("finished_at", "") if _last_run.get("project") == _bus.project else "",
+    }
 
 
 # ---------------------------------------------------------------- Output pages: real artifacts
@@ -1274,7 +2040,8 @@ _REPORT_DEFS: tuple[tuple[str, str, str, str, str], ...] = (
     ("code-review", "Code Review Report", "review_report_path", "review_report", "report.md"),
     ("refactoring", "Refactoring Report", "refactoring_report_path", "refactoring_report", "refactoring-report.md"),
     ("security", "Security Review Report", "security_report_path", "security_report", "security-report.md"),
-    ("debugging", "Debugging Report", "debug_report_path", "debug_report", "debug-report.md"),
+    ("debugging", "Debugging Report", "debugging_report_path", "debugging_report", "debugging-report.md"),
+    ("pack-preflight", "Pack Preflight Report", "pack_preflight_report_path", "pack_preflight_report", "pack-preflight.md"),
     ("unit-test", "Unit Test Generation Report", "unit_test_report_path", "unit_test_report", "unit-test-report.md"),
 )
 

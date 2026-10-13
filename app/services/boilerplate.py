@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -524,7 +525,79 @@ def resolve_scaffold_config(
     # Runs AFTER the roots are known: whether the harness needs the DOM stack depends on which
     # sides share a project root, which _normalize (root-blind by design) cannot decide.
     _add_jest_harness_deps(merged)
+    _apply_pack_environment(merged, package)
     return ScaffoldConfig(merged)
+
+
+#: Development-only credentials of the compose ``db`` service (never used outside docker compose).
+_COMPOSE_DB = {"user": "app", "password": "app", "name": "app"}
+
+
+def _apply_pack_environment(cfg: dict[str, Any], package: dict[str, Any]) -> None:
+    """What the pack itself says about the runtime, applied to the scaffold:
+
+    * ``.env.example`` lists every variable the pack declares (its env files), with their example
+      values and comments — not only the two the capability flags imply. Secrets stay blank.
+    * The database driver follows the pack's own DSN: ``postgresql+asyncpg://`` needs ``asyncpg``,
+      which the default ``psycopg`` scaffold never installed.
+    * Password hashing follows the conventions (bcrypt / argon2).
+    * ``docker compose`` gets a database URL in the same scheme, pointing at its ``db`` service.
+    """
+    from app.services.pack_index import index_for
+
+    index = index_for(package) if package else None
+    declared = index.env_vars() if index else []
+    env = cfg.setdefault("environment", {})
+    entries: list[dict[str, str]] = [{"key": str(v), "value": "", "comment": ""} for v in env.get("variables") or []]
+    by_key = {e["key"]: e for e in entries}
+    for var in declared:
+        value = "" if var.get("secret") else str(var.get("example") or "")
+        entry = by_key.get(var["key"])
+        if entry is None:
+            entry = {"key": var["key"], "value": "", "comment": ""}
+            entries.append(entry)
+            by_key[var["key"]] = entry
+        entry["value"] = value
+        entry["comment"] = str(var.get("comment") or "")
+    boot = None
+    if package:
+        from app.services.pack_preflight import bootstrap_plan
+
+        boot = bootstrap_plan(package)
+    if boot:
+        # The first-admin seed command (a work item the plan adds) reads these.
+        for key, value, comment in ((boot["email_var"], boot["email_example"], "email of the first administrator"),
+                                    (boot["password_var"], "", "password of the first administrator (set it before seeding)")):
+            if key not in by_key:
+                entries.append({"key": key, "value": value, "comment": comment})
+    cfg["_bootstrap"] = boot
+    env["entries"] = entries
+
+    dsn = next((str(v.get("example") or "") for v in declared
+                if re.search(r"(?:DATABASE|DB)_?(?:URL|URI)$", v["key"], re.IGNORECASE)), "")
+    scheme = dsn.split("://", 1)[0].lower() if "://" in dsn else ""
+    db = cfg.setdefault("database", {})
+    be = cfg.setdefault("backend", {})
+    python = be.get("language", "python") == "python"
+    postgres = _enabled(cfg, "database") and "postgres" in str(db.get("provider", "")).lower()
+    deps = be.setdefault("dependencies", {})
+    if python and postgres:
+        if "+asyncpg" in scheme:
+            deps.setdefault("asyncpg", ">=0.29,<1.0")
+        elif "+psycopg2" in scheme:
+            deps.setdefault("psycopg2-binary", ">=2.9,<3.0")
+        if not scheme.startswith("postgres"):
+            scheme = "postgresql+psycopg"      # what the default psycopg[binary] driver needs
+    db["url_scheme"] = scheme or ("postgres" if not python else "postgresql+psycopg")
+    db["compose"] = dict(_COMPOSE_DB)
+    db["compose_url"] = (f"{db['url_scheme']}://{_COMPOSE_DB['user']}:{_COMPOSE_DB['password']}@db:5432/"
+                         f"{_COMPOSE_DB['name']}")
+    conventions = index.conventions_text().lower() if index else ""
+    if python and _enabled(cfg, "authentication"):
+        if "argon2" in conventions:
+            deps.setdefault("argon2-cffi", ">=23.1,<26.0")
+        if "bcrypt" in conventions:
+            deps.setdefault("bcrypt", ">=4.0,<5.0")
 
 
 def render_scaffold(

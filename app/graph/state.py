@@ -11,7 +11,7 @@ Refactoring loop, capped by ``router.SECURITY_LOOP_CAP``). ``attempt`` is the OR
 number, echoed back unchanged (this service never increments it).
 """
 
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from app.models import WorkItem
 
@@ -30,6 +30,11 @@ class GateCheck(TypedDict):
     # "" when the check isn't directory-scoped. Lets the Debugging agent narrow which generated
     # files a fix prompt needs instead of every file in the whole run.
     scope: str
+    # The check failed for an environment reason the code cannot cause (Executor.CheckResult):
+    # it proved nothing, so routing treats it as "not verified", never as work for the Debugging
+    # agent. Absent on checks recorded before this existed — read with .get().
+    inconclusive: NotRequired[bool]
+    environment: NotRequired[str]
 
 
 class GateResult(TypedDict):
@@ -37,6 +42,9 @@ class GateResult(TypedDict):
 
     passed: bool                # overall: every check in `checks` passed
     checks: list[GateCheck]     # per-check breakdown
+    # Not passed, but every failing check was inconclusive (environment) — the run continues,
+    # marked unverified. Absent on results recorded before this existed.
+    inconclusive: NotRequired[bool]
 
 
 class WorkflowState(TypedDict, total=False):
@@ -50,6 +58,14 @@ class WorkflowState(TypedDict, total=False):
     # validation-rules.json, routes.json, tokens.json, mockup.html, SKILL.md, ...) keyed by
     # name. Values are the artifact content (str) or parsed structures. Schema = 27 inputs, TBD.
     design_package: dict[str, Any]
+    # Pack preflight (app/services/pack_preflight.py), computed by scaffold_node: the pack's
+    # contradictions and gaps (findings) and the canonical values chosen for them (facts — roles,
+    # enums, env names, error envelope, symbol owners ...), plus the Markdown report. Never set by
+    # new_state: an absent value means "no preflight ran" (brownfield never runs it).
+    pack_findings: list[dict[str, Any]]
+    pack_facts: dict[str, Any]
+    pack_preflight_report: str
+    pack_preflight_report_path: str
 
     # --- Brownfield input (an EXISTING codebase + a change request, instead of a design pack) ---
     # "greenfield" (default, and what an absent value means) builds a new app from design_package.
@@ -117,6 +133,10 @@ class WorkflowState(TypedDict, total=False):
     # TOTAL debugging rounds this run, regardless of progress — the absolute backstop against an
     # oscillating loop that keeps resetting debug_attempt forever (debugging.DEBUG_ROUNDS_CEILING).
     debug_rounds: int
+    # What each debugging round tried — ``{round, kind, before, after, progress, files, notes}`` —
+    # handed back to the next round so it does not repeat a change that did not help, and so a
+    # file edited round after round without the count dropping is called out.
+    debug_history: list[dict[str, Any]]
     debug_result: GateResult | None        # most recent compile+build check outcome (Debugging phase fixed check)
     # Debugging: the accumulated Markdown report (one section per attempt) + where it was saved
     # (reports/…). Rewritten to disk on every attempt so a DEBUG_CAP escalation still leaves a
@@ -129,6 +149,40 @@ class WorkflowState(TypedDict, total=False):
     unit_test_report_path: str     # Unit Test Generation: where the report .md was saved (reports/…)
     generation_summary: str               # human-readable free-text summary of the run
     generation_metrics: dict[str, Any]    # run-level metrics (generation-metrics.json shape)
+
+    # --- Conversational code generation (chat-driven plan patching) ---
+    # Master switch, copied from settings at run start. Falsy (the default, and what an absent value
+    # means) makes chat_intake_node a pure pass-through, so a run is byte-identical to one from
+    # before this feature existed.
+    chat_enabled: bool
+    # Consumed high-water mark: the highest chat_inbox seq this run has drained. MUST advance even
+    # when a turn is refused or errors, or a message nobody can act on would be re-proposed by every
+    # later turn and every later run.
+    chat_seq: int
+    # Messages drained this turn — the input to ChatPlannerAgent, written by chat_intake_node
+    # immediately before it and cleared after. Plain dicts (see chat_log below).
+    chat_pending: list[dict[str, Any]]
+    # The planner's proposed PlanPatch, model_dump()'d. A dict rather than the pydantic model
+    # because _build_checkpointer allow-lists WorkItem alone for msgpack — any other pydantic type
+    # silently deserialises to a bare dict after a checkpoint round-trip, so it is stored as one.
+    chat_patch: dict[str, Any]
+    chat_planner_notes: str          # the planner's rationale, or its refusal reason, for the report
+    chat_log: list[dict[str, Any]]   # one row per applied turn: {seq, text, report}
+    # Applied turns this run, capped by router.CHAT_TURN_CAP. A LOCAL counter in the same family as
+    # repair_attempt/debug_attempt — it is NOT the orchestrator's `attempt` and never touches it.
+    chat_turns: int
+    # What each work item ACTUALLY wrote: [{work_item_id, feature_id, requirement_ids, files,
+    # action}]. Written by code_generator on success; read by plan_patch to decide whether a
+    # "modify" request can retarget a pending item or needs a new item over real files. Observed
+    # files, deliberately not the pack's predicted target_files — see requirement_ledger's docstring.
+    requirement_ledger: list[dict[str, Any]]
+    # Digests of the current item's target_files, taken by select_work_item_node when it selects an
+    # action="modify" item and read by gate_node to prove the targets actually moved. files_complete
+    # cannot answer that: the files already exist, so it passes on a no-op edit.
+    pre_item_digests: dict[str, str]
+    # Files left behind by a conversational "remove". Reported, never deleted — there is no
+    # Executor.delete_file, and per-feature commits may already be pushed.
+    orphan_files: list[str]
 
     # --- Git push (opt-in; mandatory workflow rules 4 & 8) ---
     # When push_enabled AND git_remote are set, the commit step pushes 'main' after the scaffold
@@ -177,6 +231,17 @@ class WorkflowState(TypedDict, total=False):
     # the Debugging agent's prompt so it starts from the full list instead of rediscovering them one
     # build error at a time.
     unresolved_imports: list[dict[str, Any]]
+    # Cross-file disagreements the reconcile pass can report but not settle without picking a side
+    # (app/services/wiring.py::find_integration_issues): routes not under the pack's API base path,
+    # a frontend calling a base path the backend does not serve, a router nothing mounts, a
+    # define-once helper defined twice, an async engine behind sync sessions. ``{kind, detail,
+    # files}`` dicts, for the run summary and the Debugging agent.
+    integration_findings: list[dict[str, Any]]
+    # Checks that could not run to a verdict because of the ENVIRONMENT (a wheel needing a missing
+    # compiler, an unreachable registry, no database, an executor that cannot start a server):
+    # ``{check, reason}``, latest per check. The run carried on; this is what its report, README
+    # and pull request must say was NOT verified.
+    unverified_checks: list[dict[str, Any]]
     unit_tests: list[str]                  # workspace-relative paths of test files written
     unit_test_report: str        # Unit Test: the Markdown report content (per-work-item coverage)
     unit_test_report_path: str   # Unit Test: where the report .md was saved (reports/…)
@@ -215,6 +280,7 @@ def new_state(
     source_repo_url: str = "",
     change_request: dict[str, Any] | None = None,
     base_ref: str = "",
+    chat_enabled: bool = False,
 ) -> WorkflowState:
     """Build the initial state for a run.
 
@@ -225,6 +291,10 @@ def new_state(
     locally but pushes nothing. Set ``push_enabled=True`` + ``git_remote`` (and optionally
     ``git_token``) to push ``main`` after the scaffold, ``dev`` after each feature, and ``dev``
     once more after Refactoring when it edited files (that last push is non-fatal on failure).
+
+    Chat is OFF by default (``chat_enabled=False``): every conversational node is a pass-through, so
+    every existing caller is byte-identical to before the feature existed. Set it to ``True`` (the
+    scripts read ``settings.chat_enabled``) to let ``chat_intake`` drain the inbox between work items.
 
     Fails fast on a malformed ``work_items`` (must be a list) rather than crashing deep in the
     graph loop.
@@ -253,6 +323,7 @@ def new_state(
         "debug_last_failure_count": -1,  # -1 = nothing measured yet (0 is a legitimate count)
         "debug_last_failure_kind": "",
         "debug_rounds": 0,
+        "debug_history": [],
         "debug_result": None,
         "generation_summary": "",
         "generation_metrics": {},
@@ -260,5 +331,17 @@ def new_state(
         "git_remote": git_remote,
         "git_token": git_token,
         "security_loop_attempt": 0,
+        # Conversational code generation. Defaulted so a caller that knows nothing about chat gets
+        # exactly today's behaviour: chat_intake sees chat_enabled False and passes straight through.
+        "chat_enabled": chat_enabled,
+        "chat_seq": 0,
+        "chat_pending": [],
+        "chat_patch": {},
+        "chat_planner_notes": "",
+        "chat_log": [],
+        "chat_turns": 0,
+        "requirement_ledger": [],
+        "pre_item_digests": {},
+        "orphan_files": [],
         "workflow_status": "pending",
     }
