@@ -611,6 +611,8 @@ class UnresolvedImport:
 
     def as_note(self) -> str:
         """One-line, human-readable form for a ``generation_summary`` note or a log line."""
+        if self.name == "default":
+            return f"{self.importer} default-imports '{self.specifier}' -> {self.target} has no default export (use a named import)"
         if self.name:
             hint = f" (defined in {', '.join(self.candidates)})" if self.candidates else ""
             return f"{self.importer} imports '{self.name}' from '{self.specifier}' -> {self.target} does not define it{hint}"
@@ -661,6 +663,14 @@ def find_unresolved_imports(files: dict[str, str]) -> list[UnresolvedImport]:
 
     manifests = _manifests(files)
     found: dict[tuple[str, str], UnresolvedImport] = {}
+    content_of = {_norm(p): c for p, c in files.items()}
+    exporters: dict[str, list[str]] = {}      # exported name -> files that define it (for the hint)
+    from app.services.export_map import js_exported_names
+
+    for p, c in content_of.items():
+        if _is_js_source(p) and not _is_test(p):
+            for n in js_exported_names(c)[0]:
+                exporters.setdefault(n, []).append(p)
     for path, content in sorted(files.items()):
         if not _is_js_source(path):
             continue
@@ -678,7 +688,9 @@ def find_unresolved_imports(files: dict[str, str]) -> list[UnresolvedImport]:
                 continue
             if target.startswith("..") or target in (".", ""):
                 continue                                # outside the known tree — can't judge it
-            if _resolve_module(target, all_paths):
+            resolved = _resolve_module(target, all_paths)
+            if resolved:
+                _check_js_names(path, spec, content, resolved, content_of, exporters, found)
                 continue
             found[(path, spec)] = UnresolvedImport(
                 importer=path,
@@ -690,6 +702,63 @@ def find_unresolved_imports(files: dict[str, str]) -> list[UnresolvedImport]:
     from app.services.python_wiring import find_unresolved_python_imports
 
     return js + find_unresolved_python_imports(files)
+
+
+def _check_js_names(
+    importer: str, spec: str, content: str, resolved: str, content_of: dict[str, str],
+    exporters: dict[str, list[str]], found: dict[tuple[str, str], "UnresolvedImport"],
+) -> None:
+    """Record the names ``importer`` imports from ``spec`` that the resolved module does not export
+    (a NAMED import of a name it lacks, a DEFAULT import of a module with no default). The
+    bundler reports the first and stops; this hands the Debugging agent the whole list up front.
+    Silent when the target's namespace is unknowable (``export *``, CommonJS) or it is not code."""
+    from app.services.export_map import js_exported_names, js_imports
+
+    if not _is_js_source(resolved):
+        return
+    target_text = content_of.get(resolved)
+    if target_text is None:
+        return
+    named, has_default, unknown = js_exported_names(target_text)
+    if unknown:
+        return
+    for src, names, default in js_imports(content):
+        if src != spec:
+            continue
+        missing = [n for n in names if n not in named]
+        if default and not has_default:
+            missing.append("default")
+        for name in missing:
+            hint = tuple(sorted(p for p in exporters.get(name, []) if p not in (resolved, _norm(importer)))[:5])
+            if name == "default" and named:
+                hint = ()
+            found[(importer, f"{spec}\0{name}")] = UnresolvedImport(
+                importer=importer, specifier=spec, target=resolved, candidates=hint, name=name)
+
+
+def reconcile_missing_styles(files: dict[str, str]) -> dict[str, str]:
+    """Create the stylesheet a file imports by relative path when nobody generated it.
+
+    A page importing ``./Page.module.css`` that does not exist fails the bundler outright - 17 of
+    them did in a real run, one debugging round each. The file is created with a comment saying it
+    is a placeholder: the build passes, the app renders unstyled rather than not at all, and the
+    gap is visible in the diff. Only ``.css``/``.scss``/``.sass``/``.less`` next to the importer or
+    under it; never overwrites; idempotent."""
+    all_paths = {_norm(p) for p in files}
+    created: dict[str, str] = {}
+    for path, content in sorted(files.items()):
+        if not _is_js_source(path):
+            continue
+        from_dir = posixpath.dirname(_norm(path))
+        for spec in _imported_specifiers(content):
+            if not (spec.startswith("./") or spec.startswith("../")) or not re.search(r"\.(?:css|scss|sass|less)$", spec):
+                continue
+            target = _norm(posixpath.join(from_dir, spec))
+            if target.startswith("..") or target in all_paths or target in created:
+                continue
+            created[target] = (f"/* Placeholder: imported by {posixpath.basename(path)} but never generated by the design's "
+                               "file list. Add its styles here. */\n")
+    return created
 
 
 def _at_alias_root(files: dict[str, str], path: str, manifests: dict[str, tuple[str, dict]]) -> str | None:
@@ -758,6 +827,7 @@ def reconcile_wiring(files: dict[str, str]) -> dict[str, str]:
     changed.update(reconcile_python_import_roots({**files, **changed}))
     changed.update(reconcile_fastapi_routers({**files, **changed}))
     changed.update(reconcile_python_requirements({**files, **changed})[0])
+    changed.update(reconcile_missing_styles({**files, **changed}))
     return changed
 
 

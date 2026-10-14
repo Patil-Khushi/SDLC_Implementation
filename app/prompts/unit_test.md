@@ -28,6 +28,15 @@ mocks inside it; never write conftest.py or shared helpers. For HTTP code, drive
 framework's test client and replace its dependencies with the framework's own override mechanism
 (`app.dependency_overrides` for FastAPI) — never reach a real database or network.
 
+## How many tests: few, and relevant
+
+A dedicated testing phase follows this one, so yours is a SMOKE layer over behaviour, not a test
+suite. Write at most the number of test functions you are told, most important first: the main
+behaviours the requirements and validation rules describe, then the single most important failure or
+permission case. No exhaustive edge-case sweeps, no parametrised grids, no tests of the framework
+(declarative models, schemas, settings), of trivial getters or of constants. Anything past the limit
+is deleted automatically, so spend the budget on what matters.
+
 ## What to build
 
 - You will be told which test runner this project actually uses (read from its package.json, or

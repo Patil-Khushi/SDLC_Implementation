@@ -43,6 +43,18 @@ The context is ordered by authority. When two parts disagree, the earlier one wi
    contradict 1–4.
 6. **Mockup**, screen states and design tokens — layout, copy and look.
 
+## Imports must resolve (the most common cause of a broken build)
+
+- Import project code ONLY from files in the MODULE MAP, and ONLY the names the "What the files
+  already generated EXPORT" section lists for them, exactly as written: a `named` export is imported
+  with braces, a `default` export without. Never assume a helper, type, hook or constant exists
+  because such a file "usually" has it - if it is not listed, define it locally or do without.
+- This includes styling and assets: import a `.css`/`.module.css`/image ONLY if it is in the module
+  map or the available-assets list. Do NOT create or import per-component CSS modules; style with the
+  design tokens and the shared style files that are listed.
+- A file generated LATER than this one may be imported by the name the module map gives it, but only
+  for what its own spec says it provides.
+
 ## Rules
 
 - Copy validation messages **VERBATIM** from the validation rules — never paraphrase, reword, or

@@ -142,13 +142,13 @@ def test_target_resolves_understands_python_modules_packages_and_namespaces():
 
 def test_at_alias_imports_are_resolved_against_the_source_root():
     files = {"frontend/package.json": "{}", "frontend/src/main.tsx": "import x from '@/store/authStore'\nimport y from '@/api/client'\n",
-             "frontend/src/api/client.ts": ""}
+             "frontend/src/api/client.ts": "export default 1\n"}
     assert [u.target for u in find_unresolved_imports(files)] == ["frontend/src/store/authStore"]
 
 
 def test_at_alias_follows_tsconfig_paths():
     files = {"web/package.json": "{}", "web/tsconfig.json": '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["app/*"]}}}',
-             "web/app/x.ts": "import y from '@/y'\n", "web/app/y.ts": ""}
+             "web/app/x.ts": "import y from '@/y'\n", "web/app/y.ts": "export default 1\n"}
     assert find_unresolved_imports(files) == []
 
 

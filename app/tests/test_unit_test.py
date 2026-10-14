@@ -154,10 +154,10 @@ JEST_BACKEND_TEST_JSON = json.dumps(
     {"files": [{"path": "backend/src/routes/login.test.js", "content": "test('login', () => {});\n"}], "notes": ""}
 )
 
-VITEST_FRONTEND_ITEM = WorkItem(id="WI-011", target_files=["frontend/src/components/Button.tsx"])
+VITEST_FRONTEND_ITEM = WorkItem(id="WI-011", target_files=["frontend/src/utils/format.ts"])
 VITEST_FRONTEND_SOURCE = "export function Button() { return null; }\n"
 VITEST_FRONTEND_TEST_JSON = json.dumps(
-    {"files": [{"path": "frontend/src/components/Button.test.tsx", "content": "test('renders', () => {});\n"}], "notes": ""}
+    {"files": [{"path": "frontend/src/utils/format.test.ts", "content": "test('renders', () => {});\n"}], "notes": ""}
 )
 
 
@@ -180,7 +180,7 @@ def test_runner_fact_uses_jest_when_backend_package_json_declares_it() -> None:
 def test_runner_fact_uses_vitest_when_frontend_package_json_declares_it() -> None:
     executor = FakeExecutor(
         files={
-            "p1/frontend/src/components/Button.tsx": VITEST_FRONTEND_SOURCE,
+            "p1/frontend/src/utils/format.ts": VITEST_FRONTEND_SOURCE,
             "p1/frontend/package.json": json.dumps({"devDependencies": {"vitest": "^2.1.0"}}),
         }
     )
@@ -253,15 +253,15 @@ def test_python_item_uses_pytest_without_needing_a_package_json() -> None:
 def test_runner_fact_falls_back_to_project_root_package_json_with_no_backend_frontend_prefix() -> None:
     # A combined/legacy-shaped project has no backend/ or frontend/ wrapper - the manifest lives
     # at the project root instead.
-    item = WorkItem(id="WI-012", target_files=["src/server.js"])
+    item = WorkItem(id="WI-012", target_files=["src/lib/greet.js"])
     executor = FakeExecutor(
         files={
-            "p1/src/server.js": "module.exports = {};\n",
+            "p1/src/lib/greet.js": "module.exports = { greet() { return 1; } };\n",
             "p1/package.json": json.dumps({"devDependencies": {"jest": "^29.7.0"}}),
         }
     )
     llm = FakeLLMGateway(
-        [json.dumps({"files": [{"path": "src/server.test.js", "content": "test('x', () => {});\n"}], "notes": ""})]
+        [json.dumps({"files": [{"path": "src/lib/greet.test.js", "content": "test('x', () => {});\n"}], "notes": ""})]
     )
     agent = UnitTestAgent(executor=executor, llm=llm)
 
