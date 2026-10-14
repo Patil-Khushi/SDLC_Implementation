@@ -124,11 +124,98 @@ def _testable(path: str, content: str) -> bool:
         return False
     if _is_test_file(path) or any(p.lower() in _UNTESTED_DIRS for p in parts[:-1]):
         return False
+    if unit_test_cap(path) == 0:
+        return False
     if base.endswith(".py"):
         return bool(re.search(r"^\s*(?:async\s+)?def\s|^\s*class\s", content, re.MULTILINE))
     if re.search(r"\bcreateRoot\(|ReactDOM\.render\(", content) and not re.search(r"export\s", content):
         return False
     return bool(_RUNTIME_JS_RE.search(content))
+
+
+#: Test functions asked for per source file, by what the file IS. A dedicated Testing phase follows
+#: this one, so these are a smoke layer over BEHAVIOUR: the routes, services and logic the
+#: requirements describe. 0 = not worth a unit test here at all. In a real Fleet run, 39 files
+#: carried 1,325 test functions (25-60 each) - a third of them testing declarative models, pydantic
+#: schemas and settings, i.e. the framework - and the stage took longer than code generation.
+_SKIP_STEMS = {"config", "settings", "configuration", "constants", "database", "db", "session", "base", "types",
+               "schema", "schemas", "models", "model", "enums", "exceptions", "errors"}
+_SKIP_DIRS = {"models", "schemas", "dto", "dtos", "types", "typings", "entities", "components", "pages", "views",
+              "screens", "context", "contexts", "layouts", "layout", "styles", "assets",
+              "constants", "config"}
+_CAP_RULES: tuple[tuple[re.Pattern[str], int], ...] = (
+    (re.compile(r"(?:^|/)(?:router|routers|routes|controller|controllers|api)(?:\.py|/)|\.routes?\.|\.controller\."), 8),
+    (re.compile(r"(?:^|/)(?:service|services)(?:\.py|/)|(?:^|/)\w*_service\.py|\.service\."), 8),
+    (re.compile(r"repositor|(?:^|/)dao"), 4),
+    (re.compile(r"middleware|dependencies|security|auth|rbac|guard"), 6),
+)
+_DEFAULT_CAP = 6
+
+
+def unit_test_cap(path: str) -> int:
+    """How many test functions a source file is worth (see ``_CAP_RULES``); ``0`` = none. Declarative
+    code (models, schemas, settings, types, UI components and pages, router tables) tests the
+    framework, not the project."""
+    norm = path.replace("\\", "/").lower()
+    parts = norm.split("/")
+    stem = parts[-1].rsplit(".", 1)[0]
+    if stem in ("__init__", "index", "main", "app", "server", "vite-env") or stem in _SKIP_STEMS:
+        return 0
+    if any(p in _SKIP_DIRS for p in parts[:-1]) and not re.search(r"(?:router|service|repositor)", stem):
+        return 0
+    if parts[-1].endswith((".tsx", ".jsx")):                 # a component or page: UI, not logic
+        return 0
+    if parts[0] == "frontend":
+        # Hooks and API services are thin wrappers over fetch/state; the testing phase covers the UI
+        # end to end. Only PURE logic (formatters, validators, date/odometer maths) earns a unit test.
+        return 5 if any(p in ("utils", "lib", "helpers") for p in parts[:-1]) else 0
+    for pattern, cap in _CAP_RULES:
+        if pattern.search(norm):
+            return cap
+    return _DEFAULT_CAP
+
+
+def trim_python_tests(content: str, cap: int) -> str:
+    """The first ``cap`` test functions of a Python test module, the rest removed (the prompt asks
+    for the important ones first). Module-level ``test_*`` functions and methods of ``Test*``
+    classes both count; fixtures, helpers and imports are kept, and a class left with no members is
+    dropped. Unparseable content is returned unchanged - a trim must never corrupt a file."""
+    import ast
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+    tests: list[tuple[ast.AST, ast.AST | None]] = []          # (function node, owning class node)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+            tests.append((node, None))
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            tests += [(m, node) for m in node.body
+                      if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name.startswith("test")]
+    if len(tests) <= cap:
+        return content
+    doomed = tests[cap:]
+
+    def span(n: Any) -> tuple[int, int]:
+        start = min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])])
+        return start, n.end_lineno
+
+    ranges = {span(n) for n, _c in doomed}
+    for cls in {c for _n, c in doomed if c is not None}:
+        members = [m for m in cls.body if span(m) not in ranges and not isinstance(m, ast.Expr)]
+        if not members:                                      # nothing left in the class: drop it whole
+            ranges.add(span(cls))
+            ranges -= {span(m) for m in cls.body}
+    lines = content.split("\n")
+    for start, end in sorted(ranges, reverse=True):
+        del lines[start - 1:end]
+    out = re.sub(r"\n{4,}", "\n\n\n", "\n".join(lines))
+    try:
+        ast.parse(out)
+    except SyntaxError:
+        return content
+    return out.rstrip("\n") + "\n"
 
 
 def _suggested_test_path(path: str, python_paths: list[str]) -> str:
@@ -356,7 +443,8 @@ class UnitTestAgent(BaseAgent):
         so a module with many files cannot truncate the reply at the output cap (the failure the
         code generator's per-file path exists for). The reply's own path is kept when it names a
         test file; otherwise the suggested one is used."""
-        prompt = self._file_prompt(source, test_path)
+        cap = unit_test_cap(source) or _DEFAULT_CAP
+        prompt = self._file_prompt(source, test_path, cap)
         parsed, error = self._parse(complete_cached(self.llm, prompt, cache_prefix=prefix, system=system))
         if parsed is None:
             retry = (
@@ -370,13 +458,20 @@ class UnitTestAgent(BaseAgent):
         tests = [f for f in parsed if _is_test_file(f["path"])]
         if not tests:
             tests = [{"path": test_path, "content": parsed[0]["content"]}]
-        return tests
+        # The prompt asks for at most ``cap`` tests, the important ones first; the cap is ENFORCED
+        # here because a model asked for "a few" tests routinely writes forty.
+        return [{**f, "content": trim_python_tests(f["content"], cap) if f["path"].endswith(".py") else f["content"]}
+                for f in tests]
 
     @staticmethod
-    def _file_prompt(source: str, test_path: str) -> str:
+    def _file_prompt(source: str, test_path: str, cap: int = _DEFAULT_CAP) -> str:
         return (
             f"Source file(s) to test: {source}  (its content is among this work item's sources above)\n"
             f"Write the test file for THIS source file only, at: {test_path}\n"
+            f"Write AT MOST {cap} focused test functions, most important first: the main behaviours the "
+            "requirements and validation rules describe, then the single most important failure or "
+            "permission case. A separate testing phase follows this one - no exhaustive edge-case sweeps, "
+            "no parametrised grids, no tests of the framework, of trivial getters or of constants.\n"
             'Respond with STRICT JSON only, containing exactly one file: '
             '{"files":[{"path":...,"content":...}],"notes":...}'
         )

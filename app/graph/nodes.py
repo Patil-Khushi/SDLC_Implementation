@@ -1585,8 +1585,12 @@ def reconcile_node(state: WorkflowState) -> WorkflowState:
         return state
 
     _stage("Reconcile (wiring)", "connecting generated modules (mounting routers) before commit")
+    generated = list(state.get("generated_code", []))
     for rel, content in changed.items():
         executor.write_file(prefix + rel, content)
+        if prefix + rel not in generated:       # a file reconcile CREATED (a placeholder stylesheet)
+            generated.append(prefix + rel)
+    state["generated_code"] = generated
     names = ", ".join(sorted(changed))
     logger.info("[reconcile] run=%s | wired %d file(s): %s", state.get("run_id") or "-", len(changed), names)
     state["generation_summary"] = (state.get("generation_summary") or "") + (

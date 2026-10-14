@@ -32,6 +32,7 @@ from app.integrations.executor import Executor, get_executor
 from app.models import GenerationSummary, WorkItem
 from app.services import pack_context as pc
 from app.services import requirement_ledger
+from app.services.export_map import extract_exports, render_exports
 from app.services.llm_gateway import LLMGateway, full_prompt
 from app.services.naming_contract import build_module_map, build_naming_contract_from_package
 from app.services.pack_index import index_for
@@ -51,6 +52,7 @@ MODIFY_MAX_ITERS_CEILING = 60
 #: Cap on how many already-generated paths are listed in a single item's context (keeps the prompt
 #: bounded on large plans; the list is a discovery aid, not an exhaustive manifest).
 _MANIFEST_CAP = 200
+_EXPORT_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
 #: Char budget for the bodies of an item's already-produced files that get fed into each subsequent
 #: per-file prompt (their paths are always listed; only the bodies are capped) — keeps the prompt
@@ -96,7 +98,11 @@ class CodeGeneratorAgent(BaseAgent):
 
         design_package = state.get("design_package") or {}
         produced = self._already_generated(state)
-        ctx = self._build_context(work_item, design_package, produced, work_items=state.get("work_items"))
+        executor = self._resolve_executor()
+        ctx = self._build_context(
+            work_item, design_package, produced, work_items=state.get("work_items"),
+            exports=self._exports_text(state, executor, produced, work_item),
+        )
         sections_used = ctx.sections
         self._append_plan(state, work_item, sections_used)
 
@@ -566,6 +572,38 @@ class CodeGeneratorAgent(BaseAgent):
 
     # -- context assembly (tight slices only, not whole files) ----------------
 
+    def _exports_text(
+        self, state: WorkflowState, executor: Executor, produced: list[str], work_item: WorkItem
+    ) -> str:
+        """The exports of every file generated so far on THIS item's side (see
+        :mod:`app.services.export_map`) - read back from disk once per file and re-read only when
+        its size changed (a repair or an earlier item rewrote it). Best-effort: unreadable files
+        just contribute nothing, and any failure here leaves the old path-only manifest in place."""
+        side = _side_of(work_item)
+        cache: dict[str, tuple[int, list[str]]] = self.__dict__.setdefault("_export_cache", {})
+        project_dir = _project_dir(state)
+        files: dict[str, list[str]] = {}
+        try:
+            for rel in produced:
+                if side and not rel.startswith(side + "/"):
+                    continue
+                if not rel.lower().endswith(_EXPORT_SUFFIXES):
+                    continue
+                try:
+                    text = executor.read_file(_project_path(project_dir, rel))
+                except Exception:  # noqa: BLE001 - unreadable just means no exports shown
+                    continue
+                key = f"{project_dir}/{rel}"
+                hit = cache.get(key)
+                if hit is None or hit[0] != len(text):
+                    hit = (len(text), extract_exports(rel, text))
+                    cache[key] = hit
+                files[rel] = hit[1]
+            return render_exports(files, side=side)
+        except Exception:  # noqa: BLE001
+            logger.exception("[code_generator] could not build the exports map")
+            return ""
+
     def _already_generated(self, state: WorkflowState) -> list[str]:
         """Project-relative paths already written this run (scaffold + prior work items).
 
@@ -605,6 +643,7 @@ class CodeGeneratorAgent(BaseAgent):
         produced: list[str] | None = None,
         *,
         work_items: list[WorkItem] | None = None,
+        exports: str = "",
     ) -> _Context:
         """Everything this item's generation is grounded in, read from the pack BY SHAPE
         (:mod:`app.services.pack_context`), in three tiers that double as prompt-cache segments:
@@ -676,9 +715,12 @@ class CodeGeneratorAgent(BaseAgent):
                 "invent new module names for something already produced here\n" + listing,
             ))
 
+        if exports:
+            ctx.item.append(("Exports", exports))
+
         requirements = pc.requirements_section(index, work_item.requirement_ids)
         if requirements:
-            ctx.item.append(("Requirements", "## Requirements this work item implements\n" + requirements))
+            ctx.item.append(("Requirements","## Requirements this work item implements\n" + requirements))
 
         ops = pc.operations_for(index, work_item.endpoints)
         if ops:
