@@ -120,7 +120,13 @@ class CodeModifierAgent(BaseAgent):
                 changed.append(path)
         state["generated_code"] = generated
         state["changed_files"] = changed
-        state["modifier_notes"] = (notes or "").strip()
+        # ACCUMULATE, do not overwrite: a plan has several work items and each one's account of what
+        # it did is the only human-readable record of that edit. Overwriting left the report and the
+        # pull-request body describing the LAST item only, silently dropping the rest.
+        if account := (notes or "").strip():
+            previous = (state.get("modifier_notes") or "").strip()
+            entry = f"**{item.id}** — {account}"
+            state["modifier_notes"] = f"{previous}\n\n{entry}".strip() if previous else entry
 
         # codegen_ok drives route_after_modify. False when the model wrote nothing: the change gate
         # would fail it anyway, but failing here says WHY (the model declined) instead of leaving
