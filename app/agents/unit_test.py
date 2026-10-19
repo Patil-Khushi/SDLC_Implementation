@@ -165,7 +165,7 @@ def unit_test_cap(path: str) -> int:
         return 0
     if parts[-1].endswith((".tsx", ".jsx")):                 # a component or page: UI, not logic
         return 0
-    if parts[0] == "frontend":
+    if "frontend" in parts[:2]:      # "frontend/..." or, with the project dir in front, "<project>/frontend/..."
         # Hooks and API services are thin wrappers over fetch/state; the testing phase covers the UI
         # end to end. Only PURE logic (formatters, validators, date/odometer maths) earns a unit test.
         return 5 if any(p in ("utils", "lib", "helpers") for p in parts[:-1]) else 0

@@ -338,6 +338,10 @@ def _normalize(cfg: dict[str, Any], project_id: str) -> dict[str, Any]:
     dev.setdefault(bundler, "^5.4.0")
     if testing_on:
         dev.setdefault("vitest", "^2.1.0")
+        # The vite.config the frontend generates sets `environment: 'jsdom'`; vitest does not bundle
+        # it, so without this every test run died on "Cannot find package 'jsdom'" until the
+        # debugging agent installed it by hand.
+        dev.setdefault("jsdom", "^25.0.1")
     fe["devDependencies"] = dev
     if not fe.get("scripts"):
         scripts = {"dev": bundler, "build": f"tsc && {bundler} build"}

@@ -30,6 +30,13 @@ version) - it refuses git write commands, but that is NOT a general license to r
 NOT commit, and you must NOT re-run the failing check yourself - the fixed pipeline re-runs it after
 you.
 
+## Act, don't narrate
+
+Your output budget is limited and a reply that is cut off does nothing. Do not write out a long
+analysis of the failures: read what you need, then call `edit_file` right away, one small exact
+replacement at a time. Use `write_file` only for a NEW file or a small one - never to rewrite a large
+file you could patch.
+
 ## How to apply a fix
 
 - Use `edit_file` (path, old, new) for a targeted change: `old` must match exactly ONE place in the
