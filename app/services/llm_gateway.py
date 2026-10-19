@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 #: Prompt-cache breakpoints a single call may set (the API allows 4; one is left for callers
 #: that also cache a system prompt or tools).
 _MAX_CACHE_BREAKPOINTS = 3
+#: How many times one tool session may be told its reply was cut off at max_tokens before it is
+#: returned as it is (two nudges: a third cut-off means the task, not the reply, is too big).
+_MAX_CUTOFF_NUDGES = 2
 
 
 def _prefix_segments(cache_prefix: str | list[str] | None) -> list[str]:
@@ -319,6 +322,7 @@ class LLMGateway:
 		first: Any = _cached_user_content(prompt, cache_prefix) if use_cache else full_prompt(prompt, cache_prefix)
 		messages: list = [{"role": "user", "content": first}]
 		rolling: dict | None = None          # the tool_result block carrying the rolling breakpoint
+		cutoffs = 0                          # turns cut off at max_tokens that were nudged, not returned
 		final_text = ""
 
 		def _create(call_kwargs: dict) -> Any:
@@ -358,6 +362,26 @@ class LLMGateway:
 				turn, max_iters, response.usage.input_tokens, response.usage.output_tokens,
 				response.stop_reason, [tu.name for tu in tool_uses] or "(none)",
 			)
+			cut_off = getattr(response, "stop_reason", None) == "max_tokens"
+			if cut_off and cutoffs < _MAX_CUTOFF_NUDGES:
+				# The reply hit the output cap. Returning it ends the session with nothing done (four
+				# debugging rounds in a row did exactly that: a long analysis, cut off, zero edits), and
+				# running a tool call whose input was cut mid-way would apply half a file. Say what
+				# happened and ask for small, immediate edits instead.
+				cutoffs += 1
+				logger.warning("tool_loop turn=%d reply cut off at max_tokens (%d tool call(s)); nudging", turn, len(tool_uses))
+				messages.append({"role": "assistant", "content": response.content})
+				note = ("Your last reply was CUT OFF at the output limit, so it was not completed. Do not repeat the "
+						"analysis. Apply the fix NOW with small tool calls: `edit_file` with a short exact snippet, "
+						"one file at a time. Never rewrite a whole large file with write_file.")
+				if tool_uses:
+					results = [{"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
+								"content": "Not run: your reply was cut off before this call was complete. " + note}
+							   for tu in tool_uses]
+					messages.append({"role": "user", "content": results})
+				else:
+					messages.append({"role": "user", "content": note})
+				continue
 			if not tool_uses:
 				return final_text
 			messages.append({"role": "assistant", "content": response.content})
